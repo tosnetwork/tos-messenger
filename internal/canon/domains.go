@@ -15,6 +15,8 @@ const (
 	DomainEndpointDelegation = "tos.messaging.endpoint-delegation.v1\x00"
 	// DomainEndpointID namespaces the endpoint identifier derivation.
 	DomainEndpointID = "tos.messaging.endpoint-id.v1\x00"
+	// DomainMandate namespaces a standing authorisation the owner placed.
+	DomainMandate = "tos.messaging.mandate.v1\x00"
 	// DomainAgentAction namespaces the content-addressed identifier of an
 	// action an Agent proposes to take.
 	DomainAgentAction = "tos.messaging.agent-action.v1\x00"

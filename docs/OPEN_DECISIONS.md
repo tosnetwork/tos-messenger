@@ -78,6 +78,8 @@ than silently forking two implementations.
 | Foreign protocols | a2a and mcp bodies are typed only as a wrapper naming protocol and version; the body stays opaque and untrusted | `payload.Foreign` |
 | Unattended ceilings | two ceilings, one for the Agent's own initiative and a tighter one for anything received content drove; no policy may raise either to a key or to this installation's configuration | `firewall.Policy.Validate` |
 | Approval identity | derived from the effect, the description, and every origin cited, so an approval cannot be spent on a different action, and it is spent once | `firewall.ActionID`, `eventlog.SpendApproval` |
+| Mandate custody | mandates are placed and withdrawn on the owner's socket only, stored under a content-addressed identifier, and resolved from the store when a spend is judged; a runtime names one and never supplies one | `eventlog.PlaceMandate`, `localapi.Server.spendMandate` |
+| Withdrawal | a withdrawn mandate is kept rather than deleted, and re-placing the same terms finds the withdrawn record rather than reopening it | `eventlog.RevokeMandate` |
 | Channel separation | instructions and received content are different types with no conversion, and quotations are framed by a delimiter derived from their own content | `firewall.Instruction`, `firewall.Quotation` |
 | Account binding | the account a finalized Agent record came from is recomputed from the network, object identifier, registry code and workchain, and compared; a chain policy without a locator cannot validate | `identity.ChainPolicy.Locator`, `tosaddr.Locator` |
 | Addressing rules | called through the protocol SDK rather than reimplemented, because a second implementation of an addressing rule can drift and a drifted check refuses correct state | `tosaddr` |
@@ -106,13 +108,6 @@ than silently forking two implementations.
 | Coordinator limits | 5 minute pairing TTL, 4096 pairings, 600 requests per source address per minute | `probe.CoordinatorOptions` defaults |
 
 ## Named but not established
-
-A spend is never pre-authorised over the local socket, because the mandate that
-would authorise it is the owner's and there is nowhere for the owner to put
-one yet. `firewall.EvaluateSpend` composes a mandate with the ceilings and is
-exercised in tests, but the socket has no mandate store, so every spend reaches
-the owner. Closing that means an owner-side mandate store, and until it exists
-the conservative behaviour is the honest one.
 
 The firewall governs proposals to act. It cannot govern what a model concludes
 from text it reads, and nothing in it should be read as preventing prompt

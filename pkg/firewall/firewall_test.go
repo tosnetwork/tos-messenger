@@ -23,7 +23,18 @@ func testOrigin(seed string) Origin {
 }
 
 func testAction(effect Effect, origins ...Origin) Action {
-	return Action{Effect: effect, Summary: "do the thing", DerivedFrom: origins}
+	action := Action{Effect: effect, Summary: "do the thing", DerivedFrom: origins}
+	if effect == EffectSpend {
+		terms := testTerms(200)
+		action.Terms = &terms
+	}
+	return action
+}
+
+func spendAction(units uint64, origins ...Origin) Action {
+	terms := testTerms(units)
+	return Action{Effect: EffectSpend, Summary: "buy the transcription",
+		DerivedFrom: origins, Terms: &terms}
 }
 
 // The same action is judged differently depending on whether something a
@@ -177,8 +188,7 @@ func TestSpendNeedsBothTheMandateAndTheCeiling(t *testing.T) {
 	now := time.Unix(int64(baseUnix)+60, 0)
 	permissive := Policy{UnattendedCeiling: EffectSpend, OwnInitiativeCeiling: EffectSpend}
 
-	within, err := EvaluateSpend(permissive, testMandate(), testTerms(200),
-		testAction(EffectSpend, testOrigin("1")), now)
+	within, err := EvaluateSpend(permissive, testMandate(), spendAction(200, testOrigin("1")), now)
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -187,8 +197,7 @@ func TestSpendNeedsBothTheMandateAndTheCeiling(t *testing.T) {
 	}
 
 	// Inside the ceiling, above the amount the owner reserved for themselves.
-	above, err := EvaluateSpend(permissive, testMandate(), testTerms(800),
-		testAction(EffectSpend, testOrigin("1")), now)
+	above, err := EvaluateSpend(permissive, testMandate(), spendAction(800, testOrigin("1")), now)
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -198,8 +207,7 @@ func TestSpendNeedsBothTheMandateAndTheCeiling(t *testing.T) {
 
 	// Inside the mandate, but the default ceiling does not let received
 	// content reach a spend at all.
-	ceilinged, err := EvaluateSpend(Default(), testMandate(), testTerms(200),
-		testAction(EffectSpend, testOrigin("1")), now)
+	ceilinged, err := EvaluateSpend(Default(), testMandate(), spendAction(200, testOrigin("1")), now)
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -208,8 +216,7 @@ func TestSpendNeedsBothTheMandateAndTheCeiling(t *testing.T) {
 	}
 
 	// Outside the mandate entirely.
-	outside, err := EvaluateSpend(permissive, testMandate(), testTerms(5000),
-		testAction(EffectSpend, testOrigin("1")), now)
+	outside, err := EvaluateSpend(permissive, testMandate(), spendAction(5000, testOrigin("1")), now)
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -219,8 +226,11 @@ func TestSpendNeedsBothTheMandateAndTheCeiling(t *testing.T) {
 
 	// Terms that do not describe a purchase are refused, not escalated: no
 	// owner decision makes them coherent.
-	broken, err := EvaluateSpend(permissive, testMandate(), negotiation.Terms{},
-		testAction(EffectSpend, testOrigin("1")), now)
+	brokenTerms := negotiation.Terms{}
+	broken, err := EvaluateSpend(permissive, testMandate(), Action{
+		Effect: EffectSpend, Summary: "buy nothing in particular",
+		DerivedFrom: []Origin{testOrigin("1")}, Terms: &brokenTerms,
+	}, now)
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -228,8 +238,7 @@ func TestSpendNeedsBothTheMandateAndTheCeiling(t *testing.T) {
 		t.Fatalf("incoherent terms were put to the owner: %+v", broken)
 	}
 
-	if _, err := EvaluateSpend(permissive, testMandate(), testTerms(200),
-		testAction(EffectMessage), now); err == nil {
+	if _, err := EvaluateSpend(permissive, testMandate(), testAction(EffectMessage), now); err == nil {
 		t.Fatal("a non-spend was judged as a spend")
 	}
 }
@@ -240,7 +249,7 @@ func TestExpiredMandateGoesToTheOwner(t *testing.T) {
 	late := time.Unix(int64(baseUnix)+7200, 0)
 	decision, err := EvaluateSpend(
 		Policy{UnattendedCeiling: EffectSpend, OwnInitiativeCeiling: EffectSpend},
-		testMandate(), testTerms(100), testAction(EffectSpend), late)
+		testMandate(), spendAction(100), late)
 	if err != nil {
 		t.Fatalf("evaluate: %v", err)
 	}
@@ -270,5 +279,30 @@ func TestAmountRenderingDisagreementIsSurfacedNotResolved(t *testing.T) {
 	}
 	if lying.Structured != amount.String() || lying.Rendered == "" {
 		t.Fatalf("the disagreement did not carry both sides: %+v", lying)
+	}
+}
+
+// An approval names a price as well as a deed. Two spends described the same
+// way but for different amounts are different actions.
+func TestApprovalCannotMoveBetweenPrices(t *testing.T) {
+	cheap, err := ActionID(spendAction(100, testOrigin("1")))
+	if err != nil {
+		t.Fatalf("identify: %v", err)
+	}
+	dear, err := ActionID(spendAction(9000, testOrigin("1")))
+	if err != nil {
+		t.Fatalf("identify: %v", err)
+	}
+	if cheap == dear {
+		t.Fatal("two prices shared one action identifier")
+	}
+
+	// A spend must say what it is buying, and nothing else may carry terms.
+	if err := (Action{Effect: EffectSpend, Summary: "buy something"}).Validate(); err == nil {
+		t.Fatal("a spend with no terms was accepted")
+	}
+	terms := testTerms(100)
+	if err := (Action{Effect: EffectMessage, Summary: "say hello", Terms: &terms}).Validate(); err == nil {
+		t.Fatal("a message carried purchase terms")
 	}
 }

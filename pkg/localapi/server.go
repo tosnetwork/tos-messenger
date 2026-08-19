@@ -13,6 +13,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/firewall"
+	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
 
 // DefaultRequestTimeout bounds how long one call may hold a connection.
@@ -157,6 +158,12 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.grantAction(request, now)
 	case OpDenyAction:
 		return s.denyAction(request, now)
+	case OpPlaceMandate:
+		return s.placeMandate(request, now)
+	case OpRevokeMandate:
+		return s.revokeMandate(request, now)
+	case OpListMandates:
+		return s.listMandates()
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
 }
@@ -342,7 +349,16 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
 	}
-	decision, err := firewall.Evaluate(s.config.Policy, action)
+	var decision firewall.Decision
+	if action.Effect == firewall.EffectSpend {
+		mandate, resolveErr := s.spendMandate(request, now)
+		if resolveErr != nil {
+			return refuse(fault.CodeInternal, resolveErr)
+		}
+		decision, err = firewall.EvaluateSpend(s.config.Policy, mandate, action, now)
+	} else {
+		decision, err = firewall.Evaluate(s.config.Policy, action)
+	}
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
 	}
@@ -450,7 +466,8 @@ func toAction(proposed ProposedAction) (firewall.Action, error) {
 		})
 	}
 	action := firewall.Action{
-		Effect: firewall.Effect(proposed.Effect), Summary: proposed.Summary, DerivedFrom: origins,
+		Effect: firewall.Effect(proposed.Effect), Summary: proposed.Summary,
+		DerivedFrom: origins, Terms: toTerms(proposed.Terms),
 	}
 	return action, nil
 }
@@ -475,4 +492,111 @@ func fromApprovalOrigins(origins []eventlog.ApprovalOrigin) []ActionOrigin {
 		})
 	}
 	return shown
+}
+
+func (s *Server) placeMandate(request Request, now time.Time) Response {
+	stored, err := s.config.Journal.PlaceMandate(eventlog.StoredMandate{
+		Objective: request.Mandate.Objective, Authority: request.Mandate.Authority,
+		CapabilityClass:  request.Mandate.CapabilityClass,
+		MaxTotalAsset:    request.Mandate.Asset,
+		MaxTotalUnits:    request.Mandate.MaxTotalUnits,
+		MaxTotalDecimals: request.Mandate.Decimals,
+		ApprovalAsset:    request.Mandate.Asset,
+		ApprovalUnits:    request.Mandate.ApprovalAbove,
+		ApprovalDecimals: request.Mandate.Decimals,
+		MaxCounteroffers: request.Mandate.MaxCounteroffers,
+		ExpiresAtUnix:    request.Mandate.ExpiresAtUnix,
+	}, now)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	// A mandate that does not describe a usable authorisation is refused here
+	// rather than at the moment a spend is judged, so the owner learns about it
+	// while they are the one holding it.
+	if _, err := toMandate(stored); err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{Schema: ResponseSchema, OK: true, MandateID: stored.MandateID}
+}
+
+func (s *Server) revokeMandate(request Request, now time.Time) Response {
+	stored, err := s.config.Journal.RevokeMandate(request.MandateID, now)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{Schema: ResponseSchema, OK: true, MandateID: stored.MandateID}
+}
+
+func (s *Server) listMandates() Response {
+	stored, err := s.config.Journal.ListMandates()
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	held := make([]HeldMandate, 0, len(stored))
+	for _, mandate := range stored {
+		held = append(held, HeldMandate{
+			MandateID: mandate.MandateID, Objective: mandate.Objective,
+			Authority: mandate.Authority, CapabilityClass: mandate.CapabilityClass,
+			Asset: mandate.MaxTotalAsset, Decimals: mandate.MaxTotalDecimals,
+			MaxTotalUnits: mandate.MaxTotalUnits, ApprovalAbove: mandate.ApprovalUnits,
+			MaxCounteroffers: mandate.MaxCounteroffers, ExpiresAtUnix: mandate.ExpiresAtUnix,
+			PlacedAtUnix: mandate.PlacedAtUnix, RevokedAtUnix: mandate.RevokedAtUnix,
+		})
+	}
+	return Response{Schema: ResponseSchema, OK: true, Mandates: held}
+}
+
+// spendMandate resolves the standing authorisation a proposed spend names.
+//
+// The mandate comes from the store, never from the request. A runtime that
+// could supply the mandate it is judged against would be setting its own
+// ceiling, which is the one thing a mandate exists to prevent.
+func (s *Server) spendMandate(request Request, now time.Time) (negotiation.Mandate, error) {
+	stored, found, err := s.config.Journal.LookupMandate(request.MandateID)
+	if err != nil {
+		return negotiation.Mandate{}, err
+	}
+	if !found {
+		return negotiation.Mandate{}, eventlog.ErrMandateUnknown
+	}
+	if stored.RevokedAtUnix != 0 {
+		return negotiation.Mandate{}, eventlog.ErrMandateRevoked
+	}
+	_ = now
+	return toMandate(stored)
+}
+
+func toMandate(stored eventlog.StoredMandate) (negotiation.Mandate, error) {
+	mandate := negotiation.Mandate{
+		Objective:       stored.Objective,
+		Authority:       negotiation.Authority(stored.Authority),
+		CapabilityClass: stored.CapabilityClass,
+		MaxTotal: negotiation.Amount{
+			Asset: stored.MaxTotalAsset, Units: stored.MaxTotalUnits, Decimals: stored.MaxTotalDecimals,
+		},
+		ApprovalAbove: negotiation.Amount{
+			Asset: stored.ApprovalAsset, Units: stored.ApprovalUnits, Decimals: stored.ApprovalDecimals,
+		},
+		MaxCounteroffers: stored.MaxCounteroffers,
+		ExpiresAtUnix:    stored.ExpiresAtUnix,
+	}
+	if err := mandate.Validate(); err != nil {
+		return negotiation.Mandate{}, err
+	}
+	return mandate, nil
+}
+
+func toTerms(terms *PurchaseTerms) *negotiation.Terms {
+	if terms == nil {
+		return nil
+	}
+	return &negotiation.Terms{
+		CapabilityID:      terms.CapabilityID,
+		CapabilityVersion: terms.CapabilityVersion,
+		CapabilityClass:   terms.CapabilityClass,
+		Total: negotiation.Amount{
+			Asset: terms.Asset, Units: terms.Units, Decimals: terms.Decimals,
+		},
+		NotAfterUnix: terms.NotAfterUnix,
+	}
 }

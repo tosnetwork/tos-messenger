@@ -25,6 +25,7 @@ import (
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/ids"
+	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
 
 // Bounds on what one action may cite.
@@ -192,6 +193,12 @@ type Action struct {
 	// An empty set is a claim that nothing received contributed, and it is the
 	// runtime's claim to make honestly: this package cannot check it.
 	DerivedFrom []Origin
+	// Terms are the exact purchase, required when the effect is a spend and
+	// refused otherwise. They are part of the action rather than an argument
+	// beside it because the identifier commits them: without that, an approval
+	// for one price could be spent on another that happened to be described
+	// the same way.
+	Terms *negotiation.Terms
 }
 
 // Validate enforces that an action can be judged.
@@ -204,6 +211,12 @@ func (a Action) Validate() error {
 	}
 	if len(a.DerivedFrom) > MaxProvenance {
 		return errors.New("action cites more origins than an owner could review")
+	}
+	if a.Effect == EffectSpend && a.Terms == nil {
+		return errors.New("a spend must say what it is buying")
+	}
+	if a.Effect != EffectSpend && a.Terms != nil {
+		return errors.New("only a spend carries terms")
 	}
 	seen := make(map[string]struct{}, len(a.DerivedFrom))
 	for _, origin := range a.DerivedFrom {
@@ -323,6 +336,17 @@ func ActionID(action Action) (string, error) {
 		canon.Text(buffer, origin.ConversationID)
 		canon.Text(buffer, origin.Kind)
 		canon.Uint64(buffer, origin.ReceivedAtUnix)
+	}
+	// The terms are committed, so an approval for one price cannot be spent on
+	// another. A spend with no terms never reaches here: it fails validation.
+	if action.Terms != nil {
+		canon.Text(buffer, action.Terms.CapabilityID)
+		canon.Text(buffer, action.Terms.CapabilityVersion)
+		canon.Text(buffer, action.Terms.CapabilityClass)
+		canon.Text(buffer, action.Terms.Total.Asset)
+		canon.Uint64(buffer, action.Terms.Total.Units)
+		buffer.WriteByte(action.Terms.Total.Decimals)
+		canon.Uint64(buffer, action.Terms.NotAfterUnix)
 	}
 	digest := canon.Digest(buffer.Bytes())
 	return "act_" + digest[len("sha256:"):], nil

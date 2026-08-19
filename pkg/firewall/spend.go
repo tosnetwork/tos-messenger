@@ -18,8 +18,7 @@ import (
 // ceiling, and a spend inside the ceiling is still stopped if it is outside
 // the mandate. Collapsing the two into one check would let either one alone
 // authorise a payment.
-func EvaluateSpend(policy Policy, mandate negotiation.Mandate, terms negotiation.Terms,
-	action Action, now time.Time) (Decision, error) {
+func EvaluateSpend(policy Policy, mandate negotiation.Mandate, action Action, now time.Time) (Decision, error) {
 	if action.Effect != EffectSpend {
 		return Decision{}, errors.New("EvaluateSpend judges a spend")
 	}
@@ -33,13 +32,18 @@ func EvaluateSpend(policy Policy, mandate negotiation.Mandate, terms negotiation
 	if decision.Outcome == Refuse {
 		return decision, nil
 	}
-	if err := terms.Validate(); err != nil {
+	if action.Terms == nil {
+		decision.Outcome = Refuse
+		decision.Reason = "a spend must say what it is buying"
+		return decision, nil
+	}
+	if err := action.Terms.Validate(); err != nil {
 		decision.Outcome = Refuse
 		decision.Reason = "the terms are not a complete purchase: " + err.Error()
 		return decision, nil
 	}
 
-	needsApproval, err := mandate.Permits(terms, now)
+	needsApproval, err := mandate.Permits(*action.Terms, now)
 	if err != nil {
 		// Outside the mandate, or past its expiry. The owner can still say
 		// yes; what they cannot do is have said yes in advance.

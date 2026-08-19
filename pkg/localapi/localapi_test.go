@@ -715,6 +715,33 @@ func sendAttempt(t *testing.T, h *harness, eventID string, seed byte) string {
 	return id
 }
 
+func testPurchase(units uint64) *PurchaseTerms {
+	return &PurchaseTerms{
+		CapabilityID:      "cap_" + strings.Repeat("9", 64),
+		CapabilityVersion: "1.0.0",
+		CapabilityClass:   "transcription.audio",
+		Asset:             "TOS",
+		Units:             units,
+		Decimals:          2,
+		NotAfterUnix:      baseUnix + 600,
+	}
+}
+
+// The owner places a standing authorisation. The runtime never supplies one.
+func (h *harness) placeMandate(t *testing.T) string {
+	t.Helper()
+	placed := h.owner(t, Request{Op: OpPlaceMandate, Mandate: &MandateTerms{
+		Objective: "buy transcription", Authority: "commit",
+		CapabilityClass: "transcription.audio", Asset: "TOS", Decimals: 2,
+		MaxTotalUnits: 1000, ApprovalAbove: 500, MaxCounteroffers: 4,
+		ExpiresAtUnix: baseUnix + 86_400,
+	}})
+	if !placed.OK || placed.MandateID == "" {
+		t.Fatalf("place mandate: %+v", placed)
+	}
+	return placed.MandateID
+}
+
 func testProposal(effect string, origins ...ActionOrigin) *ProposedAction {
 	return &ProposedAction{Effect: effect, Summary: "call the payments tool", Derived: origins}
 }
@@ -792,7 +819,10 @@ func TestApprovalCannotBeSpentOnAnotherAction(t *testing.T) {
 
 	// The same words, a stronger effect. A different action, and so a
 	// different identifier with no approval behind it.
-	stronger := h.call(t, Request{Op: OpRequestAction, Action: testProposal("spend", origin)})
+	mandateID := h.placeMandate(t)
+	spend := testProposal("spend", origin)
+	spend.Terms = testPurchase(200)
+	stronger := h.call(t, Request{Op: OpRequestAction, Action: spend, MandateID: mandateID})
 	if stronger.ActionID == harmless.ActionID {
 		t.Fatal("two different actions shared one identifier")
 	}
@@ -858,5 +888,94 @@ func TestMalformedProposalIsRefusedNotAsked(t *testing.T) {
 	}
 	if waiting := h.owner(t, Request{Op: OpPendingActions}); len(waiting.Actions) != 0 {
 		t.Fatalf("a malformed proposal was put to the owner: %+v", waiting)
+	}
+}
+
+// The mandate is the owner's. A runtime that could supply the mandate it is
+// judged against would be setting its own ceiling.
+func TestSpendIsJudgedAgainstTheOwnersMandate(t *testing.T) {
+	h := newHarness(t)
+	mandateID := h.placeMandate(t)
+
+	// Inside the mandate, but received content drove it, and the default
+	// ceiling does not let received content reach a spend.
+	prompted := testProposal("spend", testActionOrigin())
+	prompted.Terms = testPurchase(200)
+	driven := h.call(t, Request{Op: OpRequestAction, Action: prompted, MandateID: mandateID})
+	if driven.Decision != "require-owner-approval" {
+		t.Fatalf("a stranger's message reached a payment: %+v", driven)
+	}
+
+	// The Agent's own initiative, inside the mandate, still stops: the default
+	// own-initiative ceiling is a tool call.
+	own := testProposal("spend")
+	own.Terms = testPurchase(200)
+	unprompted := h.call(t, Request{Op: OpRequestAction, Action: own, MandateID: mandateID})
+	if unprompted.Decision != "require-owner-approval" {
+		t.Fatalf("a payment ran unattended under the default ceiling: %+v", unprompted)
+	}
+
+	// A mandate nobody placed authorises nothing.
+	unknown := h.call(t, Request{Op: OpRequestAction, Action: own,
+		MandateID: "mdt_" + strings.Repeat("e", 64)})
+	if unknown.OK {
+		t.Fatalf("a spend was judged against a mandate nobody placed: %+v", unknown)
+	}
+
+	// Withdrawing it stops further spends under it, and the record survives.
+	if revoked := h.owner(t, Request{Op: OpRevokeMandate, MandateID: mandateID}); !revoked.OK {
+		t.Fatalf("revoke: %+v", revoked)
+	}
+	after := h.call(t, Request{Op: OpRequestAction, Action: own, MandateID: mandateID})
+	if after.OK {
+		t.Fatalf("a withdrawn mandate still authorised a spend: %+v", after)
+	}
+	held := h.owner(t, Request{Op: OpListMandates})
+	if len(held.Mandates) != 1 || held.Mandates[0].RevokedAtUnix == 0 {
+		t.Fatalf("the withdrawal did not survive as a record: %+v", held)
+	}
+}
+
+// Only the owner writes mandates. Both sides may read them, because an Agent
+// has to know what it may spend before it negotiates.
+func TestOnlyTheOwnerWritesMandates(t *testing.T) {
+	h := newHarness(t)
+	h.placeMandate(t)
+
+	writes := []Request{
+		{Op: OpPlaceMandate, Mandate: &MandateTerms{
+			Objective: "spend freely", Authority: "commit", CapabilityClass: "anything",
+			Asset: "TOS", Decimals: 2, MaxTotalUnits: 1, ApprovalAbove: 1,
+			MaxCounteroffers: 1, ExpiresAtUnix: baseUnix + 10,
+		}},
+		{Op: OpRevokeMandate, MandateID: "mdt_" + strings.Repeat("a", 64)},
+	}
+	for _, request := range writes {
+		if response := h.call(t, request); response.OK {
+			t.Fatalf("the runtime performed %q", request.Op)
+		}
+	}
+	if listing := h.call(t, Request{Op: OpListMandates}); !listing.OK || len(listing.Mandates) != 1 {
+		t.Fatalf("the runtime could not read what it may spend: %+v", listing)
+	}
+}
+
+// A spend that names no mandate, and a non-spend that carries terms, are both
+// refused before anything is judged.
+func TestSpendShapeIsEnforced(t *testing.T) {
+	spend := testProposal("spend", testActionOrigin())
+	spend.Terms = testPurchase(200)
+	if _, err := EncodeRequest(Request{Op: OpRequestAction, Action: spend}); err == nil {
+		t.Fatal("a spend with no mandate was accepted")
+	}
+	noTerms := testProposal("spend", testActionOrigin())
+	if _, err := EncodeRequest(Request{Op: OpRequestAction, Action: noTerms,
+		MandateID: "mdt_" + strings.Repeat("a", 64)}); err == nil {
+		t.Fatal("a spend with no terms was accepted")
+	}
+	message := testProposal("message", testActionOrigin())
+	message.Terms = testPurchase(200)
+	if _, err := EncodeRequest(Request{Op: OpRequestAction, Action: message}); err == nil {
+		t.Fatal("a message carried purchase terms")
 	}
 }

@@ -87,6 +87,17 @@ const (
 	OpGrantAction Operation = "actions.grant"
 	// OpDenyAction is the owner refusing one.
 	OpDenyAction Operation = "actions.deny"
+
+	// OpPlaceMandate is the owner placing a standing authorisation. Only the
+	// owner may: a runtime that could write its own mandate would be choosing
+	// its own bounds, which is the one thing a mandate exists to prevent.
+	OpPlaceMandate Operation = "mandates.place"
+	// OpRevokeMandate is the owner withdrawing one.
+	OpRevokeMandate Operation = "mandates.revoke"
+	// OpListMandates reads what this installation holds. Both sides may: the
+	// Agent has to know what it may spend before it negotiates, and reading is
+	// not deciding.
+	OpListMandates Operation = "mandates.list"
 )
 
 // Principal is which side of the boundary a connection speaks for.
@@ -109,12 +120,13 @@ const (
 var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
 		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {},
-		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {},
+		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
 	},
 	PrincipalOwner: {
 		OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
 		OpApprove: {}, OpDeny: {},
 		OpPendingActions: {}, OpGrantAction: {}, OpDenyAction: {},
+		OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {},
 	},
 }
 
@@ -134,6 +146,7 @@ var operations = map[Operation]struct{}{
 	OpApprove: {}, OpDeny: {},
 	OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpPendingActions: {},
 	OpGrantAction: {}, OpDenyAction: {},
+	OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {},
 }
 
 var (
@@ -142,6 +155,7 @@ var (
 	sessionPattern  = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
 	endpointPattern = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
 	actionPattern   = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
+	mandatePattern  = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
 )
 
 // Request is one call over the local socket.
@@ -170,6 +184,52 @@ type Request struct {
 	ActionID string `json:"action_id,omitempty"`
 	// Reason is why the owner refused.
 	Reason string `json:"reason,omitempty"`
+
+	// Mandate is a standing authorisation the owner is placing.
+	Mandate *MandateTerms `json:"mandate,omitempty"`
+	// MandateID names one already placed. A runtime proposing a spend names
+	// the mandate; it never supplies one.
+	MandateID string `json:"mandate_id,omitempty"`
+}
+
+// MandateTerms is what an owner authorises in advance.
+type MandateTerms struct {
+	Objective        string `json:"objective"`
+	Authority        string `json:"authority"`
+	CapabilityClass  string `json:"capability_class"`
+	Asset            string `json:"asset"`
+	Decimals         uint8  `json:"decimals"`
+	MaxTotalUnits    uint64 `json:"max_total_units"`
+	ApprovalAbove    uint64 `json:"approval_above_units"`
+	MaxCounteroffers uint32 `json:"max_counteroffers"`
+	ExpiresAtUnix    uint64 `json:"expires_at_unix"`
+}
+
+// PurchaseTerms is the exact purchase a proposed spend would commit to.
+type PurchaseTerms struct {
+	CapabilityID      string `json:"capability_id"`
+	CapabilityVersion string `json:"capability_version"`
+	CapabilityClass   string `json:"capability_class"`
+	Asset             string `json:"asset"`
+	Units             uint64 `json:"units"`
+	Decimals          uint8  `json:"decimals"`
+	NotAfterUnix      uint64 `json:"not_after_unix"`
+}
+
+// HeldMandate is one standing authorisation as it is read back.
+type HeldMandate struct {
+	MandateID        string `json:"mandate_id"`
+	Objective        string `json:"objective"`
+	Authority        string `json:"authority"`
+	CapabilityClass  string `json:"capability_class"`
+	Asset            string `json:"asset"`
+	Decimals         uint8  `json:"decimals"`
+	MaxTotalUnits    uint64 `json:"max_total_units"`
+	ApprovalAbove    uint64 `json:"approval_above_units"`
+	MaxCounteroffers uint32 `json:"max_counteroffers"`
+	ExpiresAtUnix    uint64 `json:"expires_at_unix"`
+	PlacedAtUnix     uint64 `json:"placed_at_unix"`
+	RevokedAtUnix    uint64 `json:"revoked_at_unix,omitempty"`
 }
 
 // ProposedAction is what a runtime says it intends to do.
@@ -177,9 +237,10 @@ type ProposedAction struct {
 	Effect  string         `json:"effect"`
 	Summary string         `json:"summary"`
 	Derived []ActionOrigin `json:"derived_from,omitempty"`
-	// Terms is the exact purchase, when the effect is a spend. Its presence is
-	// what lets the mandate be applied rather than assumed.
-	Terms json.RawMessage `json:"terms,omitempty"`
+	// Terms is what a spend would buy. It is part of the action, so the
+	// identifier commits it and an approval for one price cannot be spent on
+	// another.
+	Terms *PurchaseTerms `json:"terms,omitempty"`
 }
 
 // ActionOrigin is one piece of received content behind a proposed action.
@@ -224,6 +285,10 @@ type Response struct {
 	Authorised bool   `json:"authorised,omitempty"`
 	// State is where an approval request has got to.
 	State string `json:"approval_state,omitempty"`
+	// Mandates lists what this installation holds.
+	Mandates []HeldMandate `json:"mandates,omitempty"`
+	// MandateID is the identifier derived from a placed mandate.
+	MandateID string `json:"mandate_id,omitempty"`
 }
 
 // WaitingAction is one decision the owner has not made yet.
@@ -404,7 +469,32 @@ func ValidateRequest(request Request) error {
 		if request.ActionID != "" {
 			return errors.New("the action identifier is derived, not declared")
 		}
+		if request.Action.Effect == "spend" {
+			if request.Action.Terms == nil {
+				return errors.New("a spend must say what it is buying")
+			}
+			if !mandatePattern.MatchString(request.MandateID) {
+				return errors.New("a spend must name the mandate it is made under")
+			}
+		} else if request.Action.Terms != nil || request.MandateID != "" {
+			return errors.New("only a spend carries terms and a mandate")
+		}
 		return nil
+	case OpPlaceMandate:
+		if request.Mandate == nil {
+			return errors.New("placing a mandate needs the mandate")
+		}
+		if request.MandateID != "" {
+			return errors.New("the mandate identifier is derived, not declared")
+		}
+		return nil
+	case OpRevokeMandate:
+		if !mandatePattern.MatchString(request.MandateID) {
+			return errors.New("withdrawing a mandate needs the mandate")
+		}
+		return requireEmpty(request, "an owner decision", request.EventID, request.LeaseID, request.SessionID)
+	case OpListMandates:
+		return requireEmpty(request, "a listing", request.EventID, request.LeaseID, request.SessionID)
 	case OpActionStatus, OpClaimAction:
 		if !actionPattern.MatchString(request.ActionID) {
 			return errors.New("an action status needs an action")
