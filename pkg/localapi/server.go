@@ -50,33 +50,40 @@ func NewServer(config Config) (*Server, error) {
 	return &Server{config: config}, nil
 }
 
-// Serve accepts connections until the listener is closed.
-func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
+// Serve accepts connections for one principal until the listener is closed.
+//
+// A principal belongs to a listener rather than to a request, so a caller
+// cannot choose which one it speaks for. The runtime reaches the daemon
+// through a socket that has no approval operations on it at all.
+func (s *Server) Serve(ctx context.Context, listener net.Listener, principal Principal) error {
+	if _, known := permitted[principal]; !known {
+		return errors.New("unknown local principal")
+	}
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
 			return err
 		}
-		go s.serveConnection(ctx, connection)
+		go s.serveConnection(ctx, connection, principal)
 	}
 }
 
-func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
+func (s *Server) serveConnection(ctx context.Context, connection net.Conn, principal Principal) {
 	defer connection.Close()
 	if err := verifyPeer(connection); err != nil {
 		// A caller this daemon cannot identify learns nothing about why.
 		return
 	}
-	reader := bufio.NewReaderSize(connection, 4<<10)
+	reader := bufio.NewReader(connection)
 	for {
 		if err := connection.SetDeadline(s.config.Now().Add(s.config.Timeout)); err != nil {
 			return
 		}
-		line, err := readFrame(reader)
+		body, err := ReadFrame(reader)
 		if err != nil {
 			return
 		}
-		response := s.handle(ctx, line)
+		response := s.handle(ctx, principal, body)
 		encoded, err := EncodeResponse(response)
 		if err != nil {
 			return
@@ -87,30 +94,23 @@ func (s *Server) serveConnection(ctx context.Context, connection net.Conn) {
 	}
 }
 
-func readFrame(reader *bufio.Reader) ([]byte, error) {
-	line, err := reader.ReadSlice('\n')
-	if err != nil {
-		if errors.Is(err, bufio.ErrBufferFull) {
-			return nil, errors.New("request exceeds its frame bound")
-		}
-		return nil, err
-	}
-	if len(line) > MaxFrameBytes {
-		return nil, errors.New("request exceeds its frame bound")
-	}
-	return line, nil
+// Handle answers one request for one principal. It is exported so a caller can
+// drive the API in process, which is what a test and a single-binary
+// deployment both want.
+func (s *Server) Handle(ctx context.Context, principal Principal, raw []byte) Response {
+	return s.handle(ctx, principal, raw)
 }
 
-// Handle answers one request. It is exported so a caller can drive the API in
-// process, which is what a test and a single-binary deployment both want.
-func (s *Server) Handle(ctx context.Context, raw []byte) Response {
-	return s.handle(ctx, raw)
-}
-
-func (s *Server) handle(ctx context.Context, raw []byte) Response {
+func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Response {
 	request, err := DecodeRequest(raw)
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
+	}
+	if !Permits(principal, request.Op) {
+		// Said plainly: this is not a capability this connection has, and no
+		// amount of asking changes that.
+		return refuse(fault.CodeClassNotDelegated,
+			errors.New(string(principal)+" may not perform "+string(request.Op)))
 	}
 	if err := ctx.Err(); err != nil {
 		return refuse(fault.CodeInternal, err)
@@ -127,6 +127,12 @@ func (s *Server) handle(ctx context.Context, raw []byte) Response {
 		return s.reject(request, now)
 	case OpQueue:
 		return s.queue(request)
+	case OpAwaitingAdmission:
+		return s.awaitingAdmission(request)
+	case OpAdmit:
+		return s.admit(request, now)
+	case OpRefuse:
+		return s.refuseEvent(request, now)
 	case OpApprove:
 		return s.approve(request, now)
 	case OpDeny:
@@ -204,7 +210,48 @@ func (s *Server) queue(request Request) Response {
 	return Response{OK: true, Fresh: fresh}
 }
 
-// approve is the owner authorising a held delivery.
+// awaitingAdmission lists what the owner has yet to decide about.
+func (s *Server) awaitingAdmission(request Request) Response {
+	limit := request.Limit
+	if limit == 0 || limit > MaxEventsPerResponse {
+		limit = MaxEventsPerResponse
+	}
+	records, err := s.config.Journal.ListAwaitingAdmission(limit)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	events := make([]PendingEvent, 0, len(records))
+	for _, record := range records {
+		event, err := pendingEvent(record)
+		if err != nil {
+			continue
+		}
+		events = append(events, event)
+	}
+	return Response{OK: true, Events: events}
+}
+
+// admit is the owner letting an inbound event reach the runtime.
+func (s *Server) admit(request Request, now time.Time) Response {
+	if _, err := s.config.Journal.AdmitEvent(request.EventID, now); err != nil {
+		return refuse(claimCode(err), err)
+	}
+	return Response{OK: true}
+}
+
+// refuseEvent is the owner refusing one. It is never offered to a runtime.
+func (s *Server) refuseEvent(request Request, now time.Time) Response {
+	code := request.Code
+	if code == "" {
+		code = fault.CodeRejected
+	}
+	if _, err := s.config.Journal.DenyEvent(request.EventID, code, now); err != nil {
+		return refuse(claimCode(err), err)
+	}
+	return Response{OK: true}
+}
+
+// approve is the owner releasing a held outbound delivery.
 //
 // This operation exists on this socket and nowhere else. The matching event
 // kinds are refused on every network route, so a remote party cannot reach
@@ -246,7 +293,8 @@ func claimCode(err error) fault.Code {
 	switch {
 	case errors.Is(err, eventlog.ErrUnknown):
 		return fault.CodeUnknownEventKind
-	case errors.Is(err, eventlog.ErrLeaseMismatch), errors.Is(err, eventlog.ErrNotPending):
+	case errors.Is(err, eventlog.ErrLeaseMismatch), errors.Is(err, eventlog.ErrNotPending),
+		errors.Is(err, eventlog.ErrNotAdmitted):
 		return fault.CodeReplayed
 	default:
 		return fault.CodeInternal

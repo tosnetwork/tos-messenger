@@ -2,7 +2,8 @@
   "schema": "tos.messaging.daemon-config.v1",
 
   "state_dir": "/var/lib/tos-messengerd",
-  "socket_path": "/run/tos-messengerd/messenger.sock",
+  "socket_path": "/run/tos-messengerd/runtime.sock",
+  "owner_socket_path": "/run/tos-messengerd/owner.sock",
 
   "network_id": "tos-local",
   "genesis_root_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

@@ -110,7 +110,10 @@ Deliberately absent, with the reason:
 - Approval is two things. A counterparty attestation is what the other party
   says it decided, which is information and may travel. An owner approval is
   authority granted here, and it is not expressible on the wire at all: it
-  exists on the local socket and nowhere else.
+  exists on the owner's own socket and nowhere else.
+- The party that asks for an approval cannot grant it. The runtime and the
+  owner speak over separate sockets, and the runtime's has no approval
+  operation on it.
 - A commitment nobody reads is worse than none, because it implies an
   enforcement that does not exist. The policy digests a delegation carries are
   checked against the documents they name.

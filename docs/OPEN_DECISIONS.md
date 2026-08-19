@@ -52,7 +52,11 @@ than silently forking two implementations.
 | Send success | a sender reports success only once a recipient device durably accepted the message; "handed to the network" would turn every lost packet into a delivered one | `dispatch.Sender` |
 | Sweep isolation | one failing delivery does not stop the others, so an unreachable peer cannot block every message to everyone else | `dispatch.Sweep` |
 | Local boundary | a unix socket in a private directory, narrowed to the owner, with the caller's credentials checked where the platform allows it | `localapi.Listen`, `localapi.verifyPeer` |
-| Owner authority | expressible on the local socket only; the matching event kinds are refused on every network route | `localapi.OpApprove`, `envelope.LocalOnly` |
+| Owner authority | expressible on the owner socket only; the matching event kinds are refused on every network route, and the runtime principal has no approval operation | `localapi.Permits`, `envelope.LocalOnly` |
+| Inbound admission | a dimension of its own, so an event waiting for the owner is not in the queue a runtime drains | `eventlog.AdmissionState` |
+| Local framing | length-prefixed rather than delimited, because a delimited frame is bounded by whatever buffer the reader allocated and that is a bound nobody stated | `localapi.ReadFrame` |
+| Session transitions | committed against the generation the caller read, so two concurrent seals cannot both advance one ratchet | `eventlog.ErrSessionConflict` |
+| Send attempts | leased, so two sweeps cannot both put the same message on the wire | `eventlog.ClaimForSend` |
 | Submission validation | the runtime submits an encoded event which the daemon decodes and validates, because the daemon owns what goes on the wire | `localapi.Server.queue` |
 | Transport statement | no default; an installation states `"none"` deliberately, because a daemon that quietly carried nothing would look like a working one | `daemon.Config.Transport` |
 | Queue without send | a dispatcher may have a journal and no transport, which is the state this project is in; the sending half is all or nothing | `dispatch.New`, `dispatch.ErrNoTransport` |

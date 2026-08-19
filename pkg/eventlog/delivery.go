@@ -72,13 +72,17 @@ var ErrNotPending = errors.New("delivery is not awaiting an attempt")
 // between losing the event and duplicating it would be made by whichever
 // failure happened.
 type Delivery struct {
-	Schema              string        `json:"schema"`
-	EventID             string        `json:"event_id"`
-	SessionID           string        `json:"session_id,omitempty"`
-	PayloadBase64       string        `json:"payload_base64"`
-	PayloadDigest       string        `json:"payload_digest"`
-	CiphertextBase64    string        `json:"ciphertext_base64,omitempty"`
-	CiphertextDigest    string        `json:"ciphertext_digest,omitempty"`
+	Schema           string `json:"schema"`
+	EventID          string `json:"event_id"`
+	SessionID        string `json:"session_id,omitempty"`
+	PayloadBase64    string `json:"payload_base64"`
+	PayloadDigest    string `json:"payload_digest"`
+	CiphertextBase64 string `json:"ciphertext_base64,omitempty"`
+	CiphertextDigest string `json:"ciphertext_digest,omitempty"`
+	// AttemptID and AttemptExpiresAt hold one sweep's claim on a delivery, so
+	// two sweeps cannot both take the same event and send it twice.
+	AttemptID           string        `json:"attempt_id,omitempty"`
+	AttemptExpiresAt    uint64        `json:"attempt_expires_at_unix,omitempty"`
 	RecipientEndpointID string        `json:"recipient_messaging_endpoint_id"`
 	ConversationID      string        `json:"conversation_id"`
 	State               DeliveryState `json:"state"`
@@ -205,6 +209,11 @@ func (j *Journal) Due(now time.Time) ([]Delivery, error) {
 		if delivery.NextAttemptAtUnix > seconds {
 			continue
 		}
+		// A delivery another sweep is already attempting is not due. The lease
+		// expires so a sweep that died holding one does not strand it.
+		if delivery.AttemptExpiresAt > seconds {
+			continue
+		}
 		due = append(due, delivery)
 	}
 	sort.Slice(due, func(first, second int) bool {
@@ -216,6 +225,52 @@ func (j *Journal) Due(now time.Time) ([]Delivery, error) {
 	return due, nil
 }
 
+// ClaimForSend takes one sweep's claim on a delivery.
+//
+// Two sweeps reading the same due list would otherwise both seal and both
+// send. The session's own conflict check stops the second from committing a
+// ratchet advance, but it does not stop the second from putting a message on
+// the wire, and a lease does.
+func (j *Journal) ClaimForSend(eventID, attemptID string, now time.Time, lease time.Duration) (Delivery, error) {
+	if err := j.usable(); err != nil {
+		return Delivery{}, err
+	}
+	if !eventPattern.MatchString(eventID) {
+		return Delivery{}, errors.New("invalid event identifier")
+	}
+	if !attemptPattern.MatchString(attemptID) {
+		return Delivery{}, errors.New("invalid send attempt identifier")
+	}
+	if now.IsZero() || now.Unix() < 0 {
+		return Delivery{}, errors.New("invalid send claim time")
+	}
+	seconds := lease / time.Second
+	if seconds < MinLeaseSeconds || seconds > MaxLeaseSeconds {
+		return Delivery{}, errors.New("send lease is outside its bounds")
+	}
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+
+	path := j.deliveryPath(eventID)
+	delivery, err := readDelivery(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Delivery{}, ErrUnknown
+		}
+		return Delivery{}, err
+	}
+	if delivery.State != StatePending {
+		return Delivery{}, ErrNotPending
+	}
+	current := uint64(now.Unix())
+	if delivery.AttemptExpiresAt > current && delivery.AttemptID != attemptID {
+		return Delivery{}, ErrLeaseMismatch
+	}
+	delivery.AttemptID = attemptID
+	delivery.AttemptExpiresAt = current + uint64(seconds)
+	return j.commitDelivery(path, delivery)
+}
+
 // Failed records a failed attempt and applies the retry disposition of its
 // code.
 //
@@ -223,7 +278,7 @@ func (j *Journal) Due(now time.Time) ([]Delivery, error) {
 // event, an approval hold stops the timer without abandoning anything, and a
 // retryable code moves the next attempt out along the fixed curve until the
 // attempt budget is spent.
-func (j *Journal) Failed(eventID string, code fault.Code, now time.Time) (Delivery, error) {
+func (j *Journal) Failed(eventID, attemptID string, code fault.Code, now time.Time) (Delivery, error) {
 	if err := j.usable(); err != nil {
 		return Delivery{}, err
 	}
@@ -247,8 +302,13 @@ func (j *Journal) Failed(eventID string, code fault.Code, now time.Time) (Delive
 	if delivery.State != StatePending {
 		return Delivery{}, ErrNotPending
 	}
+	if err := holdsAttempt(delivery, attemptID); err != nil {
+		return Delivery{}, err
+	}
 	seconds := uint64(now.Unix())
 	delivery.Attempts++
+	delivery.AttemptID = ""
+	delivery.AttemptExpiresAt = 0
 	delivery.LastCode = code
 
 	retry := fault.NextCode(code, int(delivery.Attempts))
@@ -279,14 +339,16 @@ func (j *Journal) Failed(eventID string, code fault.Code, now time.Time) (Delive
 	return j.commitDelivery(path, delivery)
 }
 
-// Delivered records that a recipient device durably accepted the event.
-func (j *Journal) Delivered(eventID string, now time.Time) (Delivery, error) {
-	return j.settle(eventID, StateDelivered, now)
+// Delivered records that a recipient device durably accepted the event. Only
+// the sweep holding the attempt may settle it.
+func (j *Journal) Delivered(eventID, attemptID string, now time.Time) (Delivery, error) {
+	return j.settle(eventID, attemptID, StateDelivered, now)
 }
 
-// Abandon gives up on an event on the owner's instruction.
+// Abandon gives up on an event on the owner's instruction. It needs no attempt
+// because the owner is overriding whatever is in flight.
 func (j *Journal) Abandon(eventID string, now time.Time) (Delivery, error) {
-	return j.settle(eventID, StateAbandoned, now)
+	return j.settle(eventID, "", StateAbandoned, now)
 }
 
 // Resume returns a held delivery to the queue once the decision it was waiting
@@ -321,7 +383,17 @@ func (j *Journal) Resume(eventID string, now time.Time) (Delivery, error) {
 	}
 	delivery.State = StatePending
 	delivery.NextAttemptAtUnix = seconds
+	delivery.AttemptID = ""
+	delivery.AttemptExpiresAt = 0
 	return j.commitDelivery(path, delivery)
+}
+
+// holdsAttempt refuses a settlement from a sweep whose claim was superseded.
+func holdsAttempt(delivery Delivery, attemptID string) error {
+	if delivery.AttemptID == "" || delivery.AttemptID != attemptID {
+		return ErrLeaseMismatch
+	}
+	return nil
 }
 
 // LookupDelivery returns the durable state of an outbound event.
@@ -344,7 +416,7 @@ func (j *Journal) LookupDelivery(eventID string) (Delivery, bool, error) {
 	return delivery, true, nil
 }
 
-func (j *Journal) settle(eventID string, state DeliveryState, now time.Time) (Delivery, error) {
+func (j *Journal) settle(eventID, attemptID string, state DeliveryState, now time.Time) (Delivery, error) {
 	if err := j.usable(); err != nil {
 		return Delivery{}, err
 	}
@@ -368,8 +440,15 @@ func (j *Journal) settle(eventID string, state DeliveryState, now time.Time) (De
 	if delivery.State != StatePending && delivery.State != StateHeld {
 		return Delivery{}, ErrNotPending
 	}
+	if attemptID != "" {
+		if err := holdsAttempt(delivery, attemptID); err != nil {
+			return Delivery{}, err
+		}
+	}
 	delivery.State = state
 	delivery.NextAttemptAtUnix = 0
+	delivery.AttemptID = ""
+	delivery.AttemptExpiresAt = 0
 	delivery.SettledAtUnix = uint64(now.Unix())
 	return j.commitDelivery(path, delivery)
 }
@@ -489,6 +568,8 @@ func (j *Journal) ExpireDeliveries(now time.Time) (int, error) {
 		}
 		delivery.State = StateAbandoned
 		delivery.NextAttemptAtUnix = 0
+		delivery.AttemptID = ""
+		delivery.AttemptExpiresAt = 0
 		delivery.SettledAtUnix = seconds
 		if delivery.LastCode == "" {
 			delivery.LastCode = fault.CodeTimeout

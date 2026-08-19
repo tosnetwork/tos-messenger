@@ -14,6 +14,7 @@ package dispatch
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"time"
 
@@ -65,7 +66,13 @@ type Config struct {
 	Sender   Sender
 	Bindings BindingResolver
 	Now      func() time.Time
+	// AttemptLease bounds how long one sweep may hold a delivery. A lease that
+	// never expires strands an event when the sweep holding it dies.
+	AttemptLease time.Duration
 }
+
+// DefaultAttemptLease is how long one sweep holds a delivery by default.
+const DefaultAttemptLease = 2 * time.Minute
 
 // Dispatcher sends what the journal says is due.
 type Dispatcher struct {
@@ -109,6 +116,12 @@ func New(config Config) (*Dispatcher, error) {
 	}
 	if config.Now == nil {
 		config.Now = time.Now
+	}
+	if config.AttemptLease == 0 {
+		config.AttemptLease = DefaultAttemptLease
+	}
+	if config.AttemptLease < time.Second {
+		return nil, errors.New("the send attempt lease is below its floor")
 	}
 	return &Dispatcher{config: config}, nil
 }
@@ -179,7 +192,17 @@ func (d *Dispatcher) Sweep(ctx context.Context, limit int) (Summary, error) {
 		if err := ctx.Err(); err != nil {
 			return summary, err
 		}
-		sealed, err := d.attempt(ctx, delivery, now)
+		attemptID, err := newAttemptID()
+		if err != nil {
+			return summary, err
+		}
+		// One sweep at a time owns a delivery. Two sweeps reading the same due
+		// list would otherwise both send it; the session conflict check stops
+		// the second ratchet advance but not the second message.
+		if _, err := d.config.Journal.ClaimForSend(delivery.EventID, attemptID, now, d.config.AttemptLease); err != nil {
+			continue
+		}
+		sealed, err := d.attempt(ctx, delivery, attemptID, now)
 		if sealed {
 			summary.Sealed++
 		}
@@ -187,7 +210,7 @@ func (d *Dispatcher) Sweep(ctx context.Context, limit int) (Summary, error) {
 			summary.Sent++
 			continue
 		}
-		settled, failErr := d.config.Journal.Failed(delivery.EventID, fault.CodeOf(err), d.config.Now())
+		settled, failErr := d.config.Journal.Failed(delivery.EventID, attemptID, fault.CodeOf(err), d.config.Now())
 		if failErr != nil {
 			return summary, failErr
 		}
@@ -204,7 +227,7 @@ func (d *Dispatcher) Sweep(ctx context.Context, limit int) (Summary, error) {
 }
 
 // attempt seals if necessary and sends. It reports whether it sealed.
-func (d *Dispatcher) attempt(ctx context.Context, delivery eventlog.Delivery, now time.Time) (bool, error) {
+func (d *Dispatcher) attempt(ctx context.Context, delivery eventlog.Delivery, attemptID string, now time.Time) (bool, error) {
 	ciphertext, err := delivery.Ciphertext()
 	if err != nil {
 		return false, fault.Wrap(fault.CodeInternal, err)
@@ -228,7 +251,7 @@ func (d *Dispatcher) attempt(ctx context.Context, delivery eventlog.Delivery, no
 	if err := d.config.Sender.Send(ctx, message); err != nil {
 		return sealed, err
 	}
-	if _, err := d.config.Journal.Delivered(delivery.EventID, d.config.Now()); err != nil {
+	if _, err := d.config.Journal.Delivered(delivery.EventID, attemptID, d.config.Now()); err != nil {
 		return sealed, fault.Wrap(fault.CodeInternal, err)
 	}
 	return sealed, nil
@@ -273,9 +296,21 @@ func (d *Dispatcher) seal(delivery eventlog.Delivery, now time.Time) ([]byte, er
 	if err != nil {
 		return nil, fault.Wrap(fault.CodeInternal, err)
 	}
+	// The generation read before the transition is presented with it. If the
+	// session moved while this seal was being prepared, the commit is refused
+	// and this attempt's ciphertext is discarded rather than sent under a key
+	// somebody else already used.
 	if _, err := d.config.Journal.CommitSealed(delivery.SessionID, record.AlgorithmID,
-		next, delivery.EventID, ciphertext, now); err != nil {
+		record.Generation, next, delivery.EventID, ciphertext, now); err != nil {
 		return nil, fault.Wrap(fault.CodeInternal, err)
 	}
 	return ciphertext, nil
+}
+
+func newAttemptID() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", errors.New("generate send attempt identifier")
+	}
+	return eventlog.NewAttemptID(raw)
 }

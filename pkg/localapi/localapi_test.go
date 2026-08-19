@@ -2,12 +2,14 @@ package localapi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -134,16 +136,34 @@ func (h *harness) event(t *testing.T, body string) envelope.Event {
 
 func (h *harness) call(t *testing.T, request Request) Response {
 	t.Helper()
-	raw, err := EncodeRequest(request)
+	return h.callAs(t, PrincipalRuntime, request)
+}
+
+func (h *harness) owner(t *testing.T, request Request) Response {
+	t.Helper()
+	return h.callAs(t, PrincipalOwner, request)
+}
+
+func (h *harness) callAs(t *testing.T, principal Principal, request Request) Response {
+	t.Helper()
+	framed, err := EncodeRequest(request)
 	if err != nil {
 		t.Fatalf("encode request: %v", err)
 	}
-	response := h.server.Handle(context.Background(), raw)
+	body, err := ReadFrame(bytes.NewReader(framed))
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+	response := h.server.Handle(context.Background(), principal, body)
 	encoded, err := EncodeResponse(response)
 	if err != nil {
 		t.Fatalf("encode response: %v", err)
 	}
-	decoded, err := DecodeResponse(encoded)
+	responseBody, err := ReadFrame(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatalf("read response frame: %v", err)
+	}
+	decoded, err := DecodeResponse(responseBody)
 	if err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -159,6 +179,7 @@ func (h *harness) receive(t *testing.T, event envelope.Event) {
 	if _, _, err := h.journal.Accept(eventlog.Entry{
 		EventID: event.EventID, SenderEndpointID: event.SenderEndpointID,
 		ConversationID: event.ConversationID, Payload: payload,
+		Admission:      eventlog.AdmissionAdmitted,
 		ReceivedAtUnix: uint64(h.clock.Unix()),
 	}); err != nil {
 		t.Fatalf("accept: %v", err)
@@ -284,11 +305,11 @@ func TestOwnerDecisionResumesAHeldDelivery(t *testing.T) {
 		SessionID: sessionID, RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 86_400}); !response.OK {
 		t.Fatalf("queue: %+v", response)
 	}
-	if _, err := h.journal.Failed(event.EventID, fault.CodeApprovalRequired, h.clock); err != nil {
+	if _, err := h.journal.Failed(event.EventID, sendAttempt(t, h, event.EventID, 0x40), fault.CodeApprovalRequired, h.clock); err != nil {
 		t.Fatalf("hold: %v", err)
 	}
 
-	approved := h.call(t, Request{Op: OpApprove, EventID: event.EventID})
+	approved := h.owner(t, Request{Op: OpApprove, EventID: event.EventID})
 	if !approved.OK {
 		t.Fatalf("approve: %+v", approved)
 	}
@@ -310,10 +331,10 @@ func TestOwnerDecisionResumesAHeldDelivery(t *testing.T) {
 		SessionID: sessionID, RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 86_400}); !response.OK {
 		t.Fatalf("queue: %+v", response)
 	}
-	if _, err := h.journal.Failed(second.EventID, fault.CodeApprovalRequired, h.clock); err != nil {
+	if _, err := h.journal.Failed(second.EventID, sendAttempt(t, h, second.EventID, 0x41), fault.CodeApprovalRequired, h.clock); err != nil {
 		t.Fatalf("hold: %v", err)
 	}
-	if denied := h.call(t, Request{Op: OpDeny, EventID: second.EventID}); !denied.OK {
+	if denied := h.owner(t, Request{Op: OpDeny, EventID: second.EventID}); !denied.OK {
 		t.Fatalf("deny: %+v", denied)
 	}
 	delivery, _, err = h.journal.LookupDelivery(second.EventID)
@@ -357,11 +378,15 @@ func TestRequestsCarryOnlyWhatTheyUse(t *testing.T) {
 }
 
 func TestDecodeRejectsMalformedFrames(t *testing.T) {
-	valid, err := EncodeRequest(Request{Op: OpPending})
+	framed, err := EncodeRequest(Request{Op: OpPending})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	line := strings.TrimSuffix(string(valid), "\n")
+	body, err := ReadFrame(bytes.NewReader(framed))
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+	line := string(body)
 	for name, raw := range map[string][]byte{
 		"unknown field": []byte(line[:len(line)-1] + `,"extra":1}`),
 		"trailing json": []byte(line + "{}"),
@@ -442,7 +467,7 @@ func TestServeOverTheSocket(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	defer listener.Close()
-	go func() { _ = h.server.Serve(context.Background(), listener) }()
+	go func() { _ = h.server.Serve(context.Background(), listener, PrincipalRuntime) }()
 
 	connection, err := net.Dial("unix", path)
 	if err != nil {
@@ -457,11 +482,11 @@ func TestServeOverTheSocket(t *testing.T) {
 	if _, err := connection.Write(request); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	line, err := bufio.NewReader(connection).ReadBytes('\n')
+	body, err := ReadFrame(bufio.NewReader(connection))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	response, err := DecodeResponse(line)
+	response, err := DecodeResponse(body)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -487,4 +512,180 @@ func TestServerRequiresEveryDependency(t *testing.T) {
 	if _, err := NewServer(Config{Journal: h.journal, Dispatcher: dispatcher, Timeout: -1}); err == nil {
 		t.Fatal("a negative timeout was accepted")
 	}
+}
+
+// The invariant the separation exists for: the party that asks for an approval
+// must not be able to grant it.
+func TestRuntimeCannotApproveAnything(t *testing.T) {
+	h := newHarness(t)
+	for _, operation := range []Operation{OpApprove, OpDeny, OpAdmit, OpRefuse, OpAwaitingAdmission} {
+		t.Run(string(operation), func(t *testing.T) {
+			if Permits(PrincipalRuntime, operation) {
+				t.Fatalf("the runtime principal permits %q", operation)
+			}
+			request := Request{Op: operation, EventID: "evt_" + strings.Repeat("0", 64)}
+			if operation == OpAwaitingAdmission {
+				request = Request{Op: operation}
+			}
+			response := h.callAs(t, PrincipalRuntime, request)
+			if response.OK {
+				t.Fatalf("the runtime performed %q", operation)
+			}
+		})
+	}
+	// And the owner does no Agent work.
+	for _, operation := range []Operation{OpPending, OpClaim, OpComplete, OpReject, OpQueue} {
+		if Permits(PrincipalOwner, operation) {
+			t.Fatalf("the owner principal permits %q", operation)
+		}
+	}
+	if Permits("someone-else", OpPending) {
+		t.Fatal("an unknown principal was permitted")
+	}
+}
+
+// The owner's half of the loop: see what is waiting, decide, and only then
+// does the runtime see it.
+func TestOwnerAdmitsAnInboundEvent(t *testing.T) {
+	h := newHarness(t)
+	event := h.event(t, "from a stranger")
+	payload, err := envelope.EncodeEventJSON(event)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, _, err := h.journal.Accept(eventlog.Entry{
+		EventID: event.EventID, SenderEndpointID: event.SenderEndpointID,
+		ConversationID: event.ConversationID, Payload: payload,
+		Admission: eventlog.AdmissionPending, ReceivedAtUnix: uint64(h.clock.Unix()),
+	}); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+
+	if listing := h.call(t, Request{Op: OpPending}); len(listing.Events) != 0 {
+		t.Fatalf("a waiting event was offered to the runtime: %+v", listing)
+	}
+	waiting := h.owner(t, Request{Op: OpAwaitingAdmission})
+	if !waiting.OK || len(waiting.Events) != 1 {
+		t.Fatalf("the owner sees nothing waiting: %+v", waiting)
+	}
+	if admitted := h.owner(t, Request{Op: OpAdmit, EventID: event.EventID}); !admitted.OK {
+		t.Fatalf("admit: %+v", admitted)
+	}
+	if listing := h.call(t, Request{Op: OpPending}); len(listing.Events) != 1 {
+		t.Fatalf("an admitted event did not reach the runtime: %+v", listing)
+	}
+}
+
+func TestOwnerRefusesAnInboundEvent(t *testing.T) {
+	h := newHarness(t)
+	event := h.event(t, "from a stranger")
+	payload, err := envelope.EncodeEventJSON(event)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, _, err := h.journal.Accept(eventlog.Entry{
+		EventID: event.EventID, SenderEndpointID: event.SenderEndpointID,
+		ConversationID: event.ConversationID, Payload: payload,
+		Admission: eventlog.AdmissionPending, ReceivedAtUnix: uint64(h.clock.Unix()),
+	}); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if refused := h.owner(t, Request{Op: OpRefuse, EventID: event.EventID,
+		Code: fault.CodeAdmissionRequired}); !refused.OK {
+		t.Fatalf("refuse: %+v", refused)
+	}
+	if listing := h.call(t, Request{Op: OpPending}); len(listing.Events) != 0 {
+		t.Fatalf("a refused event reached the runtime: %+v", listing)
+	}
+	if waiting := h.owner(t, Request{Op: OpAwaitingAdmission}); len(waiting.Events) != 0 {
+		t.Fatalf("a decided event is still waiting: %+v", waiting)
+	}
+	// The decision is made once.
+	if again := h.owner(t, Request{Op: OpAdmit, EventID: event.EventID}); again.OK {
+		t.Fatal("a refused event was admitted afterwards")
+	}
+}
+
+// The frame bound has to be the bound, not whatever buffer the reader happened
+// to allocate. A 4 KiB reader silently made every larger message unsendable.
+func TestLargeFramesTravelOverTheSocket(t *testing.T) {
+	h := newHarness(t)
+	path := filepath.Join(t.TempDir(), "run", "runtime.sock")
+	listener, err := Listen(path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	go func() { _ = h.server.Serve(context.Background(), listener, PrincipalRuntime) }()
+
+	for _, size := range []int{4 << 10, 64 << 10, 100 << 10} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			event := h.event(t, strings.Repeat("x", size))
+			encoded, err := envelope.EncodeEventJSON(event)
+			if err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			request, err := EncodeRequest(Request{
+				Op: OpQueue, Event: json.RawMessage(encoded), SessionID: sessionID,
+				RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 3600,
+			})
+			if err != nil {
+				t.Fatalf("encode request: %v", err)
+			}
+			if len(request) <= size {
+				t.Fatalf("the request did not carry its content: %d bytes", len(request))
+			}
+
+			connection, err := net.Dial("unix", path)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer connection.Close()
+			if _, err := connection.Write(request); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			body, err := ReadFrame(bufio.NewReader(connection))
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			response, err := DecodeResponse(body)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if !response.OK {
+				t.Fatalf("a %d byte event was refused: %+v", size, response)
+			}
+		})
+	}
+}
+
+// A frame past the bound costs four bytes, not the size it claimed.
+func TestOversizedFrameIsRefusedBeforeAllocation(t *testing.T) {
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(MaxFrameBytes+1))
+	if _, err := ReadFrame(bytes.NewReader(header[:])); err == nil {
+		t.Fatal("an oversized frame was accepted")
+	}
+	binary.BigEndian.PutUint32(header[:], 0)
+	if _, err := ReadFrame(bytes.NewReader(header[:])); err == nil {
+		t.Fatal("an empty frame was accepted")
+	}
+	// A frame whose declared length exceeds what follows fails rather than
+	// returning a short body.
+	binary.BigEndian.PutUint32(header[:], 16)
+	if _, err := ReadFrame(bytes.NewReader(append(header[:], []byte("short")...))); err == nil {
+		t.Fatal("a truncated frame was accepted")
+	}
+}
+
+func sendAttempt(t *testing.T, h *harness, eventID string, seed byte) string {
+	t.Helper()
+	id, err := eventlog.NewAttemptID(bytes.Repeat([]byte{seed}, 32))
+	if err != nil {
+		t.Fatalf("attempt id: %v", err)
+	}
+	if _, err := h.journal.ClaimForSend(eventID, id, h.clock, time.Minute); err != nil {
+		t.Fatalf("claim for send: %v", err)
+	}
+	return id
 }

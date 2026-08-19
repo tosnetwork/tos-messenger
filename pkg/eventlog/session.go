@@ -22,9 +22,23 @@ const (
 
 var sessionPattern = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
 
+// ErrSessionConflict reports that a session advanced while a caller was
+// working from an earlier version of it.
+//
+// It exists because sealing is not instantaneous. A caller reads a state,
+// performs a cryptographic transition outside any lock, and commits the
+// result; if two callers do that at once and both commit, one ratchet advance
+// is lost and two messages are sent under the same message key. Refusing the
+// second commit is what makes that impossible, and the loser's transition is
+// discarded rather than persisted.
+var ErrSessionConflict = errors.New("session advanced while this transition was being prepared")
+
 // SessionRecord is one session's persisted cryptographic state.
 type SessionRecord struct {
-	Schema        string `json:"schema"`
+	Schema string `json:"schema"`
+	// Generation increments on every commit. A caller presents the generation
+	// it read, and a commit against a stale one is refused.
+	Generation    uint64 `json:"generation"`
 	SessionID     string `json:"session_id"`
 	AlgorithmID   string `json:"algorithm_id"`
 	StateBase64   string `json:"state_base64"`
@@ -90,7 +104,7 @@ func (j *Journal) PutSessionState(sessionID, algorithm string, state e2ee.State,
 // the same next state, so nothing is lost. The other order consumes the
 // message key first and then loses the event, and no retry recovers it: the
 // peer's copy no longer opens against the advanced state.
-func (j *Journal) CommitInbound(sessionID, algorithm string, next e2ee.State, entry Entry, now time.Time) (bool, Record, error) {
+func (j *Journal) CommitInbound(sessionID, algorithm string, expectedGeneration uint64, next e2ee.State, entry Entry, now time.Time) (bool, Record, error) {
 	if err := j.usable(); err != nil {
 		return false, Record{}, err
 	}
@@ -103,7 +117,7 @@ func (j *Journal) CommitInbound(sessionID, algorithm string, next e2ee.State, en
 	}
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
-	if err := j.writeSession(sessionID, algorithm, next, now); err != nil {
+	if err := j.advanceSession(sessionID, algorithm, expectedGeneration, next, now); err != nil {
 		return false, Record{}, err
 	}
 	return fresh, record, nil
@@ -117,7 +131,7 @@ func (j *Journal) CommitInbound(sessionID, algorithm string, next e2ee.State, en
 // other order would leave a ciphertext that may already have been released
 // while the state rolled back, and the next seal would reuse a message key and
 // nonce, which is the one failure a ratchet cannot absorb.
-func (j *Journal) CommitSealed(sessionID, algorithm string, next e2ee.State, eventID string, ciphertext []byte, now time.Time) (Delivery, error) {
+func (j *Journal) CommitSealed(sessionID, algorithm string, expectedGeneration uint64, next e2ee.State, eventID string, ciphertext []byte, now time.Time) (Delivery, error) {
 	if err := j.usable(); err != nil {
 		return Delivery{}, err
 	}
@@ -147,7 +161,7 @@ func (j *Journal) CommitSealed(sessionID, algorithm string, next e2ee.State, eve
 	if delivery.SessionID != sessionID {
 		return Delivery{}, errors.New("sealed message belongs to another session")
 	}
-	if err := j.writeSession(sessionID, algorithm, next, now); err != nil {
+	if err := j.advanceSession(sessionID, algorithm, expectedGeneration, next, now); err != nil {
 		return Delivery{}, err
 	}
 	delivery.CiphertextBase64 = base64.StdEncoding.EncodeToString(ciphertext)
@@ -155,9 +169,34 @@ func (j *Journal) CommitSealed(sessionID, algorithm string, next e2ee.State, eve
 	return j.commitDelivery(path, delivery)
 }
 
+// advanceSession commits a transition only if the session is still where the
+// caller left it.
+func (j *Journal) advanceSession(sessionID, algorithm string, expectedGeneration uint64, state e2ee.State, now time.Time) error {
+	current, err := readSession(j.sessionPath(sessionID))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		current = SessionRecord{}
+	}
+	if current.Generation != expectedGeneration {
+		return ErrSessionConflict
+	}
+	return j.writeSessionAt(sessionID, algorithm, expectedGeneration+1, state, now)
+}
+
 func (j *Journal) writeSession(sessionID, algorithm string, state e2ee.State, now time.Time) error {
+	current, err := readSession(j.sessionPath(sessionID))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return j.writeSessionAt(sessionID, algorithm, current.Generation+1, state, now)
+}
+
+func (j *Journal) writeSessionAt(sessionID, algorithm string, generation uint64, state e2ee.State, now time.Time) error {
 	record := SessionRecord{
 		Schema:        SessionSchema,
+		Generation:    generation,
 		SessionID:     sessionID,
 		AlgorithmID:   algorithm,
 		StateBase64:   base64.StdEncoding.EncodeToString(state),
@@ -203,7 +242,7 @@ func readSession(path string) (SessionRecord, error) {
 		return SessionRecord{}, errors.New("invalid session record")
 	}
 	if record.Schema != SessionSchema || !sessionPattern.MatchString(record.SessionID) ||
-		record.UpdatedAtUnix == 0 || !canon.ValidDigest(record.StateDigest) ||
+		record.Generation == 0 || record.UpdatedAtUnix == 0 || !canon.ValidDigest(record.StateDigest) ||
 		e2ee.ValidateAlgorithmID(record.AlgorithmID) != nil {
 		return SessionRecord{}, errors.New("invalid session record")
 	}

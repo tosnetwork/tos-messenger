@@ -242,11 +242,20 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
+	// A held event is stored as awaiting the owner, not as ordinary work with
+	// a note attached. Recording the hold only in the return value left the
+	// event queued, and a runtime draining its inbox would take it before the
+	// owner ever saw the question.
+	admitted := eventlog.AdmissionAdmitted
+	if admission == AdmitHoldForApproval {
+		admitted = eventlog.AdmissionPending
+	}
 	fresh, _, err := g.config.Journal.Accept(eventlog.Entry{
 		EventID:          inbound.Event.EventID,
 		SenderEndpointID: inbound.Event.SenderEndpointID,
 		ConversationID:   inbound.Event.ConversationID,
 		Payload:          payload,
+		Admission:        admitted,
 		ReceivedAtUnix:   inbound.ReceivedAtUnix,
 	})
 	if err != nil {

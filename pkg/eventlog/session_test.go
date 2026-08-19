@@ -52,7 +52,7 @@ func TestCommitInboundStoresTheEventBeforeAdvancing(t *testing.T) {
 	journal, _ := openJournal(t)
 	now := time.Unix(int64(acceptAt), 0)
 
-	fresh, record, err := journal.CommitInbound(session(0x11), algorithm,
+	fresh, record, err := journal.CommitInbound(session(0x11), algorithm, 0,
 		e2ee.State("advanced"), entry(eventA, endpoint), now)
 	if err != nil {
 		t.Fatalf("commit: %v", err)
@@ -73,7 +73,7 @@ func TestCommitInboundStoresTheEventBeforeAdvancing(t *testing.T) {
 	}
 
 	// A redelivery is a duplicate and still advances nothing that matters.
-	fresh, _, err = journal.CommitInbound(session(0x11), algorithm,
+	fresh, _, err = journal.CommitInbound(session(0x11), algorithm, 1,
 		e2ee.State("advanced again"), entry(eventA, endpoint), now)
 	if err != nil {
 		t.Fatalf("commit: %v", err)
@@ -105,7 +105,7 @@ func TestCommitSealedAdvancesBeforeStoringTheCiphertext(t *testing.T) {
 		t.Fatalf("an unsealed delivery already had a ciphertext: %v", err)
 	}
 
-	delivery, err := journal.CommitSealed(session(0x11), algorithm,
+	delivery, err := journal.CommitSealed(session(0x11), algorithm, 0,
 		e2ee.State("advanced"), eventA, []byte("sealed bytes"), now)
 	if err != nil {
 		t.Fatalf("commit sealed: %v", err)
@@ -137,7 +137,7 @@ func TestSealedCiphertextSurvivesRestart(t *testing.T) {
 	if _, _, err := journal.Enqueue(outbound(eventA)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if _, err := journal.CommitSealed(session(0x11), algorithm,
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 0,
 		e2ee.State("advanced"), eventA, []byte("sealed bytes"), now); err != nil {
 		t.Fatalf("commit sealed: %v", err)
 	}
@@ -191,16 +191,16 @@ func TestSessionCommitsRejectUnusableInput(t *testing.T) {
 	if err := journal.PutSessionState(session(0x11), algorithm, state, time.Time{}); err == nil {
 		t.Fatal("a zero clock was accepted")
 	}
-	if _, err := journal.CommitSealed(session(0x11), algorithm, state, eventA, []byte("x"), now); !errors.Is(err, ErrUnknown) {
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, state, eventA, []byte("x"), now); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("sealing an unqueued event produced %v", err)
 	}
 	if _, _, err := journal.Enqueue(outbound(eventA)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if _, err := journal.CommitSealed(session(0x11), algorithm, state, eventA, nil, now); err == nil {
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, state, eventA, nil, now); err == nil {
 		t.Fatal("an empty ciphertext was accepted")
 	}
-	if _, err := journal.CommitSealed(session(0x11), algorithm, state, eventA,
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, state, eventA,
 		make([]byte, MaxCiphertextBytes+1), now); err == nil {
 		t.Fatal("an unbounded ciphertext was accepted")
 	}
@@ -218,10 +218,107 @@ func TestClosedJournalRefusesSessionWork(t *testing.T) {
 	if _, _, err := journal.SessionState(session(0x11)); err == nil {
 		t.Fatal("a closed journal read session state")
 	}
-	if _, _, err := journal.CommitInbound(session(0x11), algorithm, e2ee.State("x"), entry(eventA, endpoint), now); err == nil {
+	if _, _, err := journal.CommitInbound(session(0x11), algorithm, 1, e2ee.State("x"), entry(eventA, endpoint), now); err == nil {
 		t.Fatal("a closed journal committed inbound")
 	}
-	if _, err := journal.CommitSealed(session(0x11), algorithm, e2ee.State("x"), eventA, []byte("y"), now); err == nil {
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, e2ee.State("x"), eventA, []byte("y"), now); err == nil {
 		t.Fatal("a closed journal committed a sealed message")
+	}
+}
+
+func sessionGeneration(t *testing.T, journal *Journal, sessionID string) uint64 {
+	t.Helper()
+	record, found, err := journal.SessionState(sessionID)
+	if err != nil || !found {
+		t.Fatalf("session state: found=%v err=%v", found, err)
+	}
+	return record.Generation
+}
+
+// Two sweeps preparing a transition from the same session must not both commit
+// it: one ratchet advance would be lost and two messages would go out under
+// the same message key.
+func TestConcurrentTransitionsConflict(t *testing.T) {
+	journal, _ := openJournal(t)
+	now := time.Unix(int64(acceptAt), 0)
+	if err := journal.PutSessionState(session(0x11), algorithm, e2ee.State("start"), now); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	generation := sessionGeneration(t, journal, session(0x11))
+
+	if _, _, err := journal.Enqueue(outbound(eventA)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, _, err := journal.Enqueue(outbound(eventB)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Both read the same generation, as two concurrent sweeps would.
+	if _, err := journal.CommitSealed(session(0x11), algorithm, generation,
+		e2ee.State("advanced by A"), eventA, []byte("ciphertext A"), now); err != nil {
+		t.Fatalf("first commit: %v", err)
+	}
+	if _, err := journal.CommitSealed(session(0x11), algorithm, generation,
+		e2ee.State("advanced by B"), eventB, []byte("ciphertext B"), now); !errors.Is(err, ErrSessionConflict) {
+		t.Fatalf("a stale transition was committed: %v", err)
+	}
+
+	// The loser's transition was discarded, not persisted.
+	record, _, err := journal.SessionState(session(0x11))
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	state, err := record.State()
+	if err != nil {
+		t.Fatalf("state: %v", err)
+	}
+	if string(state) != "advanced by A" {
+		t.Fatalf("the losing transition was persisted: %q", state)
+	}
+	// And the loser's delivery was not left holding a ciphertext.
+	losing, _, err := journal.LookupDelivery(eventB)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if ciphertext, err := losing.Ciphertext(); err != nil || ciphertext != nil {
+		t.Fatalf("a discarded transition left a ciphertext: %v", err)
+	}
+}
+
+// One sweep at a time owns a delivery, and a sweep that dies holding one does
+// not strand it.
+func TestSendAttemptIsLeased(t *testing.T) {
+	journal, _ := openJournal(t)
+	now := time.Unix(int64(acceptAt), 0)
+	if _, _, err := journal.Enqueue(outbound(eventA)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	first := attempt(0x50)
+	if _, err := journal.ClaimForSend(eventA, first, now, time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := journal.ClaimForSend(eventA, attempt(0x51), now, time.Minute); !errors.Is(err, ErrLeaseMismatch) {
+		t.Fatalf("a second sweep took a leased delivery: %v", err)
+	}
+	if due, err := journal.Due(now); err != nil || len(due) != 0 {
+		t.Fatalf("a leased delivery was still due: %+v %v", due, err)
+	}
+	// A settlement from a sweep that does not hold the attempt is refused.
+	if _, err := journal.Delivered(eventA, attempt(0x51), now); !errors.Is(err, ErrLeaseMismatch) {
+		t.Fatalf("a foreign attempt settled the delivery: %v", err)
+	}
+
+	expired := now.Add(2 * time.Minute)
+	if due, err := journal.Due(expired); err != nil || len(due) != 1 {
+		t.Fatalf("an expired lease did not return the delivery: %+v %v", due, err)
+	}
+	if _, err := journal.ClaimForSend(eventA, attempt(0x51), expired, time.Minute); err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if _, err := journal.Delivered(eventA, first, expired); !errors.Is(err, ErrLeaseMismatch) {
+		t.Fatalf("a superseded attempt settled the delivery: %v", err)
+	}
+	if _, err := journal.Delivered(eventA, attempt(0x51), expired); err != nil {
+		t.Fatalf("delivered: %v", err)
 	}
 }

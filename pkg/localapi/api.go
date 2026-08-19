@@ -18,6 +18,7 @@ package localapi
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -32,9 +33,11 @@ const (
 	// ResponseSchema is the strict wire schema of a response.
 	ResponseSchema = "tos.messaging.local-response.v1"
 
-	// MaxFrameBytes bounds one request or response line. It has to hold an
+	// MaxFrameBytes bounds one request or response body. It has to hold an
 	// event, because a claim hands one back.
 	MaxFrameBytes = 512 << 10
+	// frameHeaderBytes is the length prefix.
+	frameHeaderBytes = 4
 	// MaxEventsPerResponse bounds one pending listing.
 	MaxEventsPerResponse = 64
 )
@@ -54,15 +57,62 @@ const (
 	OpReject Operation = "inbox.reject"
 	// OpQueue submits an event for delivery.
 	OpQueue Operation = "outbox.queue"
-	// OpApprove is the owner authorising a held delivery. It exists only here.
+
+	// OpAwaitingAdmission lists inbound events waiting for the owner. A
+	// runtime never sees these; deciding about them is what the owner is for.
+	OpAwaitingAdmission Operation = "approvals.pending"
+	// OpAdmit is the owner letting an inbound event reach the runtime.
+	OpAdmit Operation = "approvals.admit"
+	// OpRefuse is the owner refusing one.
+	OpRefuse Operation = "approvals.refuse"
+
+	// OpApprove is the owner releasing a held outbound delivery.
 	OpApprove Operation = "owner.approve"
-	// OpDeny is the owner refusing one.
+	// OpDeny is the owner abandoning one.
 	OpDeny Operation = "owner.deny"
 )
 
+// Principal is which side of the boundary a connection speaks for.
+//
+// The separation exists because of one invariant: the party that asks for an
+// approval must not be able to grant it. A runtime that could call the
+// approval operations would be approving its own requests, and calling that a
+// human decision would be a fiction the code supports.
+type Principal string
+
+const (
+	// PrincipalRuntime is the Agent runtime. It drains the inbox and submits
+	// events, and it can approve nothing.
+	PrincipalRuntime Principal = "runtime"
+	// PrincipalOwner is the owner's own interface. It decides, and it does no
+	// Agent work.
+	PrincipalOwner Principal = "owner"
+)
+
+var permitted = map[Principal]map[Operation]struct{}{
+	PrincipalRuntime: {
+		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {},
+	},
+	PrincipalOwner: {
+		OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
+		OpApprove: {}, OpDeny: {},
+	},
+}
+
+// Permits reports whether a principal may perform an operation.
+func Permits(principal Principal, operation Operation) bool {
+	operations, known := permitted[principal]
+	if !known {
+		return false
+	}
+	_, allowed := operations[operation]
+	return allowed
+}
+
 var operations = map[Operation]struct{}{
-	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {},
-	OpQueue: {}, OpApprove: {}, OpDeny: {},
+	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {},
+	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
+	OpApprove: {}, OpDeny: {},
 }
 
 var (
@@ -111,7 +161,11 @@ type Response struct {
 	Fresh  bool           `json:"fresh,omitempty"`
 }
 
-// EncodeRequest returns one framed request line.
+// EncodeRequest returns one framed request.
+//
+// Framing is a length prefix rather than a delimiter. A delimited frame is
+// bounded by whatever buffer the reader happened to allocate, and a bound that
+// depends on a buffer size is a bound nobody stated.
 func EncodeRequest(request Request) ([]byte, error) {
 	if err := ValidateRequest(request); err != nil {
 		return nil, err
@@ -121,10 +175,7 @@ func EncodeRequest(request Request) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(encoded)+1 > MaxFrameBytes {
-		return nil, errors.New("request exceeds its frame bound")
-	}
-	return append(encoded, '\n'), nil
+	return frame(encoded)
 }
 
 // DecodeRequest parses one framed request.
@@ -148,7 +199,7 @@ func DecodeRequest(raw []byte) (Request, error) {
 	return request, nil
 }
 
-// EncodeResponse returns one framed response line.
+// EncodeResponse returns one framed response.
 func EncodeResponse(response Response) ([]byte, error) {
 	response.Schema = ResponseSchema
 	if !response.OK && response.Code == "" {
@@ -158,10 +209,49 @@ func EncodeResponse(response Response) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(encoded)+1 > MaxFrameBytes {
-		return nil, errors.New("response exceeds its frame bound")
+	return frame(encoded)
+}
+
+func frame(body []byte) ([]byte, error) {
+	if len(body) > MaxFrameBytes {
+		return nil, errors.New("frame exceeds its bound")
 	}
-	return append(encoded, '\n'), nil
+	out := make([]byte, frameHeaderBytes, frameHeaderBytes+len(body))
+	binary.BigEndian.PutUint32(out, uint32(len(body)))
+	return append(out, body...), nil
+}
+
+// ReadFrame reads one length-prefixed body.
+//
+// The declared length is checked before anything is allocated, so an oversized
+// frame costs four bytes rather than the size it claimed.
+func ReadFrame(reader io.Reader) ([]byte, error) {
+	var header [frameHeaderBytes]byte
+	if _, err := io.ReadFull(reader, header[:]); err != nil {
+		return nil, err
+	}
+	length := binary.BigEndian.Uint32(header[:])
+	if length == 0 {
+		return nil, errors.New("empty frame")
+	}
+	if length > MaxFrameBytes {
+		return nil, errors.New("frame exceeds its bound")
+	}
+	body := make([]byte, length)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+// WriteFrame writes one length-prefixed body.
+func WriteFrame(writer io.Writer, body []byte) error {
+	framed, err := frame(body)
+	if err != nil {
+		return err
+	}
+	_, err = writer.Write(framed)
+	return err
 }
 
 // DecodeResponse parses one framed response.
@@ -192,11 +282,11 @@ func ValidateRequest(request Request) error {
 		return errors.New("unknown local operation")
 	}
 	switch request.Op {
-	case OpPending:
+	case OpPending, OpAwaitingAdmission:
 		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
 			return errors.New("invalid pending limit")
 		}
-		return requireEmpty(request, "pending", request.EventID, request.LeaseID, request.SessionID)
+		return requireEmpty(request, "a listing", request.EventID, request.LeaseID, request.SessionID)
 	case OpClaim:
 		if !eventPattern.MatchString(request.EventID) || !leasePattern.MatchString(request.LeaseID) {
 			return errors.New("a claim needs an event and a lease")
@@ -227,11 +317,19 @@ func ValidateRequest(request Request) error {
 			return errors.New("a submission needs an expiry")
 		}
 		return nil
-	case OpApprove, OpDeny:
+	case OpApprove, OpDeny, OpAdmit:
 		if !eventPattern.MatchString(request.EventID) {
 			return errors.New("an owner decision needs an event")
 		}
-		return requireEmpty(request, "owner decision", request.LeaseID, request.SessionID)
+		return requireEmpty(request, "an owner decision", request.LeaseID, request.SessionID)
+	case OpRefuse:
+		if !eventPattern.MatchString(request.EventID) {
+			return errors.New("an owner decision needs an event")
+		}
+		if request.Code != "" && !fault.Known(request.Code) {
+			return errors.New("unknown refusal code")
+		}
+		return requireEmpty(request, "an owner decision", request.LeaseID, request.SessionID)
 	}
 	return errors.New("unknown local operation")
 }

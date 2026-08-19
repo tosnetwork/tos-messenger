@@ -28,7 +28,8 @@ func testConfig(t *testing.T) Config {
 	return Config{
 		Schema:             ConfigSchema,
 		StateDir:           filepath.Join(root, "state"),
-		SocketPath:         filepath.Join(root, "run", "messenger.sock"),
+		SocketPath:         filepath.Join(root, "run", "runtime.sock"),
+		OwnerSocketPath:    filepath.Join(root, "run", "owner.sock"),
 		NetworkID:          "tos-local",
 		GenesisRootHash:    strings.Repeat("a", 64),
 		GenesisFileHash:    strings.Repeat("b", 64),
@@ -102,6 +103,7 @@ func TestSecondDaemonRefusesTheSameState(t *testing.T) {
 
 	second := config
 	second.SocketPath = filepath.Join(filepath.Dir(config.SocketPath), "second.sock")
+	second.OwnerSocketPath = filepath.Join(filepath.Dir(config.SocketPath), "second-owner.sock")
 	if _, err := Open(second, nil); !errors.Is(err, dirlock.ErrHeld) {
 		t.Fatalf("a second daemon opened the same state: %v", err)
 	}
@@ -291,7 +293,8 @@ func TestUnknownConfigurationKeysAreRefused(t *testing.T) {
 	valid := `{
 		"schema": "` + ConfigSchema + `",
 		"state_dir": "/var/lib/tos-messengerd",
-		"socket_path": "/run/tos-messengerd/messenger.sock",
+		"socket_path": "/run/tos-messengerd/runtime.sock",
+		"owner_socket_path": "/run/tos-messengerd/owner.sock",
 		"network_id": "tos-local",
 		"genesis_root_hash": "` + strings.Repeat("a", 64) + `",
 		"genesis_file_hash": "` + strings.Repeat("b", 64) + `",
@@ -346,11 +349,11 @@ func call(t *testing.T, path string, request localapi.Request) localapi.Response
 	if _, err := connection.Write(encoded); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	line, err := bufio.NewReader(connection).ReadBytes('\n')
+	body, err := localapi.ReadFrame(bufio.NewReader(connection))
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	response, err := localapi.DecodeResponse(line)
+	response, err := localapi.DecodeResponse(body)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -370,5 +373,39 @@ func TestExampleConfigurationIsValid(t *testing.T) {
 	}
 	if config.Transport != TransportNone {
 		t.Fatalf("the example claims a transport that does not exist: %q", config.Transport)
+	}
+}
+
+// The two sockets carry different capabilities, and the runtime socket has no
+// approval operations on it at all.
+func TestRuntimeAndOwnerSocketsAreSeparate(t *testing.T) {
+	config := testConfig(t)
+	instance, err := Open(config, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- instance.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	// The runtime socket serves the runtime and refuses to approve.
+	if response := call(t, config.SocketPath, localapi.Request{Op: localapi.OpPending}); !response.OK {
+		t.Fatalf("runtime listing: %+v", response)
+	}
+	refused := call(t, config.SocketPath, localapi.Request{Op: localapi.OpAwaitingAdmission})
+	if refused.OK {
+		t.Fatal("the runtime socket listed what is waiting for the owner")
+	}
+
+	// The owner socket decides and does no Agent work.
+	if response := call(t, config.OwnerSocketPath, localapi.Request{Op: localapi.OpAwaitingAdmission}); !response.OK {
+		t.Fatalf("owner listing: %+v", response)
+	}
+	if response := call(t, config.OwnerSocketPath, localapi.Request{Op: localapi.OpPending}); response.OK {
+		t.Fatal("the owner socket drained the runtime inbox")
 	}
 }

@@ -40,6 +40,7 @@ type Daemon struct {
 	dispatch *dispatch.Dispatcher
 	server   *localapi.Server
 	listener net.Listener
+	owner    net.Listener
 	salt     []byte
 	observer Observer
 
@@ -90,6 +91,15 @@ func Open(config Config, observer Observer) (*Daemon, error) {
 		return nil, err
 	}
 	instance.listener = listener
+
+	owner, err := localapi.Listen(config.OwnerSocketPath)
+	if err != nil {
+		_ = listener.Close()
+		_ = os.Remove(config.SocketPath)
+		_ = journal.Close()
+		return nil, err
+	}
+	instance.owner = owner
 	return instance, nil
 }
 
@@ -101,12 +111,20 @@ func (d *Daemon) InstallSalt() []byte {
 	return append([]byte(nil), d.salt...)
 }
 
-// SocketPath returns where the local API is served.
+// SocketPath returns where the Agent runtime connects.
 func (d *Daemon) SocketPath() string {
 	if d == nil {
 		return ""
 	}
 	return d.config.SocketPath
+}
+
+// OwnerSocketPath returns where the owner decides.
+func (d *Daemon) OwnerSocketPath() string {
+	if d == nil {
+		return ""
+	}
+	return d.config.OwnerSocketPath
 }
 
 // Run serves the local API and keeps the schedule until the context ends.
@@ -118,13 +136,21 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return errors.New("no daemon")
 	}
 	var group sync.WaitGroup
-	group.Add(1)
-	go func() {
-		defer group.Done()
-		if err := d.server.Serve(ctx, d.listener); err != nil && !isClosed(err) {
-			d.report("serve", err)
-		}
-	}()
+	for _, endpoint := range []struct {
+		listener  net.Listener
+		principal localapi.Principal
+	}{
+		{d.listener, localapi.PrincipalRuntime},
+		{d.owner, localapi.PrincipalOwner},
+	} {
+		group.Add(1)
+		go func(listener net.Listener, principal localapi.Principal) {
+			defer group.Done()
+			if err := d.server.Serve(ctx, listener, principal); err != nil && !isClosed(err) {
+				d.report("serve", err)
+			}
+		}(endpoint.listener, endpoint.principal)
+	}
 
 	group.Add(1)
 	go func() {
@@ -133,9 +159,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 
 	<-ctx.Done()
-	// Closing the listener is what unblocks Accept; the schedule stops on the
+	// Closing the listeners is what unblocks Accept; the schedule stops on the
 	// same context.
 	_ = d.listener.Close()
+	_ = d.owner.Close()
 	group.Wait()
 	return d.Close()
 }
@@ -148,9 +175,11 @@ func (d *Daemon) Close() error {
 	var err error
 	d.closeOnce.Do(func() {
 		_ = d.listener.Close()
-		// The socket is removed only by the daemon that created it, and only
-		// once it is done with the state it was serving.
+		_ = d.owner.Close()
+		// The sockets are removed only by the daemon that created them, and
+		// only once it is done with the state it was serving.
 		_ = os.Remove(d.config.SocketPath)
+		_ = os.Remove(d.config.OwnerSocketPath)
 		err = d.journal.Close()
 	})
 	return err

@@ -1,6 +1,6 @@
 # Running the daemon
 
-`tos-messengerd` owns one state directory and serves one owner-private socket.
+`tos-messengerd` owns one state directory and serves two owner-private sockets.
 It cannot carry a message yet, and it says so on startup rather than looking
 like a working installation that happens to be quiet.
 
@@ -8,6 +8,18 @@ like a working installation that happens to be quiet.
 tos-messengerd -config /etc/tos-messengerd/config.json -check   # validate and exit
 tos-messengerd -config /etc/tos-messengerd/config.json
 ```
+
+## Two sockets
+
+The runtime connects to one socket and the owner to another, and the
+separation carries one invariant: **the party that asks for an approval must
+not be able to grant it.** A single socket with a user check cannot tell an
+Agent runtime from the person it is asking, so an Agent deciding that a payment
+needs approval could answer itself.
+
+The runtime socket carries inbox draining and event submission and no approval
+operation at all. The owner socket carries the decisions and does no Agent
+work.
 
 ## What must be stated
 
@@ -32,8 +44,9 @@ and sealing for a transport that does not exist would spend a message key per
 event on nothing. Queued events wait; they are not lost and they are not
 delivered.
 
-The local API still works: a runtime can drain the inbox, submit events, and
-an owner can approve or refuse a held delivery. What is missing is the middle,
+The local API still works: a runtime can drain the inbox and submit events, and
+an owner can admit or refuse an inbound message that is waiting, and release or
+abandon a held outbound one. What is missing is the middle,
 and it stays missing until the reachability study picks a route.
 
 ## State

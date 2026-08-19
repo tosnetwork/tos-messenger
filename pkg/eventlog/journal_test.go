@@ -40,8 +40,28 @@ func entry(eventID, senderEndpoint string) Entry {
 		SenderEndpointID: senderEndpoint,
 		ConversationID:   convo,
 		Payload:          []byte(`{"event":"` + eventID + `"}`),
+		Admission:        AdmissionAdmitted,
 		ReceivedAtUnix:   acceptAt,
 	}
+}
+
+func attempt(seed byte) string {
+	id, err := NewAttemptID(bytes.Repeat([]byte{seed}, 32))
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
+// claim takes the send attempt a settlement needs, so tests exercise the same
+// path a sweep does.
+func claim(t *testing.T, journal *Journal, eventID string, seed byte, now time.Time) string {
+	t.Helper()
+	id := attempt(seed)
+	if _, err := journal.ClaimForSend(eventID, id, now, time.Minute); err != nil {
+		t.Fatalf("claim for send: %v", err)
+	}
+	return id
 }
 
 func lease(seed byte) string {
@@ -299,6 +319,7 @@ func TestInvalidEntriesAreRejected(t *testing.T) {
 		"no payload":    func(e *Entry) { e.Payload = nil },
 		"huge payload":  func(e *Entry) { e.Payload = bytes.Repeat([]byte{1}, MaxPayloadBytes+1) },
 		"zero received": func(e *Entry) { e.ReceivedAtUnix = 0 },
+		"no admission":  func(e *Entry) { e.Admission = "" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -462,7 +483,7 @@ func TestEnqueueClaimsOnceAndKeepsItsBackoff(t *testing.T) {
 	if !fresh || delivery.State != StatePending || delivery.Attempts != 0 {
 		t.Fatalf("unexpected first enqueue: %+v", delivery)
 	}
-	if _, err := journal.Failed(eventA, fault.CodeUnreachable, time.Unix(int64(acceptAt), 0)); err != nil {
+	if _, err := journal.Failed(eventA, claim(t, journal, eventA, 0x40, time.Unix(int64(acceptAt), 0)), fault.CodeUnreachable, time.Unix(int64(acceptAt), 0)); err != nil {
 		t.Fatalf("failed: %v", err)
 	}
 	// Re-submitting after a crash must not reset a backoff that exists to
@@ -491,7 +512,7 @@ func TestRetryScheduleFollowsTheDisposition(t *testing.T) {
 	}
 	now := time.Unix(int64(acceptAt), 0)
 
-	delivery, err := journal.Failed(eventA, fault.CodeUnreachable, now)
+	delivery, err := journal.Failed(eventA, claim(t, journal, eventA, 0x40, now), fault.CodeUnreachable, now)
 	if err != nil {
 		t.Fatalf("failed: %v", err)
 	}
@@ -506,14 +527,18 @@ func TestRetryScheduleFollowsTheDisposition(t *testing.T) {
 	if _, _, err := journal.Enqueue(outbound(eventB)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	permanent, err := journal.Failed(eventB, fault.CodeOversized, now)
+	permanent, err := journal.Failed(eventB, claim(t, journal, eventB, 0x40, now), fault.CodeOversized, now)
 	if err != nil {
 		t.Fatalf("failed: %v", err)
 	}
 	if permanent.State != StateAbandoned || permanent.NextAttemptAtUnix != 0 {
 		t.Fatalf("a permanent failure stayed queued: %+v", permanent)
 	}
-	if _, err := journal.Failed(eventB, fault.CodeUnreachable, now); !errors.Is(err, ErrNotPending) {
+	// An abandoned delivery cannot even be claimed, let alone settled again.
+	if _, err := journal.ClaimForSend(eventB, attempt(0x44), now, time.Minute); !errors.Is(err, ErrNotPending) {
+		t.Fatalf("an abandoned delivery was claimed: %v", err)
+	}
+	if _, err := journal.Failed(eventB, attempt(0x40), fault.CodeUnreachable, now); !errors.Is(err, ErrNotPending) {
 		t.Fatalf("an abandoned delivery accepted another attempt: %v", err)
 	}
 }
@@ -526,7 +551,7 @@ func TestApprovalHoldLeavesTheQueue(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 	now := time.Unix(int64(acceptAt), 0)
-	held, err := journal.Failed(eventA, fault.CodeApprovalRequired, now)
+	held, err := journal.Failed(eventA, claim(t, journal, eventA, 0x40, now), fault.CodeApprovalRequired, now)
 	if err != nil {
 		t.Fatalf("failed: %v", err)
 	}
@@ -567,7 +592,7 @@ func TestDueSelectsOnlyWhatIsReady(t *testing.T) {
 	if len(due) != 2 {
 		t.Fatalf("expected both deliveries, got %d", len(due))
 	}
-	if _, err := journal.Failed(eventA, fault.CodeUnreachable, now); err != nil {
+	if _, err := journal.Failed(eventA, claim(t, journal, eventA, 0x40, now), fault.CodeUnreachable, now); err != nil {
 		t.Fatalf("failed: %v", err)
 	}
 	due, err = journal.Due(now)
@@ -577,7 +602,7 @@ func TestDueSelectsOnlyWhatIsReady(t *testing.T) {
 	if len(due) != 1 || due[0].EventID != eventB {
 		t.Fatalf("a backed-off delivery was swept again: %+v", due)
 	}
-	if _, err := journal.Delivered(eventB, now); err != nil {
+	if _, err := journal.Delivered(eventB, claim(t, journal, eventB, 0x41, now), now); err != nil {
 		t.Fatalf("delivered: %v", err)
 	}
 	due, err = journal.Due(now)
@@ -597,7 +622,7 @@ func TestExpiredDeliveryIsAbandoned(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 	past := time.Unix(int64(request.ExpiresAtUnix)+1, 0)
-	delivery, err := journal.Failed(eventA, fault.CodeUnreachable, past)
+	delivery, err := journal.Failed(eventA, claim(t, journal, eventA, 0x40, past), fault.CodeUnreachable, past)
 	if err != nil {
 		t.Fatalf("failed: %v", err)
 	}
@@ -612,7 +637,7 @@ func TestExpiredDeliveryIsAbandoned(t *testing.T) {
 	if _, _, err := journal.Enqueue(second); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	settled, err := journal.Failed(eventB, fault.CodeUnreachable, time.Unix(int64(acceptAt), 0))
+	settled, err := journal.Failed(eventB, claim(t, journal, eventB, 0x42, time.Unix(int64(acceptAt), 0)), fault.CodeUnreachable, time.Unix(int64(acceptAt), 0))
 	if err != nil {
 		t.Fatalf("failed: %v", err)
 	}
@@ -624,10 +649,13 @@ func TestExpiredDeliveryIsAbandoned(t *testing.T) {
 func TestDeliveryTransitionsRejectUnknownEvents(t *testing.T) {
 	journal, _ := openJournal(t)
 	now := time.Unix(int64(acceptAt), 0)
-	if _, err := journal.Failed(eventA, fault.CodeUnreachable, now); !errors.Is(err, ErrUnknown) {
+	if _, err := journal.ClaimForSend(eventA, attempt(0x40), now, time.Minute); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("expected an unknown delivery, got %v", err)
 	}
-	if _, err := journal.Delivered(eventA, now); !errors.Is(err, ErrUnknown) {
+	if _, err := journal.Failed(eventA, attempt(0x40), fault.CodeUnreachable, now); !errors.Is(err, ErrUnknown) {
+		t.Fatalf("expected an unknown delivery, got %v", err)
+	}
+	if _, err := journal.Delivered(eventA, attempt(0x41), now); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("expected an unknown delivery, got %v", err)
 	}
 	if _, err := journal.Resume(eventA, now); !errors.Is(err, ErrUnknown) {
@@ -678,7 +706,7 @@ func TestPruneRemovesOnlyClosedRecords(t *testing.T) {
 	if _, _, err := journal.Enqueue(outbound(eventB)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if _, err := journal.Delivered(eventB, now); err != nil {
+	if _, err := journal.Delivered(eventB, claim(t, journal, eventB, 0x41, now), now); err != nil {
 		t.Fatalf("delivered: %v", err)
 	}
 
@@ -780,7 +808,7 @@ func TestDeliveryStateSurvivesRestart(t *testing.T) {
 	if _, _, err := journal.Enqueue(outbound(eventA)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if _, err := journal.Failed(eventA, fault.CodeRateLimited, time.Unix(int64(acceptAt), 0)); err != nil {
+	if _, err := journal.Failed(eventA, claim(t, journal, eventA, 0x43, time.Unix(int64(acceptAt), 0)), fault.CodeRateLimited, time.Unix(int64(acceptAt), 0)); err != nil {
 		t.Fatalf("failed: %v", err)
 	}
 	if err := journal.Close(); err != nil {
@@ -878,7 +906,7 @@ func TestHeldDeliveriesAlsoExpire(t *testing.T) {
 	if _, _, err := journal.Enqueue(request); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if _, err := journal.Failed(eventA, fault.CodeApprovalRequired, now); err != nil {
+	if _, err := journal.Failed(eventA, claim(t, journal, eventA, 0x40, now), fault.CodeApprovalRequired, now); err != nil {
 		t.Fatalf("hold: %v", err)
 	}
 	if expired, err := journal.ExpireDeliveries(time.Unix(int64(request.ExpiresAtUnix)+1, 0)); err != nil || expired != 1 {

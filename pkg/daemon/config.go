@@ -51,8 +51,13 @@ type Config struct {
 	// StateDir holds the journal, the install salt, and nothing else. One
 	// daemon owns it at a time.
 	StateDir string `json:"state_dir"`
-	// SocketPath is the owner-private local API.
+	// SocketPath is where the Agent runtime connects. It carries no approval
+	// operations at all.
 	SocketPath string `json:"socket_path"`
+	// OwnerSocketPath is where the owner decides. The separation is the point:
+	// the party that asks for an approval must not be able to grant it, and a
+	// single socket with a uid check cannot tell the two apart.
+	OwnerSocketPath string `json:"owner_socket_path"`
 
 	NetworkID       string `json:"network_id"`
 	GenesisRootHash string `json:"genesis_root_hash"`
@@ -126,7 +131,13 @@ func (c Config) Validate() error {
 	if !filepath.IsAbs(c.SocketPath) || filepath.Clean(c.SocketPath) != c.SocketPath {
 		return errors.New("socket_path must be an absolute, clean path")
 	}
-	if filepath.Dir(c.SocketPath) == c.StateDir {
+	if !filepath.IsAbs(c.OwnerSocketPath) || filepath.Clean(c.OwnerSocketPath) != c.OwnerSocketPath {
+		return errors.New("owner_socket_path must be an absolute, clean path")
+	}
+	if c.OwnerSocketPath == c.SocketPath {
+		return errors.New("the runtime and owner sockets must be different")
+	}
+	if filepath.Dir(c.SocketPath) == c.StateDir || filepath.Dir(c.OwnerSocketPath) == c.StateDir {
 		// The state directory is owned through a lock file; a socket living in
 		// it would make a stale socket look like contested ownership.
 		return errors.New("socket_path must not live inside state_dir")

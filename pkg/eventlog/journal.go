@@ -64,6 +64,26 @@ const (
 	MaxLeaseSeconds = 60 * 60
 )
 
+// AdmissionState is whether an event may be offered to a runtime at all.
+//
+// It is a separate dimension from the application state because it answers a
+// different question and a different party answers it. Application state is
+// how far the runtime has got with an event it was allowed to see; admission
+// is whether the owner allows it to see it. Folding the two together is how an
+// event that was supposed to be waiting for a person ends up in the runtime's
+// queue.
+type AdmissionState string
+
+const (
+	// AdmissionAdmitted means the event may be offered to a runtime.
+	AdmissionAdmitted AdmissionState = "admitted"
+	// AdmissionPending means the owner has not decided yet. The runtime does
+	// not see it.
+	AdmissionPending AdmissionState = "pending"
+	// AdmissionDenied means the owner refused it. It is never offered.
+	AdmissionDenied AdmissionState = "denied"
+)
+
 // ApplicationState is how far an event has got towards an Agent runtime.
 type ApplicationState string
 
@@ -86,6 +106,7 @@ var (
 	endpointPattern = ids.Endpoint
 	convPattern     = ids.Conversation
 	leasePattern    = regexp.MustCompile(`^lease_[0-9a-f]{64}$`)
+	attemptPattern  = regexp.MustCompile(`^send_[0-9a-f]{64}$`)
 )
 
 // ErrConflict reports that an Event ID was presented with a different binding
@@ -95,6 +116,10 @@ var ErrConflict = errors.New("event identity conflicts with an existing claim")
 
 // ErrUnknown reports that no record exists for an Event ID.
 var ErrUnknown = errors.New("event has no journal record")
+
+// ErrNotAdmitted reports work on an event the owner has not allowed a runtime
+// to see.
+var ErrNotAdmitted = errors.New("event has not been admitted")
 
 // ErrLeaseMismatch reports a transition presented with the wrong lease. The
 // work may have been taken over, so the result of the old attempt is discarded
@@ -108,7 +133,10 @@ type Entry struct {
 	ConversationID   string
 	// Payload is the event as it will be handed to a runtime after a restart.
 	// Without it an accepted event cannot be re-delivered.
-	Payload        []byte
+	Payload []byte
+	// Admission is whether the owner has allowed this event to reach a
+	// runtime. An entry that does not say is not admitted by default.
+	Admission      AdmissionState
 	ReceivedAtUnix uint64
 }
 
@@ -118,6 +146,9 @@ type Record struct {
 	EventID          string           `json:"event_id"`
 	SenderEndpointID string           `json:"sender_messaging_endpoint_id"`
 	ConversationID   string           `json:"conversation_id"`
+	Admission        AdmissionState   `json:"admission"`
+	AdmissionAtUnix  uint64           `json:"admission_at_unix,omitempty"`
+	AdmissionCode    fault.Code       `json:"admission_code,omitempty"`
 	PayloadBase64    string           `json:"payload_base64"`
 	PayloadDigest    string           `json:"payload_digest"`
 	ReceivedAtUnix   uint64           `json:"received_at_unix"`
@@ -201,6 +232,7 @@ func (j *Journal) Accept(entry Entry) (bool, Record, error) {
 		EventID:          entry.EventID,
 		SenderEndpointID: entry.SenderEndpointID,
 		ConversationID:   entry.ConversationID,
+		Admission:        entry.Admission,
 		PayloadBase64:    base64.StdEncoding.EncodeToString(entry.Payload),
 		PayloadDigest:    canon.Digest(entry.Payload),
 		ReceivedAtUnix:   entry.ReceivedAtUnix,
@@ -269,6 +301,10 @@ func (j *Journal) ListPending(now time.Time, limit int) ([]Record, error) {
 		if err != nil {
 			continue
 		}
+		// An event the owner has not admitted is not the runtime's to see.
+		if record.Admission != AdmissionAdmitted {
+			continue
+		}
 		switch record.Application {
 		case StateQueued:
 		case StateClaimed:
@@ -325,6 +361,9 @@ func (j *Journal) ClaimForApplication(eventID, leaseID string, now time.Time, le
 			return Record{}, ErrUnknown
 		}
 		return Record{}, err
+	}
+	if record.Admission != AdmissionAdmitted {
+		return Record{}, ErrNotAdmitted
 	}
 	current := uint64(now.Unix())
 	switch record.Application {
@@ -548,6 +587,11 @@ func validateEntry(entry Entry) error {
 	if entry.ReceivedAtUnix == 0 {
 		return errors.New("invalid event receipt time")
 	}
+	switch entry.Admission {
+	case AdmissionAdmitted, AdmissionPending, AdmissionDenied:
+	default:
+		return errors.New("an entry must say whether it was admitted")
+	}
 	return nil
 }
 
@@ -608,6 +652,14 @@ func readRecord(path string) (Record, error) {
 	if err := json.Unmarshal(value, &record); err != nil {
 		return Record{}, errors.New("invalid event journal record")
 	}
+	switch record.Admission {
+	case AdmissionAdmitted, AdmissionPending, AdmissionDenied:
+	default:
+		return Record{}, errors.New("invalid event journal record")
+	}
+	if record.AdmissionCode != "" && !fault.Known(record.AdmissionCode) {
+		return Record{}, errors.New("invalid event journal record")
+	}
 	if record.Schema != Schema || !eventPattern.MatchString(record.EventID) ||
 		!endpointPattern.MatchString(record.SenderEndpointID) ||
 		!convPattern.MatchString(record.ConversationID) ||
@@ -631,6 +683,11 @@ func readRecord(path string) (Record, error) {
 	return record, nil
 }
 
+// NewAttemptID formats a send attempt identifier.
+func NewAttemptID(raw []byte) (string, error) {
+	return ids.Format("send_", raw)
+}
+
 // NewLeaseID formats an application lease identifier.
 func NewLeaseID(raw []byte) (string, error) {
 	return ids.Format("lease_", raw)
@@ -638,4 +695,99 @@ func NewLeaseID(raw []byte) (string, error) {
 
 func idsFormat(prefix string, raw []byte) (string, error) {
 	return ids.Format(prefix, raw)
+}
+
+// ListAwaitingAdmission returns the events the owner has yet to decide about.
+//
+// It is a separate listing from ListPending and serves a different caller.
+// Merging them would put an event that is waiting for a person in the queue a
+// runtime drains, which is the whole failure this dimension exists to prevent.
+func (j *Journal) ListAwaitingAdmission(limit int) ([]Record, error) {
+	if err := j.usable(); err != nil {
+		return nil, err
+	}
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+
+	entries, err := os.ReadDir(j.inboundRoot())
+	if err != nil {
+		return nil, errors.New("read event journal")
+	}
+	var waiting []Record
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		record, err := readRecord(filepath.Join(j.inboundRoot(), entry.Name()))
+		if err != nil {
+			continue
+		}
+		if record.Admission != AdmissionPending {
+			continue
+		}
+		waiting = append(waiting, record)
+	}
+	sort.Slice(waiting, func(first, second int) bool {
+		if waiting[first].ReceivedAtUnix != waiting[second].ReceivedAtUnix {
+			return waiting[first].ReceivedAtUnix < waiting[second].ReceivedAtUnix
+		}
+		return waiting[first].EventID < waiting[second].EventID
+	})
+	if limit > 0 && len(waiting) > limit {
+		waiting = waiting[:limit]
+	}
+	return waiting, nil
+}
+
+// AdmitEvent records the owner allowing an event through to a runtime.
+func (j *Journal) AdmitEvent(eventID string, now time.Time) (Record, error) {
+	return j.decideAdmission(eventID, AdmissionAdmitted, "", now)
+}
+
+// DenyEvent records the owner refusing one. It is never offered to a runtime,
+// and its application state is settled so nothing else picks it up.
+func (j *Journal) DenyEvent(eventID string, code fault.Code, now time.Time) (Record, error) {
+	if code != "" && !fault.Known(code) {
+		return Record{}, errors.New("unknown admission code")
+	}
+	return j.decideAdmission(eventID, AdmissionDenied, code, now)
+}
+
+func (j *Journal) decideAdmission(eventID string, state AdmissionState, code fault.Code, now time.Time) (Record, error) {
+	if err := j.usable(); err != nil {
+		return Record{}, err
+	}
+	if !eventPattern.MatchString(eventID) {
+		return Record{}, errors.New("invalid event identifier")
+	}
+	if now.IsZero() || now.Unix() < 0 {
+		return Record{}, errors.New("invalid admission time")
+	}
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+
+	path := j.path(eventID)
+	record, err := readRecord(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Record{}, ErrUnknown
+		}
+		return Record{}, err
+	}
+	// The owner decides once. A second decision on the same event would let a
+	// denied message be admitted later by anything that can reach this API.
+	if record.Admission != AdmissionPending {
+		return Record{}, ErrNotPending
+	}
+	record.Admission = state
+	record.AdmissionAtUnix = uint64(now.Unix())
+	record.AdmissionCode = code
+	if state == AdmissionDenied {
+		record.Application = StateRejected
+		record.RejectedAtUnix = uint64(now.Unix())
+		if record.RejectionCode == "" {
+			record.RejectionCode = code
+		}
+	}
+	return j.commit(path, record)
 }

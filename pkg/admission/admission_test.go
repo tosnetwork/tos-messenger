@@ -3,6 +3,7 @@ package admission
 import (
 	"bytes"
 	"crypto/ed25519"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -435,6 +436,7 @@ func TestConflictingClaimIsHidden(t *testing.T) {
 		SenderEndpointID: "mep_" + strings.Repeat("9", 64),
 		ConversationID:   convoID,
 		Payload:          []byte("seeded by another sender"),
+		Admission:        eventlog.AdmissionAdmitted,
 		ReceivedAtUnix:   baseUnix,
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -647,5 +649,75 @@ func TestOwnerApprovalFromTheNetworkIsRefused(t *testing.T) {
 				t.Fatal("a remote owner approval was written down")
 			}
 		})
+	}
+}
+
+// An event held for the owner must not reach the runtime's queue. Recording
+// the hold only in the return value left it queued, and a runtime draining its
+// inbox would have taken it before the owner saw the question.
+func TestHeldEventDoesNotReachTheRuntimeQueue(t *testing.T) {
+	gate, journal, delegation, encoded := testGate(t, AllowList{HoldUnknown: true})
+	event := testEvent(t, delegation, nil)
+
+	decision, err := gate.Admit(inbound(event, encoded))
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	if decision.Outcome != Held {
+		t.Fatalf("unexpected outcome: %+v", decision)
+	}
+
+	pending, err := journal.ListPending(timeAt(baseUnix+61), 0)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("a held event was offered to the runtime: %+v", pending)
+	}
+	waiting, err := journal.ListAwaitingAdmission(0)
+	if err != nil {
+		t.Fatalf("awaiting: %v", err)
+	}
+	if len(waiting) != 1 || waiting[0].EventID != event.EventID {
+		t.Fatalf("the held event is not waiting for the owner: %+v", waiting)
+	}
+	// Nor can a runtime take it by claiming it directly.
+	if _, err := journal.ClaimForApplication(event.EventID,
+		"lease_"+strings.Repeat("1", 64), timeAt(baseUnix+61), time.Minute); !errors.Is(err, eventlog.ErrNotAdmitted) {
+		t.Fatalf("a held event was claimable: %v", err)
+	}
+
+	// Once the owner admits it, it becomes ordinary work.
+	if _, err := journal.AdmitEvent(event.EventID, timeAt(baseUnix+62)); err != nil {
+		t.Fatalf("admit event: %v", err)
+	}
+	pending, err = journal.ListPending(timeAt(baseUnix+63), 0)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("an admitted event did not reach the runtime: %+v", pending)
+	}
+}
+
+// A denied event is never offered, and the decision is made once.
+func TestDeniedEventIsNeverOffered(t *testing.T) {
+	gate, journal, delegation, encoded := testGate(t, AllowList{HoldUnknown: true})
+	event := testEvent(t, delegation, nil)
+	if _, err := gate.Admit(inbound(event, encoded)); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	if _, err := journal.DenyEvent(event.EventID, fault.CodeAdmissionRequired, timeAt(baseUnix+62)); err != nil {
+		t.Fatalf("deny: %v", err)
+	}
+	pending, err := journal.ListPending(timeAt(baseUnix+63), 0)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("a denied event was offered: %+v", pending)
+	}
+	if _, err := journal.AdmitEvent(event.EventID, timeAt(baseUnix+64)); err == nil {
+		t.Fatal("a denied event was admitted afterwards")
 	}
 }
