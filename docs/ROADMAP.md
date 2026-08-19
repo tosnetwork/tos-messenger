@@ -11,7 +11,7 @@ implemented **and** tested end to end; a package that exists but whose behaviour
 not yet closed end to end is 🟡 with the gap named. Nothing in this file changes
 gate status: this repository carries none and consumes no gate capacity.
 
-**Last re-audited against the code: 2026-08-19, at `8b5f2fd`** (after the ADNL collector and the pilot runbook).
+**Last re-audited against the code: 2026-08-19, at `c0e70c2`** (after room membership epochs, the group-key contract + refutation harness, room-membership enforcement at the gate, the verify- and trial-layer adversarial corpus, and the finalized-quote negative cases).
 
 ## Milestones (governing numbering)
 
