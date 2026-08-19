@@ -19,6 +19,10 @@ const (
 
 	// MaxApprovalsPerListing bounds one listing of waiting decisions.
 	MaxApprovalsPerListing = 64
+	// MaxPendingActions bounds how many decisions may await the owner at once.
+	// The runtime asks for these, and a runtime in a loop would otherwise fill
+	// the queue and the disk behind it as readily as a stranger would.
+	MaxPendingActions = 128
 	// MaxApprovalSummaryBytes bounds the description an owner is shown.
 	MaxApprovalSummaryBytes = 512
 	// MaxApprovalOrigins bounds the provenance one request may carry.
@@ -120,6 +124,13 @@ func (j *Journal) RequestApproval(request ApprovalRequest) (Approval, error) {
 	if found {
 		return existing, nil
 	}
+	waiting, err := j.countPendingApprovals(request.AskedAt)
+	if err != nil {
+		return Approval{}, err
+	}
+	if waiting >= MaxPendingActions {
+		return Approval{}, ErrPendingFull
+	}
 	approval := Approval{
 		Schema: ApprovalSchema, ActionID: request.ActionID, Effect: request.Effect,
 		Summary: request.Summary, Reason: request.Reason, Origins: request.Origins,
@@ -131,7 +142,7 @@ func (j *Journal) RequestApproval(request ApprovalRequest) (Approval, error) {
 // ListPendingApprovals returns the decisions waiting for the owner, oldest
 // first: a queue an owner works through in the order the questions were asked
 // is one they can finish.
-func (j *Journal) ListPendingApprovals(limit int) ([]Approval, error) {
+func (j *Journal) ListPendingApprovals(now time.Time, limit int) ([]Approval, error) {
 	if err := j.usable(); err != nil {
 		return nil, err
 	}
@@ -154,9 +165,14 @@ func (j *Journal) ListPendingApprovals(limit int) ([]Approval, error) {
 		if err != nil || !found {
 			continue
 		}
-		if approval.State == ApprovalPending {
-			waiting = append(waiting, approval)
+		if approval.State != ApprovalPending {
+			continue
 		}
+		// A request nobody decided within the window is not still pending.
+		if j.approvalExpired(approval, uint64(now.Unix())) {
+			continue
+		}
+		waiting = append(waiting, approval)
 	}
 	sort.Slice(waiting, func(i, j int) bool {
 		if waiting[i].AskedAtUnix != waiting[j].AskedAtUnix {
@@ -326,4 +342,78 @@ func validateApprovalRequest(request ApprovalRequest) error {
 		}
 	}
 	return nil
+}
+
+// approvalExpired reports whether a request has run out of time. It uses the
+// same window as an undecided inbound event: a decision nobody made in a week
+// is not one that is still being made.
+func (j *Journal) approvalExpired(approval Approval, seconds uint64) bool {
+	age := uint64(j.quota.MaxPendingAge / time.Second)
+	return approval.AskedAtUnix != 0 && seconds >= approval.AskedAtUnix+age
+}
+
+func (j *Journal) countPendingApprovals(seconds uint64) (int, error) {
+	entries, err := os.ReadDir(j.approvalRoot())
+	if err != nil {
+		return 0, errors.New("read approval directory")
+	}
+	waiting := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		approval, found, err := j.readApproval("act_" + entry.Name()[:len(entry.Name())-len(".json")])
+		if err != nil || !found || approval.State != ApprovalPending {
+			continue
+		}
+		if j.approvalExpired(approval, seconds) {
+			continue
+		}
+		waiting++
+	}
+	return waiting, nil
+}
+
+// ExpirePendingApprovals refuses decisions nobody made in time.
+//
+// They are recorded as denied rather than deleted, for the same reason an
+// expired inbound event is: an owner returning to an empty queue should be
+// able to see that something was asked and never answered.
+func (j *Journal) ExpirePendingApprovals(now time.Time) (int, error) {
+	if err := j.usable(); err != nil {
+		return 0, err
+	}
+	if now.IsZero() || now.Unix() < 0 {
+		return 0, errors.New("invalid expiry time")
+	}
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+
+	entries, err := os.ReadDir(j.approvalRoot())
+	if err != nil {
+		return 0, errors.New("read approval directory")
+	}
+	seconds := uint64(now.Unix())
+	expired := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		actionID := "act_" + entry.Name()[:len(entry.Name())-len(".json")]
+		approval, found, err := j.readApproval(actionID)
+		if err != nil || !found || approval.State != ApprovalPending {
+			continue
+		}
+		if !j.approvalExpired(approval, seconds) {
+			continue
+		}
+		approval.State = ApprovalDenied
+		approval.DecidedAtUnix = seconds
+		approval.DenialReason = "nobody decided within the window this installation keeps requests for"
+		if _, err := j.commitApproval(approval); err != nil {
+			return expired, err
+		}
+		expired++
+	}
+	return expired, nil
 }

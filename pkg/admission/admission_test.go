@@ -146,7 +146,8 @@ func testEvent(t *testing.T, delegation identity.Delegation, mutate func(*envelo
 }
 
 // testLocalDelegation is the recipient's own delegation: the one that says
-// which inbox policy this endpoint publishes.
+// which inbox policy this endpoint publishes. It is resolved against finalized
+// state at start-up like any other, so the test resolver has to commit it.
 func testLocalDelegation(t *testing.T, policy ContactPolicy) identity.Delegation {
 	t.Helper()
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x77}, ed25519.SeedSize))
@@ -174,6 +175,26 @@ func testLocalDelegation(t *testing.T, policy ContactPolicy) identity.Delegation
 	}
 }
 
+// localState is the finalized Agent state that commits this endpoint's own
+// delegation, so the gate can verify what it publishes rather than trust it.
+func localState(t *testing.T, policy ContactPolicy) (identity.Delegation, []byte, *nativev1.NativeStateV1) {
+	t.Helper()
+	delegation := testLocalDelegation(t, policy)
+	encoded, err := identity.EncodeJSON(delegation)
+	if err != nil {
+		t.Fatalf("encode local delegation: %v", err)
+	}
+	digest, err := identity.Digest(delegation)
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	return delegation, encoded, nativeState(&nativev1.AgentStateV1{
+		AgentId:           localID,
+		Policy:            &nativev1.ControllerPolicyV1{Threshold: 1},
+		DelegationDigests: []string{digest},
+	})
+}
+
 func testGate(t *testing.T, policy ContactPolicy) (*Gate, *eventlog.Journal, identity.Delegation, []byte) {
 	t.Helper()
 	delegation, encoded := testDelegation(t)
@@ -187,6 +208,7 @@ func testGate(t *testing.T, policy ContactPolicy) (*Gate, *eventlog.Journal, ide
 	}
 	t.Cleanup(func() { _ = journal.Close() })
 
+	local, localEncoded, localAgentState := localState(t, policy)
 	gate, err := New(Config{
 		Network: testNetwork(),
 		Chain:   testChain(),
@@ -196,11 +218,15 @@ func testGate(t *testing.T, policy ContactPolicy) (*Gate, *eventlog.Journal, ide
 				Policy:            &nativev1.ControllerPolicyV1{Threshold: 1},
 				DelegationDigests: []string{digest},
 			}),
+			localID: localAgentState,
 		}},
-		Journal:         journal,
-		Policy:          policy,
-		LocalDelegation: testLocalDelegation(t, policy),
-		InstallSalt:     bytes.Repeat([]byte{0x5a}, MinInstallSaltBytes),
+		Journal:             journal,
+		Policy:              policy,
+		LocalDelegationJSON: localEncoded,
+		LocalAgentID:        local.AgentID,
+		LocalEndpointID:     local.EndpointID,
+		Now:                 func() time.Time { return time.Unix(int64(baseUnix)+30, 0) },
+		InstallSalt:         bytes.Repeat([]byte{0x5a}, MinInstallSaltBytes),
 	})
 	if err != nil {
 		t.Fatalf("gate: %v", err)
@@ -218,7 +244,7 @@ func inbound(event envelope.Event, delegationJSON []byte) Inbound {
 }
 
 func TestDelegatedEventIsAdmittedOnce(t *testing.T) {
-	gate, _, delegation, encoded := testGate(t, OpenInbox{})
+	gate, _, delegation, encoded := testGate(t, OpenInbox())
 	event := testEvent(t, delegation, nil)
 
 	decision, err := gate.Admit(inbound(event, encoded))
@@ -254,7 +280,7 @@ func TestDelegatedEventIsAdmittedOnce(t *testing.T) {
 // must be able to resend the same event once they have. Claiming it first
 // would turn their corrected attempt into a duplicate that is never delivered.
 func TestAdmissionRefusalLeavesTheRemedyUsable(t *testing.T) {
-	gate, journal, delegation, encoded := testGate(t, AllowList{})
+	gate, journal, delegation, encoded := testGate(t, allowList(t, TellThem))
 	event := testEvent(t, delegation, nil)
 
 	decision, err := gate.Admit(inbound(event, encoded))
@@ -272,7 +298,7 @@ func TestAdmissionRefusalLeavesTheRemedyUsable(t *testing.T) {
 	}
 
 	// The sender satisfies the policy and resends the identical event.
-	admitted, _, _, _ := testGate(t, AllowList{Known: map[string]struct{}{senderID: {}}})
+	admitted, _, _, _ := testGate(t, allowList(t, TellThem, senderID))
 	second, err := admitted.Admit(inbound(event, encoded))
 	if err != nil {
 		t.Fatalf("admit: %v", err)
@@ -285,7 +311,7 @@ func TestAdmissionRefusalLeavesTheRemedyUsable(t *testing.T) {
 // An owner is asked once. A resend finds the claim and is acknowledged rather
 // than raising the same question again.
 func TestHeldEventAsksTheOwnerOnce(t *testing.T) {
-	gate, journal, delegation, encoded := testGate(t, AllowList{HoldUnknown: true})
+	gate, journal, delegation, encoded := testGate(t, allowList(t, AskTheOwner))
 	event := testEvent(t, delegation, nil)
 
 	decision, err := gate.Admit(inbound(event, encoded))
@@ -311,9 +337,7 @@ func TestHeldEventAsksTheOwnerOnce(t *testing.T) {
 }
 
 func TestDeniedSenderLearnsNothing(t *testing.T) {
-	gate, journal, delegation, encoded := testGate(t, AllowList{
-		Blocked: map[string]struct{}{senderID: {}},
-	})
+	gate, journal, delegation, encoded := testGate(t, blockList(t, senderID))
 	event := testEvent(t, delegation, nil)
 
 	decision, err := gate.Admit(inbound(event, encoded))
@@ -332,7 +356,7 @@ func TestDeniedSenderLearnsNothing(t *testing.T) {
 }
 
 func TestRejectionsAreClassified(t *testing.T) {
-	_, _, delegation, encoded := testGate(t, OpenInbox{})
+	_, _, delegation, encoded := testGate(t, OpenInbox())
 
 	cases := map[string]struct {
 		event    func(*testing.T) envelope.Event
@@ -390,7 +414,7 @@ func TestRejectionsAreClassified(t *testing.T) {
 	}
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {
-			gate, journal, _, _ := testGate(t, OpenInbox{})
+			gate, journal, _, _ := testGate(t, OpenInbox())
 			event := testCase.event(t)
 			request := inbound(event, encoded)
 			request.ReceivedAtUnix = testCase.received
@@ -430,18 +454,23 @@ func TestContentAboveThePublishedBoundIsRefused(t *testing.T) {
 		t.Fatalf("journal: %v", err)
 	}
 	defer journal.Close()
+	local, localEncoded, localAgentState := localState(t, OpenInbox())
 	gate, err := New(Config{
 		Network: testNetwork(),
 		Chain:   testChain(),
 		Resolver: stubResolver{states: map[string]*nativev1.NativeStateV1{
 			senderID: nativeState(&nativev1.AgentStateV1{AgentId: senderID,
 				Policy: &nativev1.ControllerPolicyV1{Threshold: 1}, DelegationDigests: []string{digest}}),
+			localID: localAgentState,
 		}},
-		Journal:         journal,
-		Policy:          OpenInbox{},
-		LocalDelegation: testLocalDelegation(t, OpenInbox{}),
-		MaxContentBytes: len(atBound),
-		InstallSalt:     bytes.Repeat([]byte{0x5a}, MinInstallSaltBytes),
+		Journal:             journal,
+		Policy:              OpenInbox(),
+		LocalDelegationJSON: localEncoded,
+		LocalAgentID:        local.AgentID,
+		LocalEndpointID:     local.EndpointID,
+		Now:                 func() time.Time { return time.Unix(int64(baseUnix)+30, 0) },
+		MaxContentBytes:     len(atBound),
+		InstallSalt:         bytes.Repeat([]byte{0x5a}, MinInstallSaltBytes),
 	})
 	if err != nil {
 		t.Fatalf("gate: %v", err)
@@ -463,7 +492,7 @@ func TestContentAboveThePublishedBoundIsRefused(t *testing.T) {
 }
 
 func TestUncommittedDelegationIsRefused(t *testing.T) {
-	gate, _, delegation, _ := testGate(t, OpenInbox{})
+	gate, _, delegation, _ := testGate(t, OpenInbox())
 	// A delegation the finalized Agent does not commit, presented in place of
 	// the real one.
 	forged := delegation
@@ -491,7 +520,7 @@ func TestUncommittedDelegationIsRefused(t *testing.T) {
 // different sender, so this branch is defence in depth. It is still reachable
 // by anything that can write the journal, and it stays hidden from the peer.
 func TestConflictingClaimIsHidden(t *testing.T) {
-	gate, journal, delegation, encoded := testGate(t, OpenInbox{})
+	gate, journal, delegation, encoded := testGate(t, OpenInbox())
 	event := testEvent(t, delegation, nil)
 
 	if _, _, err := journal.Accept(eventlog.Entry{
@@ -517,7 +546,7 @@ func TestConflictingClaimIsHidden(t *testing.T) {
 }
 
 func TestRecordCarriesNoGraph(t *testing.T) {
-	gate, _, delegation, encoded := testGate(t, OpenInbox{})
+	gate, _, delegation, encoded := testGate(t, OpenInbox())
 	event := testEvent(t, delegation, nil)
 	decision, err := gate.Admit(inbound(event, encoded))
 	if err != nil {
@@ -537,7 +566,7 @@ func TestRecordCarriesNoGraph(t *testing.T) {
 	}
 
 	// The same sender on another install must not be recognisable across logs.
-	other, _, _, _ := testGate(t, OpenInbox{})
+	other, _, _, _ := testGate(t, OpenInbox())
 	other.config.InstallSalt = bytes.Repeat([]byte{0x7b}, MinInstallSaltBytes)
 	elsewhere, err := other.Admit(inbound(testEvent(t, delegation, nil), encoded))
 	if err != nil {
@@ -549,7 +578,7 @@ func TestRecordCarriesNoGraph(t *testing.T) {
 }
 
 func TestGateRequiresEveryDependency(t *testing.T) {
-	_, _, delegation, _ := testGate(t, OpenInbox{})
+	_, _, delegation, _ := testGate(t, OpenInbox())
 	digest, err := identity.Digest(delegation)
 	if err != nil {
 		t.Fatalf("digest: %v", err)
@@ -559,13 +588,17 @@ func TestGateRequiresEveryDependency(t *testing.T) {
 		t.Fatalf("journal: %v", err)
 	}
 	defer journal.Close()
+	local, localEncoded, localAgentState := localState(t, OpenInbox())
 	resolver := stubResolver{states: map[string]*nativev1.NativeStateV1{
 		senderID: nativeState(&nativev1.AgentStateV1{AgentId: senderID,
 			Policy: &nativev1.ControllerPolicyV1{Threshold: 1}, DelegationDigests: []string{digest}}),
+		localID: localAgentState,
 	}}
 	complete := Config{
 		Network: testNetwork(), Chain: testChain(), Resolver: resolver, Journal: journal,
-		Policy: OpenInbox{}, LocalDelegation: testLocalDelegation(t, OpenInbox{}),
+		Policy: OpenInbox(), LocalDelegationJSON: localEncoded,
+		LocalAgentID: local.AgentID, LocalEndpointID: local.EndpointID,
+		Now:         func() time.Time { return time.Unix(int64(baseUnix)+30, 0) },
 		InstallSalt: bytes.Repeat([]byte{1}, MinInstallSaltBytes),
 	}
 	cases := map[string]func(*Config){
@@ -573,12 +606,15 @@ func TestGateRequiresEveryDependency(t *testing.T) {
 		"bad network":              func(c *Config) { c.Network = &nativev1.NetworkDomain{NetworkId: "x"} },
 		"no resolver":              func(c *Config) { c.Resolver = nil },
 		"no journal":               func(c *Config) { c.Journal = nil },
-		"no policy":                func(c *Config) { c.Policy = nil },
+		"no policy":                func(c *Config) { c.Policy = ContactPolicy{} },
 		"no salt":                  func(c *Config) { c.InstallSalt = nil },
 		"short salt":               func(c *Config) { c.InstallSalt = bytes.Repeat([]byte{1}, MinInstallSaltBytes-1) },
-		"no delegation of its own": func(c *Config) { c.LocalDelegation = identity.Delegation{} },
+		"no delegation of its own": func(c *Config) { c.LocalDelegationJSON = nil },
+		"another endpoint's delegation": func(c *Config) {
+			c.LocalEndpointID = "mep_" + strings.Repeat("8", 64)
+		},
 		// The published digest and the policy actually in memory disagree.
-		"policy this endpoint never published": func(c *Config) { c.Policy = AllowList{HoldUnknown: true} },
+		"policy this endpoint never published": func(c *Config) { c.Policy = allowList(t, AskTheOwner) },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -595,7 +631,7 @@ func TestGateRequiresEveryDependency(t *testing.T) {
 }
 
 func TestAdmitRejectsUnusableInput(t *testing.T) {
-	gate, _, delegation, encoded := testGate(t, OpenInbox{})
+	gate, _, delegation, encoded := testGate(t, OpenInbox())
 	event := testEvent(t, delegation, nil)
 
 	noRoute := inbound(event, encoded)
@@ -628,7 +664,7 @@ func TestAdmitRejectsUnusableInput(t *testing.T) {
 }
 
 func TestUnknownEventKindIsRefused(t *testing.T) {
-	gate, _, delegation, encoded := testGate(t, OpenInbox{})
+	gate, _, delegation, encoded := testGate(t, OpenInbox())
 	event := testEvent(t, delegation, func(e *envelope.Event) {
 		e.Kind = "vendor.custom"
 		e.PayloadSchema = "tos.messaging.payload.vendor-custom.v1"
@@ -642,32 +678,69 @@ func TestUnknownEventKindIsRefused(t *testing.T) {
 	}
 }
 
+// The policy is asked about a sender and a kind, and nothing else. A policy
+// that could read the content would be making a content judgement this layer
+// is not entitled to make -- and it is a closed type, so no caller can supply
+// one that does.
 func TestPolicySeesOnlySenderAndKind(t *testing.T) {
-	var sawSender, sawKind string
-	gate, _, delegation, encoded := testGate(t, policyFunc(func(sender, kind string) Admission {
-		sawSender, sawKind = sender, kind
-		return AdmitAllow
-	}))
-	event := testEvent(t, delegation, nil)
-	if _, err := gate.Admit(inbound(event, encoded)); err != nil {
-		t.Fatalf("admit: %v", err)
+	known := allowList(t, TellThem, senderID)
+	if known.Admits(senderID, "text") != AdmitAllow {
+		t.Fatal("a known sender was not admitted")
 	}
-	if sawSender != senderID || sawKind != "text" {
-		t.Fatalf("policy saw %q/%q", sawSender, sawKind)
+	if known.Admits(senderID, "agent.task.request") != AdmitAllow {
+		t.Fatal("the answer depended on the kind for a known sender")
+	}
+	stranger := "agent_" + strings.Repeat("6", 64)
+	if known.Admits(stranger, "text") != AdmitRequireAdmission {
+		t.Fatal("a stranger was admitted by an allow list")
+	}
+	held := allowList(t, AskTheOwner)
+	if held.Admits(stranger, "text") != AdmitHoldForApproval {
+		t.Fatal("an unknown sender was not held")
+	}
+	if blockList(t, senderID).Admits(senderID, "text") != AdmitDeny {
+		t.Fatal("a blocked sender was admitted")
 	}
 }
 
-type policyFunc func(string, string) Admission
-
-func (p policyFunc) Admits(sender, kind string) Admission { return p(sender, kind) }
-
-func (p policyFunc) Digest() string { return policyDigest("test-policy") }
+// The document is what the digest and the behaviour both come from, so an
+// implementation cannot answer "allow everyone" while publishing the identity
+// of an invite-only inbox.
+func TestPolicyDocumentsAreClosed(t *testing.T) {
+	for name, document := range map[string]InboxPolicyDocument{
+		"unknown rule":               {Rule: "allow-everyone-called-bob"},
+		"open inbox with a rule":     {Rule: RuleOpen, Unknown: AskTheOwner},
+		"allow list with no rule":    {Rule: RuleAllowList},
+		"allow list with a bad rule": {Rule: RuleAllowList, Unknown: "ask-the-sender"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := document.Validate(); err == nil {
+				t.Fatalf("expected %q to be refused", name)
+			}
+			if _, err := NewContactPolicy(document, Roster{}); err == nil {
+				t.Fatalf("expected %q to build no policy", name)
+			}
+		})
+	}
+	// Two documents that answer differently publish different identities.
+	tell, err := InboxPolicyDocument{Rule: RuleAllowList, Unknown: TellThem}.Digest()
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	ask, err := InboxPolicyDocument{Rule: RuleAllowList, Unknown: AskTheOwner}.Digest()
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	if tell == ask {
+		t.Fatal("two policies with different answers share a digest")
+	}
+}
 
 // Acceptance means durably queued, not delivered. The event has to be
 // recoverable from the journal alone, because the process that admitted it may
 // not survive to hand it over.
 func TestAcceptedEventIsRecoverableWithoutTheDecision(t *testing.T) {
-	gate, journal, delegation, encoded := testGate(t, OpenInbox{})
+	gate, journal, delegation, encoded := testGate(t, OpenInbox())
 	event := testEvent(t, delegation, nil)
 
 	if _, err := gate.Admit(inbound(event, encoded)); err != nil {
@@ -698,7 +771,7 @@ func timeAt(seconds uint64) time.Time { return time.Unix(int64(seconds), 0) }
 // An owner approval is this owner authorising something here. It is not a
 // message a remote party may send, over any route, however well signed.
 func TestOwnerApprovalFromTheNetworkIsRefused(t *testing.T) {
-	gate, journal, delegation, encoded := testGate(t, OpenInbox{})
+	gate, journal, delegation, encoded := testGate(t, OpenInbox())
 	for _, route := range []Route{RouteDirect, RouteTunnel, RouteRelay, RouteHTTPS} {
 		t.Run(string(route), func(t *testing.T) {
 			event := testEvent(t, delegation, func(e *envelope.Event) {
@@ -725,7 +798,7 @@ func TestOwnerApprovalFromTheNetworkIsRefused(t *testing.T) {
 // the hold only in the return value left it queued, and a runtime draining its
 // inbox would have taken it before the owner saw the question.
 func TestHeldEventDoesNotReachTheRuntimeQueue(t *testing.T) {
-	gate, journal, delegation, encoded := testGate(t, AllowList{HoldUnknown: true})
+	gate, journal, delegation, encoded := testGate(t, allowList(t, AskTheOwner))
 	event := testEvent(t, delegation, nil)
 
 	decision, err := gate.Admit(inbound(event, encoded))
@@ -743,7 +816,7 @@ func TestHeldEventDoesNotReachTheRuntimeQueue(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("a held event was offered to the runtime: %+v", pending)
 	}
-	waiting, err := journal.ListAwaitingAdmission(0)
+	waiting, err := journal.ListAwaitingAdmission(time.Unix(int64(baseUnix)+120, 0), 0)
 	if err != nil {
 		t.Fatalf("awaiting: %v", err)
 	}
@@ -771,7 +844,7 @@ func TestHeldEventDoesNotReachTheRuntimeQueue(t *testing.T) {
 
 // A denied event is never offered, and the decision is made once.
 func TestDeniedEventIsNeverOffered(t *testing.T) {
-	gate, journal, delegation, encoded := testGate(t, AllowList{HoldUnknown: true})
+	gate, journal, delegation, encoded := testGate(t, allowList(t, AskTheOwner))
 	event := testEvent(t, delegation, nil)
 	if _, err := gate.Admit(inbound(event, encoded)); err != nil {
 		t.Fatalf("admit: %v", err)
@@ -794,8 +867,8 @@ func TestDeniedEventIsNeverOffered(t *testing.T) {
 // A published inbox policy digest that nothing enforces is a claim. An
 // installation must not be able to advertise one policy and run another.
 func TestPolicyMustBeTheOnePublished(t *testing.T) {
-	published := AllowList{Known: map[string]struct{}{senderID: {}}, HoldUnknown: true}
-	running := AllowList{Known: map[string]struct{}{senderID: {}}}
+	published := allowList(t, AskTheOwner, senderID)
+	running := allowList(t, TellThem, senderID)
 	if published.Digest() == running.Digest() {
 		t.Fatal("two policies with different answers for an unknown sender share a digest")
 	}
@@ -805,12 +878,16 @@ func TestPolicyMustBeTheOnePublished(t *testing.T) {
 		t.Fatalf("journal: %v", err)
 	}
 	defer journal.Close()
+	local, localEncoded, localAgentState := localState(t, published)
 	config := Config{
 		Network: testNetwork(), Chain: testChain(), Journal: journal,
-		Resolver:        stubResolver{states: map[string]*nativev1.NativeStateV1{}},
-		Policy:          running,
-		LocalDelegation: testLocalDelegation(t, published),
-		InstallSalt:     bytes.Repeat([]byte{1}, MinInstallSaltBytes),
+		Resolver:            stubResolver{states: map[string]*nativev1.NativeStateV1{localID: localAgentState}},
+		Policy:              running,
+		LocalDelegationJSON: localEncoded,
+		LocalAgentID:        local.AgentID,
+		LocalEndpointID:     local.EndpointID,
+		Now:                 func() time.Time { return time.Unix(int64(baseUnix)+30, 0) },
+		InstallSalt:         bytes.Repeat([]byte{1}, MinInstallSaltBytes),
 	}
 	if _, err := New(config); err == nil {
 		t.Fatal("a gate ran a policy its endpoint never published")
@@ -825,16 +902,12 @@ func TestPolicyMustBeTheOnePublished(t *testing.T) {
 // the endpoint to republish its descriptor, because the pattern of those
 // republications would leak the roster the policy keeps private.
 func TestPolicyDigestDoesNotTrackTheRoster(t *testing.T) {
-	empty := AllowList{HoldUnknown: true}
-	populated := AllowList{
-		Known:       map[string]struct{}{senderID: {}, localID: {}},
-		Blocked:     map[string]struct{}{deviceID: {}},
-		HoldUnknown: true,
-	}
+	empty := allowList(t, AskTheOwner)
+	populated := allowList(t, AskTheOwner, senderID, localID)
 	if empty.Digest() != populated.Digest() {
 		t.Fatal("the published policy digest changed when a contact was added")
 	}
-	open := OpenInbox{}
+	open := OpenInbox()
 	if open.Digest() == empty.Digest() {
 		t.Fatal("an open inbox and an allow list publish the same digest")
 	}
@@ -844,7 +917,7 @@ func TestPolicyDigestDoesNotTrackTheRoster(t *testing.T) {
 // meet the contract are refused, and the refusal names the reason so a correct
 // implementation can tell it from a network fault.
 func TestBodyMustMatchItsKind(t *testing.T) {
-	gate, journal, delegation, encoded := testGate(t, OpenInbox{})
+	gate, journal, delegation, encoded := testGate(t, OpenInbox())
 	event := testEvent(t, delegation, func(e *envelope.Event) {
 		e.Content = append(textBody(t, "hello"), 0x00)
 	})
@@ -866,9 +939,7 @@ func TestBodyMustMatchItsKind(t *testing.T) {
 // A sender who was never admitted must not learn whether their body parsed.
 // That answer is a probe the recipient would be answering for a stranger.
 func TestUnadmittedSenderLearnsNothingAboutTheirBody(t *testing.T) {
-	gate, _, delegation, encoded := testGate(t, AllowList{
-		Blocked: map[string]struct{}{senderID: {}},
-	})
+	gate, _, delegation, encoded := testGate(t, blockList(t, senderID))
 	event := testEvent(t, delegation, func(e *envelope.Event) {
 		e.Content = append(textBody(t, "hello"), 0x00)
 	})
@@ -879,4 +950,32 @@ func TestUnadmittedSenderLearnsNothingAboutTheirBody(t *testing.T) {
 	if decision.Code != fault.CodeRejected {
 		t.Fatalf("a blocked sender learned %q about their body", decision.Code)
 	}
+}
+
+// allowList builds a closed allow-list policy. The roster is private and is
+// not part of the published document, so it is supplied separately.
+func allowList(t *testing.T, unknown UnknownSenderRule, known ...string) ContactPolicy {
+	t.Helper()
+	roster := Roster{Known: map[string]struct{}{}, Blocked: map[string]struct{}{}}
+	for _, agent := range known {
+		roster.Known[agent] = struct{}{}
+	}
+	policy, err := NewContactPolicy(InboxPolicyDocument{Rule: RuleAllowList, Unknown: unknown}, roster)
+	if err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	return policy
+}
+
+func blockList(t *testing.T, blocked ...string) ContactPolicy {
+	t.Helper()
+	roster := Roster{Known: map[string]struct{}{}, Blocked: map[string]struct{}{}}
+	for _, agent := range blocked {
+		roster.Blocked[agent] = struct{}{}
+	}
+	policy, err := NewContactPolicy(InboxPolicyDocument{Rule: RuleAllowList, Unknown: TellThem}, roster)
+	if err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	return policy
 }

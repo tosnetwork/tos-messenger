@@ -115,11 +115,18 @@ type Config struct {
 	Resolver identity.AgentResolver
 	Journal  *eventlog.Journal
 	Policy   ContactPolicy
-	// LocalDelegation is this installation's own published delegation. It is
-	// here for one reason: it names the inbox policy digest this endpoint told
-	// the network it enforces, and the gate refuses to run unless the policy it
-	// was actually given answers to that digest.
-	LocalDelegation     identity.Delegation
+	// LocalDelegationJSON is this installation's own published delegation, as
+	// it was published. It is verified against finalized state at start, and
+	// it names the inbox policy digest this endpoint told the network it
+	// enforces.
+	LocalDelegationJSON []byte
+	// LocalAgentID and LocalEndpointID are who this installation is. The
+	// delegation has to be theirs: another endpoint's, however valid, would
+	// bind this gate to somebody else's published policy.
+	LocalAgentID    string
+	LocalEndpointID string
+	// Now is the clock the start-up checks use.
+	Now                 func() time.Time
 	MaxContentBytes     int
 	MaxClockSkewSeconds uint64
 	InstallSalt         []byte
@@ -134,6 +141,9 @@ type Gate struct {
 // would be deciding authority from the sender's own claims, and one missing
 // its policy would be an open inbox nobody chose.
 func New(config Config) (*Gate, error) {
+	if config.Now == nil {
+		config.Now = time.Now
+	}
 	if config.Network == nil || config.Network.NetworkId == "" ||
 		!canon.HashPattern.MatchString(config.Network.GenesisRootHash) ||
 		!canon.HashPattern.MatchString(config.Network.GenesisFileHash) {
@@ -148,16 +158,26 @@ func New(config Config) (*Gate, error) {
 	if config.Journal == nil {
 		return nil, errors.New("admission requires a durable journal")
 	}
-	if config.Policy == nil {
+	if !config.Policy.Configured() {
 		return nil, errors.New("admission requires an inbox policy")
+	}
+	// This endpoint's own delegation is not taken on the caller's word. It is
+	// resolved against finalized state the same way a sender's is, because an
+	// installation enforcing a delegation the Agent no longer commits would be
+	// enforcing a permission that was withdrawn.
+	local, err := identity.Verify(config.Resolver, config.Network, config.Chain,
+		config.LocalDelegationJSON, config.Now())
+	if err != nil {
+		return nil, errors.New("this endpoint's own delegation does not verify: " + err.Error())
+	}
+	// And it must be this installation's, not some other endpoint's.
+	if local.AgentID != config.LocalAgentID || local.EndpointID != config.LocalEndpointID {
+		return nil, errors.New("this endpoint's delegation belongs to another endpoint")
 	}
 	// A published policy digest that nothing checks is a claim, not a
 	// commitment. An installation that advertises one policy and enforces
 	// another must not start.
-	if err := identity.Validate(config.LocalDelegation); err != nil {
-		return nil, errors.New("admission requires this endpoint's own delegation: " + err.Error())
-	}
-	if config.Policy.Digest() != config.LocalDelegation.InboxAdmissionPolicyDigest {
+	if config.Policy.Digest() != local.InboxAdmissionPolicyDigest {
 		return nil, errors.New("the inbox policy in use is not the one this endpoint published")
 	}
 	if len(config.InstallSalt) < MinInstallSaltBytes {
@@ -285,12 +305,19 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 		Payload:          stored,
 		Admission:        admitted,
 		ReceivedAtUnix:   inbound.ReceivedAtUnix,
+		ExpiresAtUnix:    inbound.Event.ExpiresAtUnix,
 	})
 	if err != nil {
 		if errors.Is(err, eventlog.ErrConflict) {
 			// The same content-addressed identifier arrived bound to a
 			// different sender or conversation. That is not a retry.
 			return g.refuse(inbound, fault.CodeReplayed, class), nil
+		}
+		// The owner's queue is full. The sender is told, rather than the event
+		// being dropped, so their retry later can succeed and so the events
+		// already waiting keep their place.
+		if errors.Is(err, eventlog.ErrPendingFull) {
+			return g.refuse(inbound, fault.CodeQuotaExceeded, class), nil
 		}
 		return Decision{}, err
 	}

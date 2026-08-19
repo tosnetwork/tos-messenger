@@ -47,7 +47,7 @@ func TestApprovalSurvivesAndIsDecidedOnce(t *testing.T) {
 		t.Fatalf("a new request was not pending: %+v", approval)
 	}
 
-	waiting, err := journal.ListPendingApprovals(0)
+	waiting, err := journal.ListPendingApprovals(now, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestApprovalSurvivesAndIsDecidedOnce(t *testing.T) {
 	if _, err := journal.DenyAction(request.ActionID, "changed my mind", now); err == nil {
 		t.Fatal("a settled decision was revisited by whoever asked for it")
 	}
-	if waiting, err := journal.ListPendingApprovals(0); err != nil {
+	if waiting, err := journal.ListPendingApprovals(now, 0); err != nil {
 		t.Fatalf("list: %v", err)
 	} else if len(waiting) != 0 {
 		t.Fatalf("a decided request stayed in the owner's queue: %+v", waiting)

@@ -166,6 +166,10 @@ type Entry struct {
 	// runtime. An entry that does not say is not admitted by default.
 	Admission      AdmissionState
 	ReceivedAtUnix uint64
+	// ExpiresAtUnix is the event's own expiry, carried here so the journal can
+	// retire an undecided event without decoding it. A queue that only a
+	// person can drain must not depend on that person for its bounds.
+	ExpiresAtUnix uint64
 
 	// Transition describes the session commitment this event is part of. It is
 	// set by CommitInbound and left empty by callers that decrypted elsewhere.
@@ -201,6 +205,7 @@ type Record struct {
 	PayloadBase64    string           `json:"payload_base64"`
 	PayloadDigest    string           `json:"payload_digest"`
 	ReceivedAtUnix   uint64           `json:"received_at_unix"`
+	EventExpiresAt   uint64           `json:"event_expires_at_unix,omitempty"`
 	Crypto           CryptoState      `json:"crypto"`
 	CryptoAtUnix     uint64           `json:"crypto_at_unix,omitempty"`
 	SessionID        string           `json:"session_id,omitempty"`
@@ -263,12 +268,23 @@ func (r Record) Terminal() bool {
 type Journal struct {
 	root  string
 	lock  *dirlock.Lock
+	quota Quota
 	mutex sync.Mutex
 }
 
 // Open takes ownership of a private state directory. A second Open on the same
 // directory fails with dirlock.ErrHeld rather than quietly sharing it.
-func Open(root string) (*Journal, error) {
+func Open(root string) (*Journal, error) { return OpenWith(root, DefaultQuota()) }
+
+// OpenWith takes ownership of a state directory under stated bounds.
+func OpenWith(root string, quota Quota) (*Journal, error) {
+	if err := quota.Validate(); err != nil {
+		return nil, err
+	}
+	return openJournalAt(root, quota)
+}
+
+func openJournalAt(root string, quota Quota) (*Journal, error) {
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return nil, errors.New("invalid event journal root")
 	}
@@ -288,7 +304,7 @@ func Open(root string) (*Journal, error) {
 	if err != nil {
 		return nil, err
 	}
-	journal := &Journal{root: root, lock: ownership}
+	journal := &Journal{root: root, lock: ownership, quota: quota}
 	// A process that died between staging an event and advancing its session
 	// left a decision nobody made. Finishing it here means recovery does not
 	// depend on the sender noticing and trying again.
@@ -315,6 +331,14 @@ func (j *Journal) Accept(entry Entry) (bool, Record, error) {
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
+	// An event waiting on a person is bounded. Without that, a delegated
+	// counterparty inside its own scope can send a new identifier every second
+	// and fill the owner's queue and the disk behind it.
+	if entry.Admission == AdmissionPending {
+		if err := j.pendingCapacity(entry.SenderEndpointID, len(entry.Payload), entry.receivedAt()); err != nil {
+			return false, Record{}, err
+		}
+	}
 	path := j.path(entry.EventID)
 	record := Record{
 		Schema:           Schema,
@@ -325,6 +349,7 @@ func (j *Journal) Accept(entry Entry) (bool, Record, error) {
 		PayloadBase64:    base64.StdEncoding.EncodeToString(entry.Payload),
 		PayloadDigest:    canon.Digest(entry.Payload),
 		ReceivedAtUnix:   entry.ReceivedAtUnix,
+		EventExpiresAt:   entry.ExpiresAtUnix,
 		Crypto:           CryptoUnbound,
 		Application:      StateQueued,
 	}
@@ -811,7 +836,7 @@ func idsFormat(prefix string, raw []byte) (string, error) {
 // It is a separate listing from ListPending and serves a different caller.
 // Merging them would put an event that is waiting for a person in the queue a
 // runtime drains, which is the whole failure this dimension exists to prevent.
-func (j *Journal) ListAwaitingAdmission(limit int) ([]Record, error) {
+func (j *Journal) ListAwaitingAdmission(now time.Time, limit int) ([]Record, error) {
 	if err := j.usable(); err != nil {
 		return nil, err
 	}
@@ -832,6 +857,10 @@ func (j *Journal) ListAwaitingAdmission(limit int) ([]Record, error) {
 			continue
 		}
 		if record.Admission != AdmissionPending {
+			continue
+		}
+		// An event that ran out of time is not still waiting for a decision.
+		if record.expired(j.quota, uint64(now.Unix())) {
 			continue
 		}
 		waiting = append(waiting, record)

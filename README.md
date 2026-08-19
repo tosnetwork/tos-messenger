@@ -150,7 +150,12 @@ Deliberately absent, with the reason:
   key, a payment, or this installation's own configuration without a person.
 - A commitment nobody reads is worse than none, because it implies an
   enforcement that does not exist. The policy digests a delegation carries are
-  checked against the documents they name.
+  checked against the documents they name, and an inbox policy is built from
+  the document it publishes rather than being asked what its own digest is.
+- A queue only a person can drain is bounded, in count, per sender, in bytes
+  and in age. A sender who fills it is refused rather than silently dropped,
+  and a question nobody answered is recorded as refused rather than kept
+  forever.
 - Finalized state is re-verified where it is used: which network it came from,
   that it is final, which registry produced it, and that it describes the Agent
   that was asked about.

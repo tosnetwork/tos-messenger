@@ -39,99 +39,146 @@ const (
 	AdmitDeny Admission = "deny"
 )
 
-// ContactPolicy is the recipient's inbox admission policy.
-//
-// The mechanism is settled here; the parameters are not. What an unknown
-// sender must present, whether that is a bond, an invite token, or nothing at
-// all, is an open protocol-freeze decision. This package's contribution is
-// that a policy is always consulted and that its answer is honoured, not what
-// any particular policy says.
-type ContactPolicy interface {
-	// Admits reports how an event from one Agent should be treated. It is
-	// given the sender's Agent identifier and the event kind, and nothing
-	// else: a policy that could read the content would be making a content
-	// judgement this layer is not entitled to make.
-	Admits(senderAgentID string, kind string) Admission
+// InboxRule is the closed set of admission rules this build implements.
+type InboxRule string
 
-	// Digest is the published identity of this policy. The recipient commits
-	// it in its delegation and republishes it in its descriptor, and the gate
-	// refuses to run if the policy in memory does not answer to the digest the
-	// network was told about. Without that check the published digest is a
-	// decoration: an installation could advertise one policy and enforce
-	// another, and nothing would notice.
-	//
-	// It commits the rule a sender has to satisfy, not the recipient's roster.
-	// A digest that changed whenever a contact was added would force the
-	// descriptor to be republished on every change, and the pattern of those
-	// republications would leak the roster the policy exists to keep private.
-	Digest() string
+const (
+	// RuleOpen admits every sender. A zero-cost open inbox is a supported
+	// configuration, not a placeholder: any admission cost has to remain
+	// optional, or a recipient who wants to be reachable by strangers has no
+	// way to say so.
+	RuleOpen InboxRule = "open-inbox"
+	// RuleAllowList admits known contacts and denies anyone blocked.
+	RuleAllowList InboxRule = "allow-list"
+)
+
+// UnknownSenderRule is what happens to a sender the roster does not name.
+type UnknownSenderRule string
+
+const (
+	// TellThem refuses and says what the inbox requires, because a sender who
+	// cannot learn what is required cannot satisfy it.
+	TellThem UnknownSenderRule = "require-admission"
+	// AskTheOwner keeps the event for an owner decision.
+	AskTheOwner UnknownSenderRule = "hold-for-approval"
+)
+
+// InboxPolicyDocument is the published description of an inbox policy.
+//
+// It is what the digest is computed from and what the evaluator is built from,
+// which is the point. When a policy could declare its own digest, an
+// implementation could answer "allow everyone" while publishing the identity
+// of an invite-only inbox, and the check would pass: the digest would be
+// testing whether an implementation agreed with itself.
+type InboxPolicyDocument struct {
+	Rule InboxRule
+	// Unknown applies to an allow list only.
+	Unknown UnknownSenderRule
 }
 
-// policyDigest derives the published identity of a policy from its rule and
-// the parameters a sender would have to satisfy.
-func policyDigest(rule string, parameters ...string) string {
-	buffer := bytes.NewBufferString(canon.DomainInboxPolicy)
-	canon.Text(buffer, rule)
-	canon.Uint64(buffer, uint64(len(parameters)))
-	for _, parameter := range parameters {
-		canon.Text(buffer, parameter)
+// Validate enforces a document this build can evaluate.
+func (d InboxPolicyDocument) Validate() error {
+	switch d.Rule {
+	case RuleOpen:
+		if d.Unknown != "" {
+			return errors.New("an open inbox has no rule for unknown senders")
+		}
+		return nil
+	case RuleAllowList:
+		if d.Unknown != TellThem && d.Unknown != AskTheOwner {
+			return errors.New("an allow list must say what happens to an unknown sender")
+		}
+		return nil
+	default:
+		return errors.New("this build does not implement that inbox rule")
 	}
-	return canon.Digest(buffer.Bytes())
 }
 
-// OpenInbox admits every sender.
+// Digest is the published identity of a policy.
 //
-// A zero-cost open inbox is a supported configuration, not a placeholder. Any
-// admission cost has to remain optional, or a recipient who wants to be
-// reachable by strangers has no way to say so.
-type OpenInbox struct{}
+// It commits the rule a sender has to satisfy, not the recipient's roster. A
+// digest that changed whenever a contact was added would force the descriptor
+// to be republished on every change, and the pattern of those republications
+// would leak the roster the policy exists to keep private.
+func (d InboxPolicyDocument) Digest() (string, error) {
+	if err := d.Validate(); err != nil {
+		return "", err
+	}
+	buffer := bytes.NewBufferString(canon.DomainInboxPolicy)
+	canon.Text(buffer, string(d.Rule))
+	canon.Text(buffer, string(d.Unknown))
+	return canon.Digest(buffer.Bytes()), nil
+}
 
-// Admits implements ContactPolicy.
-func (OpenInbox) Admits(string, string) Admission { return AdmitAllow }
-
-// Digest implements ContactPolicy.
-func (OpenInbox) Digest() string { return policyDigest("open-inbox") }
-
-// AllowList admits known contacts, holds unknown senders for an owner
-// decision, and denies anyone explicitly blocked.
+// Roster is the recipient's private contact list.
 //
-// It is the invite-only mode the first demonstration is expected to use, which
-// exists so that the demonstration does not depend on an economic admission
-// profile that is still gated.
-type AllowList struct {
+// It is deliberately not part of the document and not part of the digest. Who
+// a recipient knows is theirs; what a stranger must do to reach them is
+// public.
+type Roster struct {
 	Known   map[string]struct{}
 	Blocked map[string]struct{}
-	// HoldUnknown keeps an unknown sender for an owner decision instead of
-	// refusing them. With it false, an unknown sender is told what the inbox
-	// requires.
-	HoldUnknown bool
 }
 
-// Admits implements ContactPolicy.
-func (a AllowList) Admits(senderAgentID string, _ string) Admission {
-	if _, blocked := a.Blocked[senderAgentID]; blocked {
-		return AdmitDeny
+// ContactPolicy is a document and the roster it is evaluated against.
+//
+// It is a closed type rather than an interface. An interface here would let
+// any package supply a pair of methods where one says what the policy is and
+// the other says what it does, and nothing could make those two agree. Adding
+// a rule means adding it to this build, where the digest and the behaviour are
+// derived from the same document.
+type ContactPolicy struct {
+	document InboxPolicyDocument
+	roster   Roster
+	digest   string
+}
+
+// NewContactPolicy builds the evaluator for one published document.
+func NewContactPolicy(document InboxPolicyDocument, roster Roster) (ContactPolicy, error) {
+	digest, err := document.Digest()
+	if err != nil {
+		return ContactPolicy{}, err
 	}
-	if _, known := a.Known[senderAgentID]; known {
+	return ContactPolicy{document: document, roster: roster, digest: digest}, nil
+}
+
+// OpenInbox is the policy that admits everyone.
+func OpenInbox() ContactPolicy {
+	policy, err := NewContactPolicy(InboxPolicyDocument{Rule: RuleOpen}, Roster{})
+	if err != nil {
+		panic("the open inbox document is not valid: " + err.Error())
+	}
+	return policy
+}
+
+// Digest returns the published identity of this policy.
+func (p ContactPolicy) Digest() string { return p.digest }
+
+// Document returns what was published.
+func (p ContactPolicy) Document() InboxPolicyDocument { return p.document }
+
+// Configured reports whether this policy was built rather than zero-valued.
+func (p ContactPolicy) Configured() bool { return p.digest != "" }
+
+// Admits reports how an event from one Agent should be treated.
+//
+// It is given the sender's Agent identifier and the event kind, and nothing
+// else: a policy that could read the content would be making a content
+// judgement this layer is not entitled to make.
+func (p ContactPolicy) Admits(senderAgentID string, _ string) Admission {
+	if p.document.Rule == RuleOpen {
 		return AdmitAllow
 	}
-	if a.HoldUnknown {
+	if _, blocked := p.roster.Blocked[senderAgentID]; blocked {
+		return AdmitDeny
+	}
+	if _, known := p.roster.Known[senderAgentID]; known {
+		return AdmitAllow
+	}
+	if p.document.Unknown == AskTheOwner {
 		return AdmitHoldForApproval
 	}
 	return AdmitRequireAdmission
-}
-
-// Digest implements ContactPolicy.
-//
-// The entries are deliberately not committed. What a sender must satisfy is
-// "be known to this recipient", and that rule does not change when the roster
-// does.
-func (a AllowList) Digest() string {
-	unknown := "require-admission"
-	if a.HoldUnknown {
-		unknown = "hold-for-approval"
-	}
-	return policyDigest("allow-list", unknown)
 }
 
 // codeFor maps a policy answer to its failure code.

@@ -154,7 +154,7 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 	case OpQueue:
 		return s.queue(request)
 	case OpAwaitingAdmission:
-		return s.awaitingAdmission(request)
+		return s.awaitingAdmission(request, now)
 	case OpAdmit:
 		return s.admit(request, now)
 	case OpRefuse:
@@ -170,7 +170,7 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 	case OpClaimAction:
 		return s.claimAction(request, now)
 	case OpPendingActions:
-		return s.pendingActions(request)
+		return s.pendingActions(request, now)
 	case OpGrantAction:
 		return s.grantAction(request, now)
 	case OpDenyAction:
@@ -257,12 +257,12 @@ func (s *Server) queue(request Request) Response {
 }
 
 // awaitingAdmission lists what the owner has yet to decide about.
-func (s *Server) awaitingAdmission(request Request) Response {
+func (s *Server) awaitingAdmission(request Request, now time.Time) Response {
 	limit := request.Limit
 	if limit == 0 || limit > MaxEventsPerResponse {
 		limit = MaxEventsPerResponse
 	}
-	records, err := s.config.Journal.ListAwaitingAdmission(limit)
+	records, err := s.config.Journal.ListAwaitingAdmission(now, limit)
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
 	}
@@ -441,8 +441,8 @@ func (s *Server) claimAction(request Request, now time.Time) Response {
 		State: string(approval.State), Authorised: true}
 }
 
-func (s *Server) pendingActions(request Request) Response {
-	waiting, err := s.config.Journal.ListPendingApprovals(request.Limit)
+func (s *Server) pendingActions(request Request, now time.Time) Response {
+	waiting, err := s.config.Journal.ListPendingApprovals(now, request.Limit)
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
 	}

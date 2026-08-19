@@ -238,6 +238,19 @@ func (d *Daemon) Maintain() {
 		d.report("expire", err)
 		return
 	}
+	// Questions nobody answered are retired in the same pass. A queue only a
+	// person can drain would otherwise grow until the disk decided for them.
+	undecided, err := d.journal.ExpirePendingAdmissions(now)
+	if err != nil {
+		d.report("expire admissions", err)
+		return
+	}
+	unanswered, err := d.journal.ExpirePendingApprovals(now)
+	if err != nil {
+		d.report("expire approvals", err)
+		return
+	}
+	expired += undecided + unanswered
 	report, err := d.journal.Prune(now, d.config.Retention())
 	if err != nil {
 		d.report("prune", err)
