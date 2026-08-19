@@ -64,6 +64,11 @@ const (
 // ErrNotPending reports a transition on a delivery that is no longer waiting.
 var ErrNotPending = errors.New("delivery is not awaiting an attempt")
 
+// ErrAlreadySealed reports a second seal for a delivery that already carries a
+// ciphertext. Sealing again would spend another message key for a message that
+// already exists.
+var ErrAlreadySealed = errors.New("delivery has already been sealed")
+
 // Delivery is the durable state of one outbound event.
 //
 // It exists so that at-least-once delivery survives a restart. Without it, a

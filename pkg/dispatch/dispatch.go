@@ -249,10 +249,14 @@ func (d *Dispatcher) Sweep(ctx context.Context, limit int) (Summary, error) {
 		// One sweep at a time owns a delivery. Two sweeps reading the same due
 		// list would otherwise both send it; the session conflict check stops
 		// the second ratchet advance but not the second message.
-		if _, err := d.config.Journal.ClaimForSend(delivery.EventID, attemptID, now, d.config.AttemptLease); err != nil {
+		// The claim returns the delivery as it now stands, and that is the one
+		// the attempt works from. Carrying on with the copy read before the
+		// claim would mean acting on state the claim may have changed.
+		claimed, err := d.config.Journal.ClaimForSend(delivery.EventID, attemptID, now, d.config.AttemptLease)
+		if err != nil {
 			continue
 		}
-		sealed, err := d.attempt(ctx, delivery, attemptID, now)
+		sealed, err := d.attempt(ctx, claimed, attemptID, now)
 		if sealed {
 			summary.Sealed++
 		}
@@ -284,7 +288,7 @@ func (d *Dispatcher) attempt(ctx context.Context, delivery eventlog.Delivery, at
 	}
 	sealed := false
 	if ciphertext == nil {
-		ciphertext, err = d.seal(delivery, now)
+		ciphertext, err = d.seal(delivery, attemptID, now)
 		if err != nil {
 			return false, err
 		}
@@ -313,7 +317,7 @@ func (d *Dispatcher) attempt(ctx context.Context, delivery eventlog.Delivery, at
 // next sweep seals again under a fresh key. The other order would leave a
 // ciphertext that may already be on the wire while the state rolled back, and
 // the next seal would reuse a message key.
-func (d *Dispatcher) seal(delivery eventlog.Delivery, now time.Time) ([]byte, error) {
+func (d *Dispatcher) seal(delivery eventlog.Delivery, attemptID string, now time.Time) ([]byte, error) {
 	record, found, err := d.config.Journal.SessionState(delivery.SessionID)
 	if err != nil {
 		return nil, fault.Wrap(fault.CodeInternal, err)
@@ -351,7 +355,7 @@ func (d *Dispatcher) seal(delivery eventlog.Delivery, now time.Time) ([]byte, er
 	// and this attempt's ciphertext is discarded rather than sent under a key
 	// somebody else already used.
 	if _, err := d.config.Journal.CommitSealed(delivery.SessionID, record.AlgorithmID,
-		record.Generation, next, delivery.EventID, ciphertext, now); err != nil {
+		record.Generation, next, delivery.EventID, attemptID, ciphertext, now); err != nil {
 		return nil, fault.Wrap(fault.CodeInternal, err)
 	}
 	return ciphertext, nil

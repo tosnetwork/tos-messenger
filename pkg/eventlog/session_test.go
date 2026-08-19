@@ -3,6 +3,8 @@ package eventlog
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,7 +108,7 @@ func TestCommitSealedAdvancesBeforeStoringTheCiphertext(t *testing.T) {
 	}
 
 	delivery, err := journal.CommitSealed(session(0x11), algorithm, 0,
-		e2ee.State("advanced"), eventA, []byte("sealed bytes"), now)
+		e2ee.State("advanced"), eventA, heldAttempt(t, journal, eventA, now), []byte("sealed bytes"), now)
 	if err != nil {
 		t.Fatalf("commit sealed: %v", err)
 	}
@@ -138,7 +140,7 @@ func TestSealedCiphertextSurvivesRestart(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if _, err := journal.CommitSealed(session(0x11), algorithm, 0,
-		e2ee.State("advanced"), eventA, []byte("sealed bytes"), now); err != nil {
+		e2ee.State("advanced"), eventA, heldAttempt(t, journal, eventA, now), []byte("sealed bytes"), now); err != nil {
 		t.Fatalf("commit sealed: %v", err)
 	}
 	if err := journal.Close(); err != nil {
@@ -150,7 +152,9 @@ func TestSealedCiphertextSurvivesRestart(t *testing.T) {
 	}
 	defer reopened.Close()
 
-	due, err := reopened.Due(now)
+	// The attempt that sealed it did not survive the restart, so its lease
+	// expires and the delivery becomes due again with the ciphertext intact.
+	due, err := reopened.Due(now.Add(2 * time.Minute))
 	if err != nil {
 		t.Fatalf("due: %v", err)
 	}
@@ -191,17 +195,16 @@ func TestSessionCommitsRejectUnusableInput(t *testing.T) {
 	if err := journal.PutSessionState(session(0x11), algorithm, state, time.Time{}); err == nil {
 		t.Fatal("a zero clock was accepted")
 	}
-	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, state, eventA, []byte("x"), now); !errors.Is(err, ErrUnknown) {
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, state, eventA, unheldAttempt, []byte("x"), now); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("sealing an unqueued event produced %v", err)
 	}
 	if _, _, err := journal.Enqueue(outbound(eventA)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, state, eventA, nil, now); err == nil {
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, state, eventA, heldAttempt(t, journal, eventA, now), nil, now); err == nil {
 		t.Fatal("an empty ciphertext was accepted")
 	}
-	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, state, eventA,
-		make([]byte, MaxCiphertextBytes+1), now); err == nil {
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, state, eventA, heldAttempt(t, journal, eventA, now), make([]byte, MaxCiphertextBytes+1), now); err == nil {
 		t.Fatal("an unbounded ciphertext was accepted")
 	}
 }
@@ -221,7 +224,7 @@ func TestClosedJournalRefusesSessionWork(t *testing.T) {
 	if _, _, err := journal.CommitInbound(session(0x11), algorithm, 1, e2ee.State("x"), entry(eventA, endpoint), now); err == nil {
 		t.Fatal("a closed journal committed inbound")
 	}
-	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, e2ee.State("x"), eventA, []byte("y"), now); err == nil {
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, e2ee.State("x"), eventA, unheldAttempt, []byte("y"), now); err == nil {
 		t.Fatal("a closed journal committed a sealed message")
 	}
 }
@@ -255,11 +258,11 @@ func TestConcurrentTransitionsConflict(t *testing.T) {
 
 	// Both read the same generation, as two concurrent sweeps would.
 	if _, err := journal.CommitSealed(session(0x11), algorithm, generation,
-		e2ee.State("advanced by A"), eventA, []byte("ciphertext A"), now); err != nil {
+		e2ee.State("advanced by A"), eventA, heldAttempt(t, journal, eventA, now), []byte("ciphertext A"), now); err != nil {
 		t.Fatalf("first commit: %v", err)
 	}
 	if _, err := journal.CommitSealed(session(0x11), algorithm, generation,
-		e2ee.State("advanced by B"), eventB, []byte("ciphertext B"), now); !errors.Is(err, ErrSessionConflict) {
+		e2ee.State("advanced by B"), eventB, heldAttempt(t, journal, eventB, now), []byte("ciphertext B"), now); !errors.Is(err, ErrSessionConflict) {
 		t.Fatalf("a stale transition was committed: %v", err)
 	}
 
@@ -320,5 +323,219 @@ func TestSendAttemptIsLeased(t *testing.T) {
 	}
 	if _, err := journal.Delivered(eventA, attempt(0x51), expired); err != nil {
 		t.Fatalf("delivered: %v", err)
+	}
+}
+
+// unheldAttempt is a well-formed attempt identifier that holds nothing. It is
+// for the cases where the claim is not what is being tested.
+const unheldAttempt = "send_" + "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+// heldAttempt claims a delivery and returns the attempt that now holds it.
+// Sealing is bound to the attempt, so a test that invented an identifier would
+// be exercising a path the journal refuses.
+func heldAttempt(t *testing.T, journal *Journal, eventID string, now time.Time) string {
+	t.Helper()
+	attemptID := "send_" + strings.Repeat("c", 64)
+	if _, err := journal.ClaimForSend(eventID, attemptID, now, time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	return attemptID
+}
+
+// An event must not reach a runtime before the session records that its
+// ciphertext was opened. Between the two writes the event exists, and a
+// runtime acting on it would be acting on a message the session still
+// considers unread.
+func TestStagedInboundIsNotOfferedToARuntime(t *testing.T) {
+	journal, _ := openJournal(t)
+	now := time.Unix(1_800_000_000, 0)
+
+	fresh, record, err := journal.CommitInbound(session(0x11), algorithm, 0,
+		e2ee.State("opened"), entry(eventA, endpoint), now)
+	if err != nil {
+		t.Fatalf("commit inbound: %v", err)
+	}
+	if !fresh || record.Crypto != CryptoCommitted {
+		t.Fatalf("a committed inbound event was not marked as such: %+v", record)
+	}
+	pending, err := journal.ListPending(now, 10)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("a committed event was not offered: %+v", pending)
+	}
+
+	// A record staged and never committed is invisible, whatever its admission
+	// and application states say.
+	staged := record
+	staged.Crypto = CryptoStaged
+	if _, err := journal.commit(journal.path(record.EventID), staged); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if pending, err := journal.ListPending(now, 10); err != nil {
+		t.Fatalf("pending: %v", err)
+	} else if len(pending) != 0 {
+		t.Fatalf("an uncommitted transition was handed to a runtime: %+v", pending)
+	}
+}
+
+// A process that died between staging an event and advancing its session must
+// not leave that decision to the sender's retry.
+func TestStagedInboundIsFinishedOnRestart(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	now := time.Unix(1_800_000_000, 0)
+
+	journal, err := Open(root)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	entry := entry(eventA, endpoint)
+	entry.Transition = &Transition{
+		SessionID: session(0x11), Algorithm: algorithm,
+		ExpectedGeneration: 0, NextState: e2ee.State("opened"),
+	}
+	if _, _, err := journal.Accept(entry); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	// The session was never advanced: this is the crash.
+	if err := journal.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+
+	record, found, err := reopened.Lookup(eventA)
+	if err != nil || !found {
+		t.Fatalf("lookup: found=%v err=%v", found, err)
+	}
+	if record.Crypto != CryptoCommitted {
+		t.Fatalf("a staged event was left unresolved: %+v", record)
+	}
+	state, found, err := reopened.SessionState(session(0x11))
+	if err != nil || !found {
+		t.Fatalf("session: found=%v err=%v", found, err)
+	}
+	if state.Generation != 1 || state.LastInboundEventID != eventA {
+		t.Fatalf("the interrupted transition was not applied: %+v", state)
+	}
+	if pending, err := reopened.ListPending(now, 10); err != nil {
+		t.Fatalf("pending: %v", err)
+	} else if len(pending) != 1 {
+		t.Fatalf("the recovered event was not offered: %+v", pending)
+	}
+}
+
+// A transition that can no longer be applied is abandoned rather than
+// delivered. Its ciphertext was never consumed, so a resend opens normally.
+func TestStagedInboundIsAbandonedWhenTheSessionMovedOn(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	now := time.Unix(1_800_000_000, 0)
+
+	journal, err := Open(root)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	entry := entry(eventA, endpoint)
+	entry.Transition = &Transition{
+		SessionID: session(0x11), Algorithm: algorithm,
+		ExpectedGeneration: 0, NextState: e2ee.State("opened"),
+	}
+	if _, _, err := journal.Accept(entry); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	// Something else advanced the session past the staged transition.
+	if err := journal.PutSessionState(session(0x11), algorithm, e2ee.State("elsewhere"), now); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+
+	record, found, err := reopened.Lookup(eventA)
+	if err != nil || !found {
+		t.Fatalf("lookup: found=%v err=%v", found, err)
+	}
+	if record.Crypto != CryptoAbandoned {
+		t.Fatalf("an unapplicable transition was not abandoned: %+v", record)
+	}
+	if pending, err := reopened.ListPending(now, 10); err != nil {
+		t.Fatalf("pending: %v", err)
+	} else if len(pending) != 0 {
+		t.Fatalf("an abandoned event was offered to a runtime: %+v", pending)
+	}
+}
+
+// Leases expire, and that is how work is recovered from a worker that died.
+// The attempt that lost the delivery must not still be able to advance the
+// ratchet for it.
+func TestOnlyTheHoldingAttemptMaySeal(t *testing.T) {
+	journal, _ := openJournal(t)
+	now := time.Unix(1_800_000_000, 0)
+	if _, _, err := journal.Enqueue(outbound(eventA)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	first := "send_" + strings.Repeat("a", 64)
+	if _, err := journal.ClaimForSend(eventA, first, now, time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	// The lease expires and another attempt takes over.
+	later := now.Add(2 * time.Minute)
+	second := "send_" + strings.Repeat("b", 64)
+	if _, err := journal.ClaimForSend(eventA, second, later, time.Minute); err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 0, e2ee.State("advanced"),
+		eventA, first, []byte("stale ciphertext"), later); !errors.Is(err, ErrLeaseMismatch) {
+		t.Fatalf("an attempt that lost the delivery sealed it anyway: %v", err)
+	}
+	// The ratchet did not move for the attempt that no longer holds it.
+	if _, found, err := journal.SessionState(session(0x11)); err != nil {
+		t.Fatalf("session: %v", err)
+	} else if found {
+		t.Fatal("a losing attempt advanced the session")
+	}
+
+	sealed, err := journal.CommitSealed(session(0x11), algorithm, 0, e2ee.State("advanced"),
+		eventA, second, []byte("ciphertext"), later)
+	if err != nil {
+		t.Fatalf("commit sealed: %v", err)
+	}
+	if sealed.CiphertextBase64 == "" {
+		t.Fatal("the holding attempt could not seal")
+	}
+	// And sealing again spends no second message key.
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 1, e2ee.State("again"),
+		eventA, second, []byte("second ciphertext"), later); !errors.Is(err, ErrAlreadySealed) {
+		t.Fatalf("a delivery was sealed twice: %v", err)
+	}
+}
+
+// An expired lease is not a held one, even when nobody else has taken over.
+func TestAnExpiredAttemptCannotSeal(t *testing.T) {
+	journal, _ := openJournal(t)
+	now := time.Unix(1_800_000_000, 0)
+	if _, _, err := journal.Enqueue(outbound(eventA)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	attemptID := "send_" + strings.Repeat("a", 64)
+	if _, err := journal.ClaimForSend(eventA, attemptID, now, time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := journal.CommitSealed(session(0x11), algorithm, 0, e2ee.State("advanced"),
+		eventA, attemptID, []byte("late ciphertext"), now.Add(2*time.Minute)); !errors.Is(err, ErrLeaseMismatch) {
+		t.Fatalf("an expired attempt sealed anyway: %v", err)
 	}
 }

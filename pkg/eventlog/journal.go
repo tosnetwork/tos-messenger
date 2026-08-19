@@ -84,6 +84,34 @@ const (
 	AdmissionDenied AdmissionState = "denied"
 )
 
+// CryptoState is whether the session transition that decrypted an event has
+// been committed.
+//
+// It is a third dimension, separate from admission and from application, and
+// it exists because those two answer questions about people and runtimes while
+// this one answers a question about the ratchet. Folding it into either would
+// mean an event could be handed to a runtime -- acted on, tools run, money
+// discussed -- while the session state still says the ciphertext was never
+// opened. The sender's retry would then be accepted a second time, or, if no
+// retry came, the local ratchet would sit one message behind for good.
+type CryptoState string
+
+const (
+	// CryptoUnbound marks a record whose caller never named a session. There
+	// is no transition to commit, so there is nothing to wait for.
+	CryptoUnbound CryptoState = "unbound"
+	// CryptoStaged marks a record whose session transition has not been
+	// committed yet. It is never offered to a runtime.
+	CryptoStaged CryptoState = "staged"
+	// CryptoCommitted marks a record whose session transition is durable.
+	CryptoCommitted CryptoState = "committed"
+	// CryptoAbandoned marks a staged record whose transition can no longer be
+	// applied, because the session moved on without it. The ciphertext was
+	// never consumed, so the event is not delivered and a resend will decrypt
+	// normally.
+	CryptoAbandoned CryptoState = "abandoned"
+)
+
 // ApplicationState is how far an event has got towards an Agent runtime.
 type ApplicationState string
 
@@ -138,6 +166,27 @@ type Entry struct {
 	// runtime. An entry that does not say is not admitted by default.
 	Admission      AdmissionState
 	ReceivedAtUnix uint64
+
+	// Transition describes the session commitment this event is part of. It is
+	// set by CommitInbound and left empty by callers that decrypted elsewhere.
+	Transition *Transition
+}
+
+// Transition is the session advance one inbound event depends on.
+//
+// It is stored with the event so a process that dies between writing the event
+// and advancing the session can finish the job by itself. Recovering by
+// waiting for the sender to retry would leave correctness in somebody else's
+// hands, and a sender that never retries would leave this ratchet behind for
+// good.
+type Transition struct {
+	SessionID string
+	Algorithm string
+	// ExpectedGeneration is the session generation the transition was prepared
+	// against. It is what tells recovery whether the advance already happened.
+	ExpectedGeneration uint64
+	// NextState is the session state after the ciphertext was opened.
+	NextState []byte
 }
 
 // Record is the durable state of one inbound event.
@@ -152,6 +201,13 @@ type Record struct {
 	PayloadBase64    string           `json:"payload_base64"`
 	PayloadDigest    string           `json:"payload_digest"`
 	ReceivedAtUnix   uint64           `json:"received_at_unix"`
+	Crypto           CryptoState      `json:"crypto"`
+	CryptoAtUnix     uint64           `json:"crypto_at_unix,omitempty"`
+	SessionID        string           `json:"session_id,omitempty"`
+	AlgorithmID      string           `json:"algorithm_id,omitempty"`
+	ExpectedGen      uint64           `json:"expected_session_generation,omitempty"`
+	NextStateBase64  string           `json:"next_session_state_base64,omitempty"`
+	NextStateDigest  string           `json:"next_session_state_digest,omitempty"`
 	Application      ApplicationState `json:"application"`
 	LeaseID          string           `json:"lease_id,omitempty"`
 	LeaseExpiresAt   uint64           `json:"lease_expires_at_unix,omitempty"`
@@ -171,6 +227,31 @@ func (r Record) Payload() ([]byte, error) {
 		return nil, errors.New("stored event payload does not match its digest")
 	}
 	return payload, nil
+}
+
+// NextState returns the session state this event's transition would install.
+func (r Record) NextState() ([]byte, error) {
+	if r.NextStateBase64 == "" {
+		return nil, errors.New("record carries no session transition")
+	}
+	state, err := base64.StdEncoding.Strict().DecodeString(r.NextStateBase64)
+	if err != nil {
+		return nil, errors.New("invalid stored session transition")
+	}
+	if canon.Digest(state) != r.NextStateDigest {
+		return nil, errors.New("stored session transition does not match its digest")
+	}
+	return state, nil
+}
+
+// Deliverable reports whether an event may be offered to a runtime.
+//
+// A staged or abandoned transition is not deliverable whatever its admission
+// or application state says: the ratchet has not recorded that this ciphertext
+// was opened, so handing the event over would be acting on a message the
+// session still considers unread.
+func (r Record) Deliverable() bool {
+	return r.Crypto == CryptoCommitted || r.Crypto == CryptoUnbound
 }
 
 // Terminal reports whether the runtime is finished with this event.
@@ -207,7 +288,15 @@ func Open(root string) (*Journal, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Journal{root: root, lock: ownership}, nil
+	journal := &Journal{root: root, lock: ownership}
+	// A process that died between staging an event and advancing its session
+	// left a decision nobody made. Finishing it here means recovery does not
+	// depend on the sender noticing and trying again.
+	if err := journal.recoverStaged(); err != nil {
+		_ = ownership.Close()
+		return nil, err
+	}
+	return journal, nil
 }
 
 // Accept durably records an event exactly once, together with the event
@@ -236,7 +325,20 @@ func (j *Journal) Accept(entry Entry) (bool, Record, error) {
 		PayloadBase64:    base64.StdEncoding.EncodeToString(entry.Payload),
 		PayloadDigest:    canon.Digest(entry.Payload),
 		ReceivedAtUnix:   entry.ReceivedAtUnix,
+		Crypto:           CryptoUnbound,
 		Application:      StateQueued,
+	}
+	// A record that names a session is staged, not delivered. It becomes
+	// visible to a runtime only once the session has recorded that this
+	// ciphertext was opened.
+	if entry.Transition != nil {
+		record.Crypto = CryptoStaged
+		record.SessionID = entry.Transition.SessionID
+		record.AlgorithmID = entry.Transition.Algorithm
+		record.ExpectedGen = entry.Transition.ExpectedGeneration
+		record.NextStateBase64 = base64.StdEncoding.EncodeToString(entry.Transition.NextState)
+		record.NextStateDigest = canon.Digest(entry.Transition.NextState)
+		record.CryptoAtUnix = entry.ReceivedAtUnix
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -303,6 +405,13 @@ func (j *Journal) ListPending(now time.Time, limit int) ([]Record, error) {
 		}
 		// An event the owner has not admitted is not the runtime's to see.
 		if record.Admission != AdmissionAdmitted {
+			continue
+		}
+		// Nor is one whose session transition is not committed. The ratchet
+		// has not recorded that this ciphertext was opened, so handing the
+		// event over would be acting on a message the session considers
+		// unread.
+		if !record.Deliverable() {
 			continue
 		}
 		switch record.Application {
@@ -790,4 +899,78 @@ func (j *Journal) decideAdmission(eventID string, state AdmissionState, code fau
 		}
 	}
 	return j.commit(path, record)
+}
+
+// recoverStaged finishes inbound commitments a crash interrupted.
+//
+// There are exactly three states a staged record can be found in, and each has
+// one right answer:
+//
+//   - the session is still at the generation the transition was prepared
+//     against, so the ciphertext was never consumed. The transition is applied
+//     and the event becomes deliverable.
+//   - the session has already moved past it and names this event as the one
+//     that moved it, so the advance happened and only the record's own marker
+//     was lost. The record is marked committed.
+//   - the session moved on for some other reason. This transition can no
+//     longer be applied on top of it, so the event is abandoned rather than
+//     delivered: the ratchet never opened this ciphertext, and a resend will
+//     decrypt normally.
+//
+// The alternative -- leaving staged records for the sender to resolve by
+// retrying -- puts local consistency in a remote party's hands, and a sender
+// that never retries leaves this ratchet a message behind for good.
+func (j *Journal) recoverStaged() error {
+	entries, err := os.ReadDir(j.inboundRoot())
+	if err != nil {
+		return errors.New("read event journal")
+	}
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(j.inboundRoot(), entry.Name())
+		record, err := readRecord(path)
+		if err != nil || record.Crypto != CryptoStaged {
+			continue
+		}
+		if err := j.resolveStaged(path, record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (j *Journal) resolveStaged(path string, record Record) error {
+	if !sessionPattern.MatchString(record.SessionID) {
+		record.Crypto = CryptoAbandoned
+		_, err := j.commit(path, record)
+		return err
+	}
+	current, err := readSession(j.sessionPath(record.SessionID))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	switch {
+	case current.Generation == record.ExpectedGen:
+		next, err := record.NextState()
+		if err != nil {
+			record.Crypto = CryptoAbandoned
+			_, commitErr := j.commit(path, record)
+			return commitErr
+		}
+		if err := j.writeSessionInbound(record.SessionID, record.AlgorithmID,
+			record.ExpectedGen+1, next, record.EventID, record.CryptoAtUnix); err != nil {
+			return err
+		}
+		record.Crypto = CryptoCommitted
+	case current.Generation == record.ExpectedGen+1 && current.LastInboundEventID == record.EventID:
+		record.Crypto = CryptoCommitted
+	default:
+		record.Crypto = CryptoAbandoned
+	}
+	_, err = j.commit(path, record)
+	return err
 }

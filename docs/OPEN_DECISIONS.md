@@ -105,6 +105,9 @@ than silently forking two implementations.
 | Suite interface shape | a pure state transition rather than a mutable session, so the caller commits result and next state together and the commit order is this repository's decision rather than a library's | `e2ee.Suite` |
 | Persisted session state | opaque, complete, and including replay bookkeeping, so a restart cannot re-accept a message the session already opened | `e2ee.State` |
 | Attacker's view | `KeyMaterial` returns keys without replay bookkeeping, so a compromise check cannot be dodged by retaining a seen-list | `e2ee.Suite.KeyMaterial` |
+| Inbound transaction | an inbound event is staged with the transition it is waiting for, delivered only once the session records that its ciphertext was opened, and finished by the process itself on restart rather than by the sender retrying | `eventlog.CommitInbound`, `eventlog.Record.Deliverable` |
+| Unapplicable transitions | a staged transition the session moved past is abandoned, not delivered: the ciphertext was never consumed and a resend opens normally | `eventlog.recoverStaged` |
+| Seal authority | sealing is bound to the send attempt that holds the delivery and refused once a ciphertext exists, so an attempt whose lease expired cannot advance the ratchet for work it lost | `eventlog.CommitSealed` |
 | Commit order | inbound commits the event then the session; outbound commits the session then the ciphertext. Each order is decided by what a crash between the two writes would cost | `e2ee.CommitOrder`, `eventlog.CommitInbound`, `eventlog.CommitSealed` |
 | Stored ciphertext | a retry sends the committed ciphertext rather than sealing again, because sealing per network retry would consume a message key each time | `eventlog.Delivery.Ciphertext` |
 | Probe amplification floor | requests padded to 512 bytes; a response larger than its request is never sent | `probe.MinRequestBytes`, `probe.CheckNoAmplification` |

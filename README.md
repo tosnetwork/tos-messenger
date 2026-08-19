@@ -90,7 +90,13 @@ Deliberately absent, with the reason:
   remembered.
 - Session state and the record it belongs with are committed in one ordered
   step, and the order differs by direction: inbound never loses a message,
-  outbound never reuses a key.
+  outbound never reuses a key. An inbound event is not visible to a runtime
+  until the session has recorded that its ciphertext was opened, and a process
+  that died between the two finishes the job itself on restart rather than
+  waiting for the sender to try again.
+- Sealing is bound to the attempt that holds the delivery. Leases expire so
+  that work can be recovered from a worker that died; an attempt that lost its
+  delivery must not still be able to spend a message key for it.
 - A retry sends the message that was already sealed. Sealing per attempt would
   spend a message key on every lost packet.
 - An installation with no transport queues durably and says so. It does not
