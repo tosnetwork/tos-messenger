@@ -51,6 +51,9 @@ than silently forking two implementations.
 | Retry payload | a retry sends the committed ciphertext, never a freshly sealed one, so a lost packet costs no message key | `dispatch.attempt` |
 | Send success | a sender reports success only once a recipient device durably accepted the message; "handed to the network" would turn every lost packet into a delivered one | `dispatch.Sender` |
 | Sweep isolation | one failing delivery does not stop the others, so an unreachable peer cannot block every message to everyone else | `dispatch.Sweep` |
+| Local boundary | a unix socket in a private directory, narrowed to the owner, with the caller's credentials checked where the platform allows it | `localapi.Listen`, `localapi.verifyPeer` |
+| Owner authority | expressible on the local socket only; the matching event kinds are refused on every network route | `localapi.OpApprove`, `envelope.LocalOnly` |
+| Submission validation | the runtime submits an encoded event which the daemon decodes and validates, because the daemon owns what goes on the wire | `localapi.Server.queue` |
 | Decision record contents | event identifier, outcome, code, route, class, and a salted per-install sender reference; no Agent, endpoint, conversation, or device identifier | `admission.Record` |
 | Inbox policy interface | the mechanism is fixed and always consulted; what an unknown sender must present is not | `admission.ContactPolicy` |
 | Study acceptance policy | content-addressed, and required to cover NAT, consumer ISP, carrier-grade NAT, mobile, two address families, two UDP-policy environments, a low-cost class, and a mobile endpoint | `reachability.Policy.Validate` |

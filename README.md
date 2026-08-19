@@ -31,6 +31,7 @@ decision:
 | `pkg/fault` | Typed failures, retry dispositions, and what a peer may be told |
 | `pkg/admission` | The lower half of the context firewall: authority, scope, window, inbox policy, and the durable claim |
 | `pkg/dispatch` | The outbound half: seal once, send, and apply the retry disposition of whatever came back |
+| `pkg/localapi` | The owner-private socket an Agent runtime drives, and the only place an owner approval exists |
 | `pkg/e2ee` | The contract a candidate encryption suite must satisfy as a pure state transition, message bindings, and published prekey bundles |
 | `pkg/e2ee/conformance` | Refutes a candidate suite: ten properties a black-box run can disprove |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
@@ -96,7 +97,8 @@ Deliberately absent, with the reason:
   problem and is deliberately not decided here.
 - Approval is two things. A counterparty attestation is what the other party
   says it decided, which is information and may travel. An owner approval is
-  authority granted here, and it is not expressible on the wire at all.
+  authority granted here, and it is not expressible on the wire at all: it
+  exists on the local socket and nowhere else.
 - A commitment nobody reads is worse than none, because it implies an
   enforcement that does not exist. The policy digests a delegation carries are
   checked against the documents they name.
