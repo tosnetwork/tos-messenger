@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
@@ -33,17 +36,18 @@ func testConfig(t *testing.T) Config {
 	t.Helper()
 	root := t.TempDir()
 	return Config{
-		Schema:          ConfigSchema,
-		StateDir:        filepath.Join(root, "state"),
-		SocketPath:      filepath.Join(root, "run", "runtime.sock"),
-		OwnerSocketPath: filepath.Join(root, "run", "owner.sock"),
-		NetworkID:       "tos-local",
-		GenesisRootHash: strings.Repeat("a", 64),
-		GenesisFileHash: strings.Repeat("b", 64),
-		Registries:      []RegistryConfig{{CodeHash: registryCode, CodeBOC: registryBOC, Workchain: 0}},
-		AgentID:         "agent_" + strings.Repeat("2", 64),
-		EndpointID:      "mep_" + strings.Repeat("3", 64),
-		DeviceID:        "dev_" + strings.Repeat("4", 64),
+		Schema:            ConfigSchema,
+		StateDir:          filepath.Join(root, "state"),
+		SocketPath:        filepath.Join(root, "run", "runtime.sock"),
+		OwnerSocketPath:   filepath.Join(root, "run", "owner.sock"),
+		NetworkID:         "tos-local",
+		GenesisRootHash:   strings.Repeat("a", 64),
+		GenesisFileHash:   strings.Repeat("b", 64),
+		Registries:        []RegistryConfig{{CodeHash: registryCode, CodeBOC: registryBOC, Workchain: 0}},
+		AgentID:           "agent_" + strings.Repeat("2", 64),
+		EndpointID:        "mep_" + strings.Repeat("3", 64),
+		DeviceID:          "dev_" + strings.Repeat("4", 64),
+		OwnerPublicKeyHex: testOwnerPublicHex(),
 		Firewall: FirewallConfig{
 			UnattendedCeiling: "message", OwnInitiativeCeiling: "tool-call",
 		},
@@ -55,6 +59,18 @@ type recorder struct {
 	swept      []dispatch.Summary
 	maintained int
 	failures   []string
+}
+
+// testOwnerPublicHex is the key the owner signs decisions with. The private
+// half must live somewhere the runtime cannot read, which is a deployment
+// property rather than something the daemon can check.
+func testOwnerPublicHex() string {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x6f}, ed25519.SeedSize))
+	public, ok := key.Public().(ed25519.PublicKey)
+	if !ok {
+		panic("unexpected key type")
+	}
+	return hex.EncodeToString(public)
 }
 
 // testBody is a real typed body: the dispatcher refuses anything that is not
@@ -333,6 +349,7 @@ func TestUnknownConfigurationKeysAreRefused(t *testing.T) {
 		"agent_id": "agent_` + strings.Repeat("2", 64) + `",
 		"endpoint_id": "mep_` + strings.Repeat("3", 64) + `",
 		"device_id": "dev_` + strings.Repeat("4", 64) + `",
+		"owner_public_key": "` + testOwnerPublicHex() + `",
 		"firewall": {"unattended_ceiling": "message", "own_initiative_ceiling": "tool-call"},
 		"transport": "none"
 	}`

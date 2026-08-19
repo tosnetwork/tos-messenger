@@ -116,8 +116,10 @@ Deliberately absent, with the reason:
   authority granted here, and it is not expressible on the wire at all: it
   exists on the owner's own socket and nowhere else.
 - The party that asks for an approval cannot grant it. The runtime and the
-  owner speak over separate sockets, and the runtime's has no approval
-  operation on it.
+  owner speak over separate sockets, the runtime's has no approval operation on
+  it, and every decision carries the owner's signature over a single-use
+  challenge. Separate sockets alone would not be a boundary: peer credentials
+  say which Unix user is calling, and the runtime usually is that user.
 - A mandate is the owner's. It is placed on the owner's socket, resolved from
   the store when a spend is judged, and only named by the runtime: a runtime
   that could supply the mandate it is measured against would be setting its own

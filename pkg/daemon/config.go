@@ -7,6 +7,8 @@ package daemon
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -83,6 +85,16 @@ type Config struct {
 	EndpointID string `json:"endpoint_id"`
 	DeviceID   string `json:"device_id"`
 
+	// OwnerPublicKeyHex is the key the owner signs decisions with.
+	//
+	// It is required, and it is the boundary. The runtime and the owner
+	// interface commonly run as the same Unix user, so peer credentials cannot
+	// tell them apart: a runtime that asked for an approval could otherwise
+	// connect to the owner's socket and grant its own request. The private
+	// half must live somewhere the runtime cannot read -- a hardware token, a
+	// separate user's keyring, another machine -- or this check is theatre.
+	OwnerPublicKeyHex string `json:"owner_public_key"`
+
 	// Firewall is what the Agent may reach unattended. Like the transport it
 	// must be stated: an operator should have to write down what their Agent
 	// may do because a stranger asked, and a permissive value nobody chose is
@@ -110,6 +122,15 @@ func (c Config) Network() *nativev1.NetworkDomain {
 // Identity returns who this installation speaks for.
 func (c Config) Identity() dispatch.Identity {
 	return dispatch.Identity{AgentID: c.AgentID, EndpointID: c.EndpointID, DeviceID: c.DeviceID}
+}
+
+// OwnerKey returns the configured owner public key.
+func (c Config) OwnerKey() (ed25519.PublicKey, error) {
+	raw, err := hex.DecodeString(c.OwnerPublicKeyHex)
+	if err != nil || len(raw) != ed25519.PublicKeySize || canon.IsZero(raw) {
+		return nil, errors.New("owner_public_key must be a 32-byte ed25519 key in hex")
+	}
+	return ed25519.PublicKey(raw), nil
 }
 
 // FirewallConfig is the pair of ceilings the context firewall applies.
@@ -232,6 +253,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.FirewallPolicy().Validate(); err != nil {
+		return err
+	}
+	if _, err := c.OwnerKey(); err != nil {
 		return err
 	}
 	if _, known := transports[c.Transport]; !known {

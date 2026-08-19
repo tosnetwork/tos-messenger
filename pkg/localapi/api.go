@@ -94,6 +94,10 @@ const (
 	OpPlaceMandate Operation = "mandates.place"
 	// OpRevokeMandate is the owner withdrawing one.
 	OpRevokeMandate Operation = "mandates.revoke"
+	// OpChallenge issues a single-use nonce for one owner decision. It is the
+	// first half of proving the decision came from the owner rather than from
+	// whatever else happens to run under the same Unix user.
+	OpChallenge Operation = "owner.challenge"
 	// OpListMandates reads what this installation holds. Both sides may: the
 	// Agent has to know what it may spend before it negotiates, and reading is
 	// not deciding.
@@ -126,7 +130,7 @@ var permitted = map[Principal]map[Operation]struct{}{
 		OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
 		OpApprove: {}, OpDeny: {},
 		OpPendingActions: {}, OpGrantAction: {}, OpDenyAction: {},
-		OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {},
+		OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {}, OpChallenge: {},
 	},
 }
 
@@ -146,16 +150,17 @@ var operations = map[Operation]struct{}{
 	OpApprove: {}, OpDeny: {},
 	OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpPendingActions: {},
 	OpGrantAction: {}, OpDenyAction: {},
-	OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {},
+	OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {}, OpChallenge: {},
 }
 
 var (
-	eventPattern    = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
-	leasePattern    = regexp.MustCompile(`^lease_[0-9a-f]{64}$`)
-	sessionPattern  = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
-	endpointPattern = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
-	actionPattern   = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
-	mandatePattern  = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
+	eventPattern     = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
+	leasePattern     = regexp.MustCompile(`^lease_[0-9a-f]{64}$`)
+	sessionPattern   = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
+	endpointPattern  = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
+	actionPattern    = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
+	mandatePattern   = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
+	challengePattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Request is one call over the local socket.
@@ -187,6 +192,13 @@ type Request struct {
 
 	// Mandate is a standing authorisation the owner is placing.
 	Mandate *MandateTerms `json:"mandate,omitempty"`
+	// Challenge and OwnerSignature carry the owner's authorisation for a
+	// decision. They are required on every operation that decides something,
+	// because the socket the request arrived on proves only which Unix user
+	// sent it, and the Agent runtime usually is that user.
+	Challenge      string `json:"challenge,omitempty"`
+	OwnerSignature string `json:"owner_signature,omitempty"`
+
 	// MandateID names one already placed. A runtime proposing a spend names
 	// the mandate; it never supplies one.
 	MandateID string `json:"mandate_id,omitempty"`
@@ -289,6 +301,8 @@ type Response struct {
 	Mandates []HeldMandate `json:"mandates,omitempty"`
 	// MandateID is the identifier derived from a placed mandate.
 	MandateID string `json:"mandate_id,omitempty"`
+	// Challenge is a freshly issued single-use decision nonce.
+	Challenge string `json:"challenge,omitempty"`
 }
 
 // WaitingAction is one decision the owner has not made yet.
@@ -421,6 +435,19 @@ func ValidateRequest(request Request) error {
 	if _, known := operations[request.Op]; !known {
 		return errors.New("unknown local operation")
 	}
+	// Every deciding operation carries the owner's authorisation, and no other
+	// operation may carry one: a signature on a read would be a signature
+	// somebody could keep.
+	if Deciding(request.Op) {
+		if !challengePattern.MatchString(request.Challenge) {
+			return errors.New("an owner decision needs a challenge")
+		}
+		if request.OwnerSignature == "" {
+			return errors.New("an owner decision needs the owner's signature")
+		}
+	} else if request.Challenge != "" || request.OwnerSignature != "" {
+		return errors.New("only an owner decision carries a challenge and a signature")
+	}
 	switch request.Op {
 	case OpPending, OpAwaitingAdmission:
 		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
@@ -493,7 +520,7 @@ func ValidateRequest(request Request) error {
 			return errors.New("withdrawing a mandate needs the mandate")
 		}
 		return requireEmpty(request, "an owner decision", request.EventID, request.LeaseID, request.SessionID)
-	case OpListMandates:
+	case OpListMandates, OpChallenge:
 		return requireEmpty(request, "a listing", request.EventID, request.LeaseID, request.SessionID)
 	case OpActionStatus, OpClaimAction:
 		if !actionPattern.MatchString(request.ActionID) {

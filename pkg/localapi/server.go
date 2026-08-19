@@ -3,11 +3,13 @@ package localapi
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"net"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
@@ -26,14 +28,23 @@ type Config struct {
 	// Policy is what the Agent may reach unattended. It is required: a server
 	// with no policy would answer every firewall question with whatever the
 	// zero value happened to mean.
-	Policy  firewall.Policy
-	Now     func() time.Time
-	Timeout time.Duration
+	Policy firewall.Policy
+	// OwnerKey is the public key the owner signs decisions with. It is
+	// required, and it must not be reachable by the Agent runtime: it is the
+	// only thing that distinguishes the owner from anything else running under
+	// the same Unix user.
+	OwnerKey ed25519.PublicKey
+	// ChallengeLifetime bounds how long an unanswered decision challenge
+	// stands.
+	ChallengeLifetime time.Duration
+	Now               func() time.Time
+	Timeout           time.Duration
 }
 
 // Server answers calls on the owner-private socket.
 type Server struct {
-	config Config
+	config     Config
+	challenges *challenges
 }
 
 // NewServer builds a server.
@@ -47,6 +58,9 @@ func NewServer(config Config) (*Server, error) {
 	if err := config.Policy.Validate(); err != nil {
 		return nil, err
 	}
+	if len(config.OwnerKey) != ed25519.PublicKeySize || canon.IsZero(config.OwnerKey) {
+		return nil, errors.New("the local API requires the owner's public key")
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -56,7 +70,7 @@ func NewServer(config Config) (*Server, error) {
 	if config.Timeout < 0 {
 		return nil, errors.New("invalid local API timeout")
 	}
-	return &Server{config: config}, nil
+	return &Server{config: config, challenges: newChallenges(config.ChallengeLifetime)}, nil
 }
 
 // Serve accepts connections for one principal until the listener is closed.
@@ -125,6 +139,9 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return refuse(fault.CodeInternal, err)
 	}
 	now := s.config.Now()
+	if err := s.authoriseDecision(request, now); err != nil {
+		return refuse(fault.CodeNotAuthentic, err)
+	}
 	switch request.Op {
 	case OpPending:
 		return s.pending(request, now)
@@ -164,6 +181,8 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.revokeMandate(request, now)
 	case OpListMandates:
 		return s.listMandates()
+	case OpChallenge:
+		return s.challenge(now)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
 }

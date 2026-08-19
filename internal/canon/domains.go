@@ -15,6 +15,9 @@ const (
 	DomainEndpointDelegation = "tos.messaging.endpoint-delegation.v1\x00"
 	// DomainEndpointID namespaces the endpoint identifier derivation.
 	DomainEndpointID = "tos.messaging.endpoint-id.v1\x00"
+	// DomainOwnerDecision namespaces what an owner signs to authorise one
+	// decision on their own interface.
+	DomainOwnerDecision = "tos.messaging.owner-decision.v1\x00"
 	// DomainMandate namespaces a standing authorisation the owner placed.
 	DomainMandate = "tos.messaging.mandate.v1\x00"
 	// DomainAgentAction namespaces the content-addressed identifier of an
@@ -89,6 +92,7 @@ var Domains = []string{
 	DomainReachabilityObservation,
 	DomainPayload,
 	DomainInboxPolicy,
+	DomainOwnerDecision,
 	DomainMandate,
 	DomainAgentAction,
 }

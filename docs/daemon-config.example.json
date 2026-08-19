@@ -22,6 +22,8 @@
   "endpoint_id": "mep_3333333333333333333333333333333333333333333333333333333333333333",
   "device_id": "dev_4444444444444444444444444444444444444444444444444444444444444444",
 
+  "owner_public_key": "d8ba1b8b57cd5c9d5aa63c56e4ba0fa14d0fbbc9d3f5e0e9c11d0af9b4f4c2b7",
+
   "firewall": {
     "unattended_ceiling": "message",
     "own_initiative_ceiling": "tool-call"

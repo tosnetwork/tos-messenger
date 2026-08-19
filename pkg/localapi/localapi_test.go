@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/json"
 	"net"
@@ -123,7 +124,8 @@ func newHarness(t *testing.T) *harness {
 	}
 	server, err := NewServer(Config{
 		Journal: journal, Dispatcher: dispatcher, Policy: firewall.Default(),
-		Now: func() time.Time { return instance.clock },
+		OwnerKey: testOwnerPublic(),
+		Now:      func() time.Time { return instance.clock },
 	})
 	if err != nil {
 		t.Fatalf("server: %v", err)
@@ -153,9 +155,72 @@ func (h *harness) call(t *testing.T, request Request) Response {
 	return h.callAs(t, PrincipalRuntime, request)
 }
 
+// owner signs every decision, because the daemon no longer takes the socket's
+// word for who is calling.
 func (h *harness) owner(t *testing.T, request Request) Response {
 	t.Helper()
+	if !Deciding(request.Op) {
+		return h.callAs(t, PrincipalOwner, request)
+	}
+	issued := h.callAs(t, PrincipalOwner, Request{Op: OpChallenge})
+	if !issued.OK || issued.Challenge == "" {
+		t.Fatalf("challenge: %+v", issued)
+	}
+	signature, err := SignDecision(request, issued.Challenge, testOwnerKey())
+	if err != nil {
+		t.Fatalf("sign decision: %v", err)
+	}
+	request.Challenge = issued.Challenge
+	request.OwnerSignature = signature
 	return h.callAs(t, PrincipalOwner, request)
+}
+
+// accept records one inbound event waiting for the owner.
+func (h *harness) accept(t *testing.T, body string) envelope.Event {
+	t.Helper()
+	event := h.event(t, body)
+	stored, err := envelope.EncodeEventJSON(event)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, _, err := h.journal.Accept(eventlog.Entry{
+		EventID: event.EventID, SenderEndpointID: event.SenderEndpointID,
+		ConversationID: event.ConversationID, Payload: stored,
+		Admission: eventlog.AdmissionPending, ReceivedAtUnix: uint64(h.clock.Unix()),
+	}); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	return event
+}
+
+// runtimeAttempt sends a request from the runtime socket, signed the way an
+// owner tool would sign it. A runtime that had somehow obtained a signature
+// still must not be able to use it here.
+func (h *harness) runtimeAttempt(t *testing.T, request Request) Response {
+	t.Helper()
+	if Deciding(request.Op) {
+		request.Challenge = strings.Repeat("a", 64)
+		signature, err := SignDecision(request, request.Challenge, testOwnerKey())
+		if err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		request.OwnerSignature = signature
+	}
+	return h.callAs(t, PrincipalRuntime, request)
+}
+
+// The owner's key is the boundary, so the tests hold one rather than relying
+// on which socket a call arrived on.
+func testOwnerKey() ed25519.PrivateKey {
+	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x6f}, ed25519.SeedSize))
+}
+
+func testOwnerPublic() ed25519.PublicKey {
+	public, ok := testOwnerKey().Public().(ed25519.PublicKey)
+	if !ok {
+		panic("unexpected key type")
+	}
+	return public
 }
 
 func (h *harness) callAs(t *testing.T, principal Principal, request Request) Response {
@@ -523,19 +588,24 @@ func TestServerRequiresEveryDependency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatcher: %v", err)
 	}
-	if _, err := NewServer(Config{Dispatcher: dispatcher, Policy: firewall.Default()}); err == nil {
-		t.Fatal("a server without a journal was accepted")
+	complete := Config{
+		Journal: h.journal, Dispatcher: dispatcher, Policy: firewall.Default(),
+		OwnerKey: testOwnerPublic(),
 	}
-	if _, err := NewServer(Config{Journal: h.journal, Policy: firewall.Default()}); err == nil {
-		t.Fatal("a server without a dispatcher was accepted")
+	missing := map[string]func(*Config){
+		"no journal":     func(c *Config) { c.Journal = nil },
+		"no dispatcher":  func(c *Config) { c.Dispatcher = nil },
+		"no policy":      func(c *Config) { c.Policy = firewall.Policy{} },
+		"no owner key":   func(c *Config) { c.OwnerKey = nil },
+		"zero owner key": func(c *Config) { c.OwnerKey = make(ed25519.PublicKey, ed25519.PublicKeySize) },
+		"bad timeout":    func(c *Config) { c.Timeout = -1 },
 	}
-	if _, err := NewServer(Config{Journal: h.journal, Dispatcher: dispatcher}); err == nil {
-		t.Fatal("a server with no firewall policy was accepted")
-	}
-	if _, err := NewServer(Config{
-		Journal: h.journal, Dispatcher: dispatcher, Policy: firewall.Default(), Timeout: -1,
-	}); err == nil {
-		t.Fatal("a negative timeout was accepted")
+	for name, mutate := range missing {
+		config := complete
+		mutate(&config)
+		if _, err := NewServer(config); err == nil {
+			t.Fatalf("expected %q to be refused", name)
+		}
 	}
 }
 
@@ -551,6 +621,19 @@ func TestRuntimeCannotApproveAnything(t *testing.T) {
 			request := Request{Op: operation, EventID: "evt_" + strings.Repeat("0", 64)}
 			if operation == OpAwaitingAdmission {
 				request = Request{Op: operation}
+			}
+			if operation == OpRefuse {
+				request.Code = fault.CodeRejected
+			}
+			if Deciding(operation) {
+				// Signed properly, and still refused: the runtime is not the
+				// owner however well-formed its request is.
+				request.Challenge = strings.Repeat("a", 64)
+				signature, err := SignDecision(request, request.Challenge, testOwnerKey())
+				if err != nil {
+					t.Fatalf("sign: %v", err)
+				}
+				request.OwnerSignature = signature
 			}
 			response := h.callAs(t, PrincipalRuntime, request)
 			if response.OK {
@@ -847,7 +930,7 @@ func TestNeitherSideCanPlayTheOtherOnActions(t *testing.T) {
 		if operation == OpPendingActions {
 			request.ActionID = ""
 		}
-		if response := h.call(t, request); response.OK {
+		if response := h.runtimeAttempt(t, request); response.OK {
 			t.Fatalf("the runtime performed %q", operation)
 		}
 	}
@@ -951,7 +1034,7 @@ func TestOnlyTheOwnerWritesMandates(t *testing.T) {
 		{Op: OpRevokeMandate, MandateID: "mdt_" + strings.Repeat("a", 64)},
 	}
 	for _, request := range writes {
-		if response := h.call(t, request); response.OK {
+		if response := h.runtimeAttempt(t, request); response.OK {
 			t.Fatalf("the runtime performed %q", request.Op)
 		}
 	}
@@ -977,5 +1060,105 @@ func TestSpendShapeIsEnforced(t *testing.T) {
 	message.Terms = testPurchase(200)
 	if _, err := EncodeRequest(Request{Op: OpRequestAction, Action: message}); err == nil {
 		t.Fatal("a message carried purchase terms")
+	}
+}
+
+// Peer credentials establish which Unix user is calling, and the Agent runtime
+// commonly is that user. What separates the owner is a key the runtime does
+// not have, so an unsigned or wrongly signed decision is refused however it
+// arrived.
+func TestOwnerDecisionsNeedTheOwnersKey(t *testing.T) {
+	h := newHarness(t)
+	event := h.accept(t, "hello")
+	held := Request{Op: OpAdmit, EventID: event.EventID}
+
+	issued := h.callAs(t, PrincipalOwner, Request{Op: OpChallenge})
+	if !issued.OK || issued.Challenge == "" {
+		t.Fatalf("challenge: %+v", issued)
+	}
+
+	// Someone else's key does not do.
+	stranger := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x99}, ed25519.SeedSize))
+	forged, err := SignDecision(held, issued.Challenge, stranger)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	attempt := held
+	attempt.Challenge = issued.Challenge
+	attempt.OwnerSignature = forged
+	if response := h.callAs(t, PrincipalOwner, attempt); response.OK {
+		t.Fatal("a decision signed by a stranger was accepted")
+	}
+
+	// A signature for one decision is not a signature for another.
+	other := Request{Op: OpRefuse, EventID: event.EventID, Code: fault.CodeRejected}
+	genuine, err := SignDecision(held, issued.Challenge, testOwnerKey())
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	other.Challenge = issued.Challenge
+	other.OwnerSignature = genuine
+	if response := h.callAs(t, PrincipalOwner, other); response.OK {
+		t.Fatal("a signature for one decision authorised another")
+	}
+
+	// The genuine one works, once.
+	attempt.OwnerSignature = genuine
+	if response := h.callAs(t, PrincipalOwner, attempt); !response.OK {
+		t.Fatalf("the owner's own decision was refused: %+v", response)
+	}
+	if response := h.callAs(t, PrincipalOwner, attempt); response.OK {
+		t.Fatal("a decision was replayed")
+	}
+}
+
+// A challenge is single use and does not outlive its window.
+func TestChallengesExpireAndDoNotRepeat(t *testing.T) {
+	h := newHarness(t)
+	first := h.callAs(t, PrincipalOwner, Request{Op: OpChallenge})
+	second := h.callAs(t, PrincipalOwner, Request{Op: OpChallenge})
+	if first.Challenge == second.Challenge {
+		t.Fatal("two challenges were the same")
+	}
+
+	event := h.accept(t, "hello")
+	request := Request{Op: OpAdmit, EventID: event.EventID}
+	signature, err := SignDecision(request, first.Challenge, testOwnerKey())
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	request.Challenge = first.Challenge
+	request.OwnerSignature = signature
+
+	h.clock = h.clock.Add(DefaultChallengeLifetime + time.Second)
+	if response := h.callAs(t, PrincipalOwner, request); response.OK {
+		t.Fatal("an expired challenge was accepted")
+	}
+}
+
+// A wrong signature must not burn a challenge the owner is about to use.
+func TestAFailedAttemptDoesNotConsumeTheChallenge(t *testing.T) {
+	h := newHarness(t)
+	event := h.accept(t, "hello")
+	issued := h.callAs(t, PrincipalOwner, Request{Op: OpChallenge})
+
+	request := Request{Op: OpAdmit, EventID: event.EventID, Challenge: issued.Challenge}
+	stranger := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x99}, ed25519.SeedSize))
+	forged, err := SignDecision(request, issued.Challenge, stranger)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	request.OwnerSignature = forged
+	if response := h.callAs(t, PrincipalOwner, request); response.OK {
+		t.Fatal("a forged decision was accepted")
+	}
+
+	genuine, err := SignDecision(Request{Op: OpAdmit, EventID: event.EventID}, issued.Challenge, testOwnerKey())
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	request.OwnerSignature = genuine
+	if response := h.callAs(t, PrincipalOwner, request); !response.OK {
+		t.Fatalf("a failed attempt consumed the challenge: %+v", response)
 	}
 }

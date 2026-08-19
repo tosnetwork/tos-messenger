@@ -36,6 +36,15 @@ nobody made:
   deployed registry;
 - **who this installation speaks for** — its Agent, endpoint and device — since
   an outbound event must say it came from here; and
+- the **owner's public key**, because the two sockets are not by themselves a
+  boundary. Peer credentials establish which Unix user is calling, and the
+  Agent runtime commonly runs as that same user, so a runtime that asked for an
+  approval could otherwise connect to the owner's socket and grant its own
+  request. Every decision on the owner's interface must carry a signature over
+  a single-use challenge the daemon issued. **The private half has to live
+  somewhere the runtime cannot read** -- a hardware token, another user's
+  keyring, another machine. The daemon cannot check that, and if it is not true
+  the signature proves nothing;
 - the **firewall ceilings**, which say what the Agent may do unattended: one
   for what it reaches on its own initiative, and a tighter one for anything a
   received message drove. Neither may be raised to a key or to this
