@@ -64,7 +64,16 @@ func (j *Journal) Prune(now time.Time, retention time.Duration) (PruneReport, er
 		if err != nil {
 			return false, err
 		}
-		return record.AcceptedAtUnix+horizon <= seconds, nil
+		// A queued or claimed event is work nobody has finished. Removing it
+		// would delete a message that was accepted and never delivered, which
+		// is the failure this journal exists to prevent.
+		if !record.Terminal() {
+			return false, nil
+		}
+		// The replay window runs from receipt, not from completion: the
+		// ciphertext a Relay may still be holding was created when the event
+		// was sent.
+		return record.ReceivedAtUnix+horizon <= seconds, nil
 	})
 	if err != nil {
 		return PruneReport{}, err

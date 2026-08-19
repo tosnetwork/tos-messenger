@@ -405,3 +405,28 @@ var errChain = errorString("finalized read failed")
 type errorString string
 
 func (e errorString) Error() string { return string(e) }
+
+// The resolver was asked about one Agent. If it answers about another, the
+// delegation must not be authorized against that answer, however well formed
+// it looks.
+func TestVerifyRefusesStateForAnotherAgent(t *testing.T) {
+	delegation := testDelegation(t)
+	raw, err := EncodeJSON(delegation)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	digest, err := Digest(delegation)
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	confused := stubResolver{states: map[string]*nativev1.AgentStateV1{
+		delegation.AgentID: {
+			AgentId:           "agent_" + strings.Repeat("e", 64),
+			Policy:            &nativev1.ControllerPolicyV1{Threshold: 1},
+			DelegationDigests: []string{digest},
+		},
+	}}
+	if _, err := Verify(confused, testNetwork(), raw, time.Unix(int64(delegation.NotBeforeUnix)+1, 0)); err == nil {
+		t.Fatal("a delegation was authorized against another Agent's state")
+	}
+}

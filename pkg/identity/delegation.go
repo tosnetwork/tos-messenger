@@ -271,6 +271,13 @@ func Verify(resolver AgentResolver, network *nativev1.NetworkDomain, raw []byte,
 	if !found || state == nil || state.Tombstoned || state.Policy == nil {
 		return Delegation{}, errors.New("delegation Agent is not finalized and live")
 	}
+	// The resolver was asked about one Agent and must have answered about that
+	// Agent. Checking it here costs nothing and keeps a mistaken adapter, a
+	// test double, or a later refactor from authorizing a delegation against
+	// somebody else's finalized state.
+	if state.AgentId != delegation.AgentID {
+		return Delegation{}, errors.New("resolver returned state for another Agent")
+	}
 	digest, err := Digest(delegation)
 	if err != nil {
 		return Delegation{}, err

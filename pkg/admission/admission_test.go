@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
@@ -408,7 +409,8 @@ func TestConflictingClaimIsHidden(t *testing.T) {
 		EventID:          event.EventID,
 		SenderEndpointID: "mep_" + strings.Repeat("9", 64),
 		ConversationID:   convoID,
-		AcceptedAtUnix:   baseUnix,
+		Payload:          []byte("seeded by another sender"),
+		ReceivedAtUnix:   baseUnix,
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -561,3 +563,35 @@ func TestPolicySeesOnlySenderAndKind(t *testing.T) {
 type policyFunc func(string, string) Admission
 
 func (p policyFunc) Admits(sender, kind string) Admission { return p(sender, kind) }
+
+// Acceptance means durably queued, not delivered. The event has to be
+// recoverable from the journal alone, because the process that admitted it may
+// not survive to hand it over.
+func TestAcceptedEventIsRecoverableWithoutTheDecision(t *testing.T) {
+	gate, journal, delegation, encoded := testGate(t, OpenInbox{})
+	event := testEvent(t, delegation, nil)
+
+	if _, err := gate.Admit(inbound(event, encoded)); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	pending, err := journal.ListPending(timeAt(baseUnix+61), 0)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 1 || pending[0].EventID != event.EventID {
+		t.Fatalf("the admitted event was not queued: %+v", pending)
+	}
+	payload, err := pending[0].Payload()
+	if err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	recovered, err := envelope.DecodeEventJSON(payload)
+	if err != nil {
+		t.Fatalf("decode recovered event: %v", err)
+	}
+	if recovered.EventID != event.EventID || string(recovered.Content) != string(event.Content) {
+		t.Fatal("the recovered event is not the admitted one")
+	}
+}
+
+func timeAt(seconds uint64) time.Time { return time.Unix(int64(seconds), 0) }

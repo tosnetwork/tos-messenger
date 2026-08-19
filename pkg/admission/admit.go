@@ -48,8 +48,13 @@ var routes = map[Route]struct{}{RouteDirect: {}, RouteTunnel: {}, RouteRelay: {}
 type Outcome string
 
 const (
-	// Accepted means the event is fresh and may be handed to the runtime as
-	// untrusted content.
+	// Accepted means the event is fresh and durably queued. It is what a
+	// DeliveryAck reports.
+	//
+	// It does not mean the event has been handed to a runtime. Delivery is
+	// driven from the journal, so that an event accepted just before a crash
+	// is still delivered afterwards; a caller that treated this return value
+	// as the delivery itself would lose exactly those events.
 	Accepted Outcome = "accepted"
 	// Duplicate means the event was already delivered. It is a successful
 	// at-least-once delivery, not a failure: the peer is acknowledged and the
@@ -216,11 +221,20 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 		return decision, nil
 	}
 
+	// The event itself is stored, not only its identity. A record that said
+	// "seen" without saying what was seen would leave an event deduplicated
+	// forever and delivered never, because the only copy was in the memory of
+	// a process that may not survive the next second.
+	payload, err := envelope.EncodeEventJSON(inbound.Event)
+	if err != nil {
+		return Decision{}, err
+	}
 	fresh, _, err := g.config.Journal.Accept(eventlog.Entry{
 		EventID:          inbound.Event.EventID,
 		SenderEndpointID: inbound.Event.SenderEndpointID,
 		ConversationID:   inbound.Event.ConversationID,
-		AcceptedAtUnix:   inbound.ReceivedAtUnix,
+		Payload:          payload,
+		ReceivedAtUnix:   inbound.ReceivedAtUnix,
 	})
 	if err != nil {
 		if errors.Is(err, eventlog.ErrConflict) {

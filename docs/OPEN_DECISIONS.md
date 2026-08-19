@@ -23,13 +23,16 @@ than silently forking two implementations.
 | Event ID derivation | content addressed: `evt_` + SHA-256 over the canonical event preimage excluding the identifier itself | `envelope.DeriveEventID` |
 | Event kind to delegated class mapping | explicit table; an unrecognised kind has no class | `envelope.eventClasses` |
 | Event body bounds | content at most 128 KiB, 16 causal parents, 16 attachment references | `envelope` constants |
-| Durable store format | one JSON record per event in a private directory owned by one process, forward-only state machine | `pkg/eventlog` |
+| Durable store format | one JSON record per event in a private directory owned by one process, carrying the event itself so an accepted event survives a crash | `pkg/eventlog` |
+| Inbound dimensions | application state (queued, claimed, applied, rejected) and reading are independent, so a read receipt can never block delivery to a runtime | `eventlog.Record` |
+| Application lease | one runtime attempt owns an event at a time; an expired lease returns the work, and a superseded lease cannot complete it | `eventlog.ClaimForApplication` |
 | Failure taxonomy | four dispositions: permanent, transient, refresh-state, and await-approval, the last never retried on a timer | `pkg/fault` |
 | Peer visibility | a per-code decision; hidden codes all become `rejected`, and authentication, replay, and approval outcomes are deliberately indistinguishable | `fault.registry`, `fault.PeerCode` |
 | Retry schedule | transient doubles from 1s to a 5m cap over 8 attempts; refresh doubles from 5s to a 15m cap over 4; jitter is the caller's | `pkg/fault/retry.go` |
 | Domain separator registry | one list, with a test that scans the repository for unregistered separators | `canon.Domains` |
 | Claim retention floor | derived from the envelope retention bound rather than restated, because a claim pruned before a Relay can stop holding the ciphertext reopens the replay window | `eventlog.MinClaimRetention` |
 | Damaged record policy | reported and kept, never deleted, so damaging a file cannot become a way to replay its event | `eventlog.Prune` |
+| Unprocessed events | never pruned at any age, because deleting one is exactly the accepted-but-never-delivered failure | `eventlog.Prune` |
 | Outbound state machine | pending, held, delivered, abandoned; a re-enqueue never resets an attempt count and an approval hold leaves the timer entirely | `pkg/eventlog/delivery.go` |
 | Admission check order | policy runs before the durable claim, so a sender told to satisfy an inbox policy can resend the identical event once they have | `admission.Admit` |
 | Decision record contents | event identifier, outcome, code, route, class, and a salted per-install sender reference; no Agent, endpoint, conversation, or device identifier | `admission.Record` |

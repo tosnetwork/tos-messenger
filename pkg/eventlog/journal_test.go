@@ -1,6 +1,8 @@
 package eventlog
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -37,73 +39,211 @@ func entry(eventID, senderEndpoint string) Entry {
 		EventID:          eventID,
 		SenderEndpointID: senderEndpoint,
 		ConversationID:   convo,
-		AcceptedAtUnix:   acceptAt,
+		Payload:          []byte(`{"event":"` + eventID + `"}`),
+		ReceivedAtUnix:   acceptAt,
 	}
 }
 
-func TestAcceptClaimsOnce(t *testing.T) {
+func lease(seed byte) string {
+	id, err := NewLeaseID(bytes.Repeat([]byte{seed}, 32))
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
+func TestAcceptRecordsOnceAndKeepsTheEvent(t *testing.T) {
 	journal, _ := openJournal(t)
 
 	fresh, record, err := journal.Accept(entry(eventA, endpoint))
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	if !fresh || record.State != StateAccepted {
-		t.Fatalf("first claim should be fresh and accepted, got fresh=%v state=%q", fresh, record.State)
+	if !fresh || record.Application != StateQueued {
+		t.Fatalf("first receipt should be fresh and queued: fresh=%v state=%q", fresh, record.Application)
 	}
-
-	// Every later presentation of the same event is a duplicate, whatever
-	// route it arrived by.
+	stored, err := record.Payload()
+	if err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if string(stored) != `{"event":"`+eventA+`"}` {
+		t.Fatalf("the event was not stored: %s", stored)
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		fresh, duplicate, err := journal.Accept(entry(eventA, endpoint))
 		if err != nil {
 			t.Fatalf("duplicate accept: %v", err)
 		}
 		if fresh {
-			t.Fatal("a duplicate was reported as a fresh application event")
+			t.Fatal("a duplicate was reported as a fresh event")
 		}
-		if duplicate.EventID != record.EventID || duplicate.State != StateAccepted {
+		if duplicate.EventID != record.EventID {
 			t.Fatal("duplicate returned a different record")
 		}
 	}
 }
 
-func TestClaimSurvivesRestart(t *testing.T) {
+// The failure this journal exists to prevent: an event accepted and fsynced,
+// then a crash before any runtime saw it. Deduplication must not swallow it.
+func TestEventAcceptedBeforeACrashIsStillDelivered(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state")
 	journal, err := Open(root)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if fresh, _, err := journal.Accept(entry(eventA, endpoint)); err != nil || !fresh {
-		t.Fatalf("first claim: fresh=%v err=%v", fresh, err)
+		t.Fatalf("accept: fresh=%v err=%v", fresh, err)
 	}
-	if _, err := journal.MarkApplied(eventA, acceptAt+5); err != nil {
-		t.Fatalf("mark applied: %v", err)
-	}
+	// The process dies here, before the event reaches a runtime.
 	if err := journal.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
-	// A process restart must not erase replay protection.
 	reopened, err := Open(root)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer reopened.Close()
 
-	fresh, record, err := reopened.Accept(entry(eventA, endpoint))
+	now := time.Unix(int64(acceptAt)+10, 0)
+	pending, err := reopened.ListPending(now, 0)
 	if err != nil {
-		t.Fatalf("accept after restart: %v", err)
+		t.Fatalf("pending: %v", err)
 	}
-	if fresh {
-		t.Fatal("replay protection did not survive a restart")
+	if len(pending) != 1 || pending[0].EventID != eventA {
+		t.Fatalf("the accepted event was not recovered: %+v", pending)
 	}
-	if record.State != StateApplied || record.AppliedAtUnix != acceptAt+5 {
-		t.Fatalf("state did not survive a restart: %+v", record)
+	payload, err := pending[0].Payload()
+	if err != nil || len(payload) == 0 {
+		t.Fatalf("the recovered event carries no content: %v", err)
+	}
+
+	// And it is processed exactly once.
+	if _, err := reopened.ClaimForApplication(eventA, lease(0x11), now, time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := reopened.CompleteApplication(eventA, lease(0x11), now); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	pending, err = reopened.ListPending(now, 0)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("an applied event was offered again: %+v", pending)
+	}
+	// A later redelivery from the network is a duplicate and stays one.
+	if fresh, _, err := reopened.Accept(entry(eventA, endpoint)); err != nil || fresh {
+		t.Fatalf("a redelivery was treated as new: fresh=%v err=%v", fresh, err)
 	}
 }
 
-func TestConflictingSenderIsRefused(t *testing.T) {
+// A worker that dies holding a lease must not strand the event.
+func TestExpiredLeaseReturnsWorkToTheQueue(t *testing.T) {
+	journal, _ := openJournal(t)
+	if _, _, err := journal.Accept(entry(eventA, endpoint)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	now := time.Unix(int64(acceptAt), 0)
+	if _, err := journal.ClaimForApplication(eventA, lease(0x11), now, time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	// While the lease is live nobody else may take the work, or a tool call or
+	// an approval request would happen twice.
+	if _, err := journal.ClaimForApplication(eventA, lease(0x22), now, time.Minute); !errors.Is(err, ErrLeaseMismatch) {
+		t.Fatalf("a live lease was taken over: %v", err)
+	}
+	if pending, err := journal.ListPending(now, 0); err != nil || len(pending) != 0 {
+		t.Fatalf("a leased event was offered again: %+v %v", pending, err)
+	}
+
+	expired := now.Add(2 * time.Minute)
+	pending, err := journal.ListPending(expired, 0)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("an expired lease did not return its work: %+v", pending)
+	}
+	if _, err := journal.ClaimForApplication(eventA, lease(0x22), expired, time.Minute); err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	// The original worker coming back must not be able to complete it.
+	if _, err := journal.CompleteApplication(eventA, lease(0x11), expired); !errors.Is(err, ErrLeaseMismatch) {
+		t.Fatalf("a superseded lease completed the work: %v", err)
+	}
+	if _, err := journal.CompleteApplication(eventA, lease(0x22), expired); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+}
+
+// Reading is a separate dimension. A person marking a message read must not
+// stop a runtime from ever receiving it.
+func TestReadingDoesNotBlockApplication(t *testing.T) {
+	journal, _ := openJournal(t)
+	if _, _, err := journal.Accept(entry(eventA, endpoint)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	now := time.Unix(int64(acceptAt), 0)
+	read, err := journal.MarkRead(eventA, now)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if read.ReadAtUnix == 0 || read.Application != StateQueued {
+		t.Fatalf("unexpected record after reading: %+v", read)
+	}
+	pending, err := journal.ListPending(now, 0)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("a read event left the queue: %+v %v", pending, err)
+	}
+	if _, err := journal.ClaimForApplication(eventA, lease(0x11), now, time.Minute); err != nil {
+		t.Fatalf("claim after reading: %v", err)
+	}
+	applied, err := journal.CompleteApplication(eventA, lease(0x11), now)
+	if err != nil {
+		t.Fatalf("complete after reading: %v", err)
+	}
+	if applied.Application != StateApplied || applied.ReadAtUnix == 0 {
+		t.Fatalf("the two dimensions interfered: %+v", applied)
+	}
+	// Reading twice is not an error and changes nothing.
+	again, err := journal.MarkRead(eventA, now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if again.ReadAtUnix != applied.ReadAtUnix {
+		t.Fatal("a second read moved the timestamp")
+	}
+}
+
+func TestRejectedEventIsNotOfferedAgain(t *testing.T) {
+	journal, _ := openJournal(t)
+	if _, _, err := journal.Accept(entry(eventA, endpoint)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	now := time.Unix(int64(acceptAt), 0)
+	if _, err := journal.ClaimForApplication(eventA, lease(0x11), now, time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	rejected, err := journal.RejectApplication(eventA, lease(0x11), fault.CodeContentTooLarge, now)
+	if err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if rejected.Application != StateRejected || rejected.RejectionCode != fault.CodeContentTooLarge {
+		t.Fatalf("unexpected rejection: %+v", rejected)
+	}
+	if pending, err := journal.ListPending(now.Add(time.Hour), 0); err != nil || len(pending) != 0 {
+		t.Fatalf("a rejected event was offered again: %+v %v", pending, err)
+	}
+	if _, err := journal.RejectApplication(eventA, lease(0x11), fault.CodeInternal, now); !errors.Is(err, ErrNotPending) {
+		t.Fatalf("a settled event accepted another outcome: %v", err)
+	}
+	if _, err := journal.RejectApplication(eventA, lease(0x11), "invented", now); err == nil {
+		t.Fatal("an unclassified rejection code was accepted")
+	}
+}
+
+func TestConflictingRecordIsRefused(t *testing.T) {
 	journal, _ := openJournal(t)
 	if _, _, err := journal.Accept(entry(eventA, endpoint)); err != nil {
 		t.Fatalf("accept: %v", err)
@@ -116,86 +256,58 @@ func TestConflictingSenderIsRefused(t *testing.T) {
 	if _, _, err := journal.Accept(conflicting); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected a conflicting conversation to be refused, got %v", err)
 	}
+	// The same identity with different content is a forgery, not a retry.
+	substituted := entry(eventA, endpoint)
+	substituted.Payload = []byte("different content under the same identifier")
+	if _, _, err := journal.Accept(substituted); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected substituted content to be refused, got %v", err)
+	}
 }
 
-func TestStateMachineOnlyMovesForward(t *testing.T) {
+func TestApplicationTransitionsRejectUnusableInput(t *testing.T) {
 	journal, _ := openJournal(t)
+	now := time.Unix(int64(acceptAt), 0)
+	if _, err := journal.ClaimForApplication(eventB, lease(0x11), now, time.Minute); !errors.Is(err, ErrUnknown) {
+		t.Fatalf("expected an unknown event, got %v", err)
+	}
+	if _, err := journal.MarkRead(eventB, now); !errors.Is(err, ErrUnknown) {
+		t.Fatalf("expected an unknown event, got %v", err)
+	}
 	if _, _, err := journal.Accept(entry(eventA, endpoint)); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	if _, err := journal.MarkApplied(eventA, acceptAt+1); err != nil {
-		t.Fatalf("apply: %v", err)
+	if _, err := journal.ClaimForApplication(eventA, "lease_bad", now, time.Minute); err == nil {
+		t.Fatal("an invalid lease identifier was accepted")
 	}
-	if _, err := journal.MarkApplied(eventA, acceptAt+2); err == nil {
-		t.Fatal("expected a repeated application transition to be refused")
+	if _, err := journal.ClaimForApplication(eventA, lease(0x11), now, 0); err == nil {
+		t.Fatal("a zero lease was accepted")
 	}
-	if _, err := journal.MarkRead(eventA, acceptAt+3); err != nil {
-		t.Fatalf("read: %v", err)
+	if _, err := journal.ClaimForApplication(eventA, lease(0x11), now, 2*time.Hour); err == nil {
+		t.Fatal("an unbounded lease was accepted")
 	}
-	if _, err := journal.MarkApplied(eventA, acceptAt+4); err == nil {
-		t.Fatal("expected a regression from read to applied to be refused")
-	}
-	if _, err := journal.MarkRead(eventA, acceptAt+5); err == nil {
-		t.Fatal("expected a repeated read transition to be refused")
+	if _, err := journal.CompleteApplication(eventA, lease(0x11), now); !errors.Is(err, ErrNotPending) {
+		t.Fatalf("an unclaimed event was completed: %v", err)
 	}
 }
 
-func TestReadMayFollowAcceptance(t *testing.T) {
+func TestInvalidEntriesAreRejected(t *testing.T) {
 	journal, _ := openJournal(t)
-	if _, _, err := journal.Accept(entry(eventA, endpoint)); err != nil {
-		t.Fatalf("accept: %v", err)
+	cases := map[string]func(*Entry){
+		"bad event":     func(e *Entry) { e.EventID = "evt_bad" },
+		"bad endpoint":  func(e *Entry) { e.SenderEndpointID = "mep_bad" },
+		"bad conv":      func(e *Entry) { e.ConversationID = "conv_bad" },
+		"no payload":    func(e *Entry) { e.Payload = nil },
+		"huge payload":  func(e *Entry) { e.Payload = bytes.Repeat([]byte{1}, MaxPayloadBytes+1) },
+		"zero received": func(e *Entry) { e.ReceivedAtUnix = 0 },
 	}
-	if _, err := journal.MarkRead(eventA, acceptAt+1); err != nil {
-		t.Fatalf("expected a read indication without an application ack: %v", err)
-	}
-}
-
-func TestTransitionsRejectImpossibleTimes(t *testing.T) {
-	journal, _ := openJournal(t)
-	if _, _, err := journal.Accept(entry(eventA, endpoint)); err != nil {
-		t.Fatalf("accept: %v", err)
-	}
-	if _, err := journal.MarkApplied(eventA, acceptAt-1); err == nil {
-		t.Fatal("expected an application before acceptance to be refused")
-	}
-	if _, err := journal.MarkApplied(eventA, 0); err == nil {
-		t.Fatal("expected a zero transition time to be refused")
-	}
-}
-
-func TestUnknownEventTransitions(t *testing.T) {
-	journal, _ := openJournal(t)
-	if _, err := journal.MarkApplied(eventB, acceptAt+1); !errors.Is(err, ErrUnknown) {
-		t.Fatalf("expected an unclaimed event to be unknown, got %v", err)
-	}
-	record, found, err := journal.Lookup(eventB)
-	if err != nil {
-		t.Fatalf("lookup: %v", err)
-	}
-	if found || record.EventID != "" {
-		t.Fatal("expected no record for an unclaimed event")
-	}
-}
-
-func TestInvalidInputIsRejected(t *testing.T) {
-	journal, _ := openJournal(t)
-	cases := map[string]Entry{
-		"bad event":        entry("evt_bad", endpoint),
-		"bad endpoint":     entry(eventA, "mep_bad"),
-		"empty event":      entry("", endpoint),
-		"zero accept time": {EventID: eventA, SenderEndpointID: endpoint, ConversationID: convo},
-	}
-	for name, candidate := range cases {
+	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
+			candidate := entry(eventA, endpoint)
+			mutate(&candidate)
 			if _, _, err := journal.Accept(candidate); err == nil {
 				t.Fatalf("expected %q to be rejected", name)
 			}
 		})
-	}
-	badConversation := entry(eventA, endpoint)
-	badConversation.ConversationID = "conv_bad"
-	if _, _, err := journal.Accept(badConversation); err == nil {
-		t.Fatal("expected an invalid conversation identifier to be rejected")
 	}
 	if _, _, err := journal.Lookup("evt_bad"); err == nil {
 		t.Fatal("expected an invalid lookup identifier to be rejected")
@@ -210,7 +322,6 @@ func TestSecondWriterIsRefused(t *testing.T) {
 	if err := journal.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	// Ownership is released on close, so a replacement process can take over.
 	replacement, err := Open(root)
 	if err != nil {
 		t.Fatalf("expected ownership to be released on close: %v", err)
@@ -223,11 +334,15 @@ func TestClosedJournalRefusesWork(t *testing.T) {
 	if err := journal.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
+	now := time.Unix(int64(acceptAt), 0)
 	if _, _, err := journal.Accept(entry(eventA, endpoint)); err == nil {
-		t.Fatal("expected a closed journal to refuse claims")
+		t.Fatal("expected a closed journal to refuse records")
 	}
-	if _, err := journal.MarkApplied(eventA, acceptAt+1); err == nil {
-		t.Fatal("expected a closed journal to refuse transitions")
+	if _, err := journal.ListPending(now, 0); err == nil {
+		t.Fatal("expected a closed journal to refuse a sweep")
+	}
+	if _, err := journal.ClaimForApplication(eventA, lease(0x11), now, time.Minute); err == nil {
+		t.Fatal("expected a closed journal to refuse a claim")
 	}
 	if _, _, err := journal.Lookup(eventA); err == nil {
 		t.Fatal("expected a closed journal to refuse lookups")
@@ -247,10 +362,35 @@ func TestCorruptRecordIsRefused(t *testing.T) {
 		t.Fatalf("corrupt record: %v", err)
 	}
 	if _, _, err := journal.Accept(entry(eventA, endpoint)); err == nil {
-		t.Fatal("expected a corrupt record to fail closed instead of granting a fresh claim")
+		t.Fatal("expected a corrupt record to fail closed instead of granting a fresh record")
 	}
 	if _, _, err := journal.Lookup(eventA); err == nil {
 		t.Fatal("expected a corrupt record to fail closed on lookup")
+	}
+}
+
+// Content that no longer matches its stored digest is not usable, whatever the
+// rest of the record says.
+func TestTamperedPayloadIsRefused(t *testing.T) {
+	journal, root := openJournal(t)
+	if _, _, err := journal.Accept(entry(eventA, endpoint)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	path := filepath.Join(root, "inbound", eventA[len("evt_"):]+".json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	tampered := strings.Replace(string(raw), base64.StdEncoding.EncodeToString([]byte(`{"event":"`+eventA+`"}`)),
+		base64.StdEncoding.EncodeToString([]byte(`{"event":"substituted"}`)), 1)
+	if tampered == string(raw) {
+		t.Fatal("the test did not modify the payload")
+	}
+	if err := os.WriteFile(path, []byte(tampered), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, _, err := journal.Lookup(eventA); err == nil {
+		t.Fatal("a payload that no longer matches its digest was accepted")
 	}
 }
 
@@ -524,6 +664,12 @@ func TestPruneRemovesOnlyClosedRecords(t *testing.T) {
 	if _, _, err := journal.Accept(entry(eventA, endpoint)); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
+	if _, err := journal.ClaimForApplication(eventA, lease(0x11), now, time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := journal.CompleteApplication(eventA, lease(0x11), now); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
 	if _, _, err := journal.Enqueue(outbound(eventA)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -534,7 +680,6 @@ func TestPruneRemovesOnlyClosedRecords(t *testing.T) {
 		t.Fatalf("delivered: %v", err)
 	}
 
-	// Nothing has aged out yet.
 	report, err := journal.Prune(now, MinClaimRetention)
 	if err != nil {
 		t.Fatalf("prune: %v", err)
@@ -549,17 +694,49 @@ func TestPruneRemovesOnlyClosedRecords(t *testing.T) {
 		t.Fatalf("prune: %v", err)
 	}
 	if report.ClaimsRemoved != 1 {
-		t.Fatalf("the closed claim was not pruned: %+v", report)
+		t.Fatalf("the finished event was not pruned: %+v", report)
 	}
 	if report.DeliveriesRemoved != 1 {
 		t.Fatalf("the settled delivery was not pruned: %+v", report)
 	}
-	// The pending delivery is live work, not history.
 	if _, found, err := journal.LookupDelivery(eventA); err != nil || !found {
 		t.Fatalf("a pending delivery was pruned: found=%v err=%v", found, err)
 	}
 	if _, found, err := journal.Lookup(eventA); err != nil || found {
-		t.Fatalf("the claim survived its retention: found=%v err=%v", found, err)
+		t.Fatalf("the finished record survived its retention: found=%v err=%v", found, err)
+	}
+}
+
+// An event nobody has processed is not history, however old it is. Pruning it
+// would delete a message that was accepted and never delivered, which is the
+// failure the journal exists to prevent.
+func TestPruneNeverRemovesUnprocessedEvents(t *testing.T) {
+	journal, _ := openJournal(t)
+	now := time.Unix(int64(acceptAt), 0)
+	if _, _, err := journal.Accept(entry(eventA, endpoint)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if _, _, err := journal.Accept(entry(eventB, endpoint)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if _, err := journal.ClaimForApplication(eventB, lease(0x11), now, time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	long := now.Add(10 * MinClaimRetention)
+	report, err := journal.Prune(long, MinClaimRetention)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if report.ClaimsRemoved != 0 {
+		t.Fatalf("unprocessed events were pruned: %+v", report)
+	}
+	pending, err := journal.ListPending(long, 0)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("expected both events to still be deliverable, got %d", len(pending))
 	}
 }
 

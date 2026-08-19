@@ -27,7 +27,7 @@ decision:
 | `pkg/identity` | Messaging Endpoint delegation: canonical bytes, digest, strict codec, and the verifier that resolves it against finalized Agent state |
 | `pkg/directory` | Signed Messaging Contact Descriptor, bounded DHT locator, and the discovery half of the resolution algorithm |
 | `pkg/envelope` | Outer Relay Envelope and inner typed Messaging Event, including content-addressed Event IDs |
-| `pkg/eventlog` | Single-writer durable journal: inbound claims, outbound delivery state, retry schedule, and pruning |
+| `pkg/eventlog` | Single-writer durable journal: stored inbound events with pending recovery and application leases, outbound delivery state, retry schedule, and pruning |
 | `pkg/fault` | Typed failures, retry dispositions, and what a peer may be told |
 | `pkg/admission` | The lower half of the context firewall: authority, scope, window, inbox policy, and the durable claim |
 | `pkg/e2ee` | The contract a candidate encryption suite must satisfy, message bindings, and published prekey bundles |
@@ -75,7 +75,9 @@ Deliberately absent, with the reason:
   delegation, a locator cannot outlive its descriptor.
 - Unknown event kinds have no delegated class and are never interpreted as tool
   calls, approvals, or payments.
-- The journal reports a claim as fresh only after it is durably on disk.
+- The journal reports an event as fresh only after it is durably on disk, and
+  stores the event itself, so acceptance means recoverable rather than merely
+  remembered.
 - Evidence is judged against thresholds that were fixed before it was
   collected, and a study that misses its own minimums produces no decision.
 - A conformance run can only refute. Passing every check clears a floor; it
