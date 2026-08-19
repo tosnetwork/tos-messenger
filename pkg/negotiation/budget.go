@@ -2,8 +2,36 @@ package negotiation
 
 import (
 	"errors"
+	"sort"
 	"sync"
 )
+
+// MaxReservations bounds how many negotiations may hold part of one budget at
+// once. An unbounded set is an unbounded record and an unbounded restart.
+const MaxReservations = 256
+
+// BudgetState is everything a budget needs to be reconstructed.
+//
+// It is written whole rather than as a delta. A delta applied halfway leaves a
+// ledger nobody can reconcile, and this set is small and bounded, so there is
+// nothing to gain by making the durable form clever.
+type BudgetState struct {
+	Total    Money
+	Spent    Money
+	Reserved map[string]Money
+}
+
+// Ledger is where a budget's reservations survive a restart.
+//
+// It is required. A budget that lived only in memory would forget every hold
+// when the process ended: the spend would return to zero and several
+// negotiations could commit against the same money again, which is precisely
+// the outcome the budget exists to prevent, arriving by way of an ordinary
+// restart rather than an attack.
+type Ledger interface {
+	Load() (BudgetState, bool, error)
+	Record(state BudgetState) error
+}
 
 // Budget is what several negotiations draw on at once.
 //
@@ -13,117 +41,224 @@ import (
 // budget is where that is caught, and it is caught at the moment a negotiation
 // says yes rather than at the moment money moves, because by then five yeses
 // already exist.
+//
+// It is not a balance. What can actually be spent is decided by the wallet and
+// by finalized chain state; this is a stricter local ceiling on top of that,
+// and it is never the authority on funds.
 type Budget struct {
 	mutex    sync.Mutex
-	total    Amount
-	spent    Amount
-	reserved map[string]Amount
+	ledger   Ledger
+	total    Money
+	spent    Money
+	reserved map[string]Money
 }
 
-// NewBudget opens a budget for one asset.
-func NewBudget(total Amount) (*Budget, error) {
+// OpenBudget opens a budget for one asset, restoring whatever the ledger holds.
+func OpenBudget(total Money, ledger Ledger) (*Budget, error) {
 	if err := total.Validate(); err != nil {
 		return nil, err
 	}
-	return &Budget{
-		total:    total,
-		spent:    Amount{Asset: total.Asset, Decimals: total.Decimals},
-		reserved: make(map[string]Amount),
-	}, nil
+	if ledger == nil {
+		return nil, errors.New("a budget needs somewhere to survive a restart")
+	}
+	budget := &Budget{
+		ledger: ledger, total: total, spent: total.Zero(),
+		reserved: make(map[string]Money),
+	}
+	stored, found, err := ledger.Load()
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return budget, budget.record()
+	}
+	if !stored.Total.Equal(total) {
+		// The owner changed the ceiling while holds were outstanding. Silently
+		// adopting either number would either strand reservations or quietly
+		// raise what was authorised, so the caller is told instead.
+		return nil, errors.New("this budget was opened before with a different total")
+	}
+	budget.spent = stored.Spent
+	for id, amount := range stored.Reserved {
+		budget.reserved[id] = amount
+	}
+	return budget, nil
 }
 
 // Reserve holds an amount for one negotiation.
 //
 // Reserving twice for the same negotiation replaces the earlier hold rather
 // than adding to it, so a renegotiated price does not leak the old one.
-func (b *Budget) Reserve(negotiationID string, amount Amount) error {
+func (b *Budget) Reserve(negotiationID string, amount Money) error {
 	if b == nil {
 		return errors.New("no budget")
 	}
-	if negotiationID == "" {
-		return errors.New("a reservation needs a negotiation")
+	if negotiationID == "" || len(negotiationID) > 128 {
+		return errors.New("invalid negotiation identifier")
 	}
 	if err := amount.Validate(); err != nil {
 		return err
 	}
+	if !amount.SameAsset(b.total) {
+		return errors.New("this amount is in an asset the budget does not hold")
+	}
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	if !amount.SameAsset(b.total) {
-		return errors.New("a reservation in another asset cannot be drawn on this budget")
+
+	if _, held := b.reserved[negotiationID]; !held && len(b.reserved) >= MaxReservations {
+		return errors.New("this budget holds as many reservations as it may")
 	}
-	committed := b.spent.Units
-	for id, held := range b.reserved {
-		if id == negotiationID {
-			continue
-		}
-		committed += held.Units
-		if committed < held.Units {
-			return errors.New("budget overflows")
-		}
-	}
-	if committed+amount.Units < committed {
-		return errors.New("budget overflows")
-	}
-	if committed+amount.Units > b.total.Units {
-		return errors.New("the owner's budget cannot cover this alongside what is already held")
-	}
+	previous, held := b.reserved[negotiationID]
 	b.reserved[negotiationID] = amount
+	committed, err := b.committedLocked()
+	if err != nil {
+		b.restore(negotiationID, previous, held)
+		return err
+	}
+	within, err := committed.AtMost(b.total)
+	if err != nil {
+		b.restore(negotiationID, previous, held)
+		return err
+	}
+	if !within {
+		b.restore(negotiationID, previous, held)
+		return errors.New("this would commit more than the budget allows")
+	}
+	if err := b.record(); err != nil {
+		b.restore(negotiationID, previous, held)
+		return err
+	}
 	return nil
 }
 
-// Release gives back what a negotiation was holding.
-func (b *Budget) Release(negotiationID string) {
-	if b == nil {
+func (b *Budget) restore(negotiationID string, previous Money, held bool) {
+	if held {
+		b.reserved[negotiationID] = previous
 		return
 	}
-	b.mutex.Lock()
-	defer b.mutex.Unlock()
 	delete(b.reserved, negotiationID)
 }
 
+// Release drops a hold.
+func (b *Budget) Release(negotiationID string) error {
+	if b == nil {
+		return errors.New("no budget")
+	}
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	previous, held := b.reserved[negotiationID]
+	if !held {
+		return nil
+	}
+	delete(b.reserved, negotiationID)
+	if err := b.record(); err != nil {
+		b.reserved[negotiationID] = previous
+		return err
+	}
+	return nil
+}
+
 // Commit turns a hold into a spend.
+//
+// The hold becomes permanent here rather than when money moves, because the
+// commitment is what the owner authorised and the movement is a consequence of
+// it. Releasing after a commitment would let the same budget back the next one.
 func (b *Budget) Commit(negotiationID string) error {
 	if b == nil {
 		return errors.New("no budget")
 	}
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	held, found := b.reserved[negotiationID]
-	if !found {
-		return errors.New("this negotiation holds nothing to commit")
+	amount, held := b.reserved[negotiationID]
+	if !held {
+		return errors.New("this negotiation holds no reservation")
 	}
-	sum := b.spent.Units + held.Units
-	if sum < b.spent.Units || sum > b.total.Units {
-		return errors.New("committing this would exceed the owner's budget")
+	spent, err := b.spent.Add(amount)
+	if err != nil {
+		return err
 	}
-	b.spent = Amount{Asset: b.total.Asset, Units: sum, Decimals: b.total.Decimals}
+	within, err := spent.AtMost(b.total)
+	if err != nil {
+		return err
+	}
+	if !within {
+		return errors.New("this would spend more than the budget allows")
+	}
+	previousSpent := b.spent
+	b.spent = spent
 	delete(b.reserved, negotiationID)
+	if err := b.record(); err != nil {
+		b.spent = previousSpent
+		b.reserved[negotiationID] = amount
+		return err
+	}
 	return nil
 }
 
-// Remaining reports what is neither spent nor held.
-func (b *Budget) Remaining() Amount {
+// Remaining is what is left after spending and current holds.
+func (b *Budget) Remaining() (Money, error) {
 	if b == nil {
-		return Amount{}
+		return Money{}, errors.New("no budget")
 	}
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	used := b.spent.Units
-	for _, held := range b.reserved {
-		used += held.Units
+	committed, err := b.committedLocked()
+	if err != nil {
+		return Money{}, err
 	}
-	if used > b.total.Units {
-		return Amount{Asset: b.total.Asset, Decimals: b.total.Decimals}
+	left, err := b.total.Int()
+	if err != nil {
+		return Money{}, err
 	}
-	return Amount{Asset: b.total.Asset, Units: b.total.Units - used, Decimals: b.total.Decimals}
+	used, err := committed.Int()
+	if err != nil {
+		return Money{}, err
+	}
+	return NewMoney(b.total.Asset, left.Sub(left, used))
 }
 
-// Spent reports what has been committed.
-func (b *Budget) Spent() Amount {
+// Spent is what has been committed.
+func (b *Budget) Spent() Money {
 	if b == nil {
-		return Amount{}
+		return Money{}
 	}
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	return b.spent
+}
+
+// Reserved reports the hold one negotiation carries.
+func (b *Budget) Reserved(negotiationID string) (Money, bool) {
+	if b == nil {
+		return Money{}, false
+	}
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	amount, held := b.reserved[negotiationID]
+	return amount, held
+}
+
+func (b *Budget) committedLocked() (Money, error) {
+	total := b.spent
+	identifiers := make([]string, 0, len(b.reserved))
+	for id := range b.reserved {
+		identifiers = append(identifiers, id)
+	}
+	sort.Strings(identifiers)
+	for _, id := range identifiers {
+		sum, err := total.Add(b.reserved[id])
+		if err != nil {
+			return Money{}, err
+		}
+		total = sum
+	}
+	return total, nil
+}
+
+func (b *Budget) record() error {
+	reserved := make(map[string]Money, len(b.reserved))
+	for id, amount := range b.reserved {
+		reserved[id] = amount
+	}
+	return b.ledger.Record(BudgetState{Total: b.total, Spent: b.spent, Reserved: reserved})
 }

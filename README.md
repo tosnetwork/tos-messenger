@@ -104,7 +104,15 @@ Deliberately absent, with the reason:
   delivering.
 - Natural language communicates meaning and moves nothing. Agreeing in
   conversation is not a Quote, a Quote is not funded escrow, and the only
-  signal that means value can move is a canonical commitment.
+  signal that means value can move is a commitment read back out of finalized
+  state. A well-formed digest is not one.
+- An asset is a contract, not a ticker, and an amount is an arbitrary-precision
+  count of atomic units. Two contracts may both call themselves USDT, and no
+  fixed-width integer holds eighteen decimals of an ordinary token.
+- An owner's approval names what it approved: the terms digest, the version of
+  the negotiation, and the mandate it was given under. Terms freeze once both
+  parties agree, and bargaining on takes an explicit reopening that drops the
+  approval and the budget hold.
 - Where a structured amount and its rendering disagree, both are shown and
   neither is chosen. Letting a model pick would make the text authoritative
   through a side door.

@@ -24,15 +24,22 @@ type Candidate struct {
 	CapabilityID      string
 	CapabilityVersion string
 	CapabilityClass   string
-	Asset             string
-	Units             uint64
-	Decimals          uint8
-	NotAfterUnix      uint64
+	// ProviderAgentID, and the four digests below, are every remaining field a
+	// canonical Quote Proposal carries. They are required rather than inferred
+	// for the same reason the asset is: a field the compiler filled in from
+	// context is a term nobody agreed to.
+	ProviderAgentID        string
+	ManifestDigest         string
+	TransportBindingDigest string
+	EscrowTermsDigest      string
+	DisputePolicyDigest    string
+	Price                  Money
+	NotAfterUnix           uint64
 
-	// RenderedTotal is the amount the natural-language text was understood to
+	// RenderedPrice is the amount the natural-language text was understood to
 	// say, where the caller extracted one. Supplying it is optional. Supplying
 	// one that disagrees with the structured amount is fatal.
-	RenderedTotal *Amount
+	RenderedPrice *Money
 }
 
 // Compile turns a candidate into terms, or refuses.
@@ -41,10 +48,10 @@ type Candidate struct {
 // because a caller that had to ask separately could act on the terms and
 // forget to ask.
 func Compile(candidate Candidate, mandate Mandate, now time.Time) (Terms, bool, error) {
-	if candidate.Asset == "" {
-		return Terms{}, false, errors.New("no asset was named")
+	if err := candidate.Price.Validate(); err != nil {
+		return Terms{}, false, err
 	}
-	if candidate.Units == 0 {
+	if candidate.Price.Atomic == "0" {
 		// A zero price is not a free service; it is a field nobody filled in.
 		return Terms{}, false, errors.New("no amount was named")
 	}
@@ -55,24 +62,25 @@ func Compile(candidate Candidate, mandate Mandate, now time.Time) (Terms, bool, 
 		return Terms{}, false, errors.New("no expiry was named")
 	}
 	terms := Terms{
-		CapabilityID:      candidate.CapabilityID,
-		CapabilityVersion: candidate.CapabilityVersion,
-		CapabilityClass:   candidate.CapabilityClass,
-		Total: Amount{
-			Asset:    candidate.Asset,
-			Units:    candidate.Units,
-			Decimals: candidate.Decimals,
-		},
-		NotAfterUnix: candidate.NotAfterUnix,
+		CapabilityID:           candidate.CapabilityID,
+		CapabilityVersion:      candidate.CapabilityVersion,
+		CapabilityClass:        candidate.CapabilityClass,
+		ProviderAgentID:        candidate.ProviderAgentID,
+		ManifestDigest:         candidate.ManifestDigest,
+		TransportBindingDigest: candidate.TransportBindingDigest,
+		Price:                  candidate.Price,
+		EscrowTermsDigest:      candidate.EscrowTermsDigest,
+		DisputePolicyDigest:    candidate.DisputePolicyDigest,
+		NotAfterUnix:           candidate.NotAfterUnix,
 	}
 	if err := terms.Validate(); err != nil {
 		return Terms{}, false, err
 	}
-	if candidate.RenderedTotal != nil {
-		if err := candidate.RenderedTotal.Validate(); err != nil {
+	if candidate.RenderedPrice != nil {
+		if err := candidate.RenderedPrice.Validate(); err != nil {
 			return Terms{}, false, err
 		}
-		if !candidate.RenderedTotal.Equal(terms.Total) {
+		if !candidate.RenderedPrice.Equal(terms.Price) {
 			return Terms{}, false, ErrRenderingConflict
 		}
 	}

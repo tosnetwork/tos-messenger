@@ -516,15 +516,16 @@ func fromApprovalOrigins(origins []eventlog.ApprovalOrigin) []ActionOrigin {
 func (s *Server) placeMandate(request Request, now time.Time) Response {
 	stored, err := s.config.Journal.PlaceMandate(eventlog.StoredMandate{
 		Objective: request.Mandate.Objective, Authority: request.Mandate.Authority,
-		CapabilityClass:  request.Mandate.CapabilityClass,
-		MaxTotalAsset:    request.Mandate.Asset,
-		MaxTotalUnits:    request.Mandate.MaxTotalUnits,
-		MaxTotalDecimals: request.Mandate.Decimals,
-		ApprovalAsset:    request.Mandate.Asset,
-		ApprovalUnits:    request.Mandate.ApprovalAbove,
-		ApprovalDecimals: request.Mandate.Decimals,
-		MaxCounteroffers: request.Mandate.MaxCounteroffers,
-		ExpiresAtUnix:    request.Mandate.ExpiresAtUnix,
+		CapabilityClass:     request.Mandate.CapabilityClass,
+		Workchain:           request.Mandate.Asset.Workchain,
+		AssetAccountID:      request.Mandate.Asset.AccountID,
+		AssetMasterCodeHash: request.Mandate.Asset.MasterCodeHash,
+		AssetWalletCodeHash: request.Mandate.Asset.WalletCodeHash,
+		AssetDecimals:       request.Mandate.Asset.Decimals,
+		MaxTotalAtomic:      request.Mandate.MaxTotalAtomic,
+		ApprovalAboveAtomic: request.Mandate.ApprovalAboveAtomic,
+		MaxCounteroffers:    request.Mandate.MaxCounteroffers,
+		ExpiresAtUnix:       request.Mandate.ExpiresAtUnix,
 	}, now)
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
@@ -556,9 +557,10 @@ func (s *Server) listMandates() Response {
 		held = append(held, HeldMandate{
 			MandateID: mandate.MandateID, Objective: mandate.Objective,
 			Authority: mandate.Authority, CapabilityClass: mandate.CapabilityClass,
-			Asset: mandate.MaxTotalAsset, Decimals: mandate.MaxTotalDecimals,
-			MaxTotalUnits: mandate.MaxTotalUnits, ApprovalAbove: mandate.ApprovalUnits,
-			MaxCounteroffers: mandate.MaxCounteroffers, ExpiresAtUnix: mandate.ExpiresAtUnix,
+			Asset:               assetIdentityOf(mandate),
+			MaxTotalAtomic:      mandate.MaxTotalAtomic,
+			ApprovalAboveAtomic: mandate.ApprovalAboveAtomic,
+			MaxCounteroffers:    mandate.MaxCounteroffers, ExpiresAtUnix: mandate.ExpiresAtUnix,
 			PlacedAtUnix: mandate.PlacedAtUnix, RevokedAtUnix: mandate.RevokedAtUnix,
 		})
 	}
@@ -585,17 +587,31 @@ func (s *Server) spendMandate(request Request, now time.Time) (negotiation.Manda
 	return toMandate(stored)
 }
 
+func assetIdentityOf(stored eventlog.StoredMandate) AssetIdentity {
+	return AssetIdentity{
+		Workchain: stored.Workchain, AccountID: stored.AssetAccountID,
+		MasterCodeHash: stored.AssetMasterCodeHash,
+		WalletCodeHash: stored.AssetWalletCodeHash,
+		Decimals:       stored.AssetDecimals,
+	}
+}
+
+func toAsset(identity AssetIdentity) negotiation.Asset {
+	return negotiation.Asset{
+		Workchain: identity.Workchain, AccountID: identity.AccountID,
+		MasterCodeHash: identity.MasterCodeHash, WalletCodeHash: identity.WalletCodeHash,
+		Decimals: identity.Decimals,
+	}
+}
+
 func toMandate(stored eventlog.StoredMandate) (negotiation.Mandate, error) {
+	asset := toAsset(assetIdentityOf(stored))
 	mandate := negotiation.Mandate{
-		Objective:       stored.Objective,
-		Authority:       negotiation.Authority(stored.Authority),
-		CapabilityClass: stored.CapabilityClass,
-		MaxTotal: negotiation.Amount{
-			Asset: stored.MaxTotalAsset, Units: stored.MaxTotalUnits, Decimals: stored.MaxTotalDecimals,
-		},
-		ApprovalAbove: negotiation.Amount{
-			Asset: stored.ApprovalAsset, Units: stored.ApprovalUnits, Decimals: stored.ApprovalDecimals,
-		},
+		Objective:        stored.Objective,
+		Authority:        negotiation.Authority(stored.Authority),
+		CapabilityClass:  stored.CapabilityClass,
+		MaxTotal:         negotiation.Money{Asset: asset, Atomic: stored.MaxTotalAtomic},
+		ApprovalAbove:    negotiation.Money{Asset: asset, Atomic: stored.ApprovalAboveAtomic},
 		MaxCounteroffers: stored.MaxCounteroffers,
 		ExpiresAtUnix:    stored.ExpiresAtUnix,
 	}
@@ -610,12 +626,15 @@ func toTerms(terms *PurchaseTerms) *negotiation.Terms {
 		return nil
 	}
 	return &negotiation.Terms{
-		CapabilityID:      terms.CapabilityID,
-		CapabilityVersion: terms.CapabilityVersion,
-		CapabilityClass:   terms.CapabilityClass,
-		Total: negotiation.Amount{
-			Asset: terms.Asset, Units: terms.Units, Decimals: terms.Decimals,
-		},
-		NotAfterUnix: terms.NotAfterUnix,
+		CapabilityID:           terms.CapabilityID,
+		CapabilityVersion:      terms.CapabilityVersion,
+		CapabilityClass:        terms.CapabilityClass,
+		ProviderAgentID:        terms.ProviderAgentID,
+		ManifestDigest:         terms.ManifestDigest,
+		TransportBindingDigest: terms.TransportBindingDigest,
+		Price:                  negotiation.Money{Asset: toAsset(terms.Asset), Atomic: terms.PriceAtomic},
+		EscrowTermsDigest:      terms.EscrowTermsDigest,
+		DisputePolicyDigest:    terms.DisputePolicyDigest,
+		NotAfterUnix:           terms.NotAfterUnix,
 	}
 }

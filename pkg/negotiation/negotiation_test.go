@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
 const (
@@ -15,8 +17,21 @@ const (
 	commitment   = "sha256:" + "abababababababababababababababababababababababababababababababab"
 )
 
-func usdt(units uint64) Amount {
-	return Amount{Asset: "USDT", Units: units, Decimals: 6}
+// testAsset is an asset identified the way the chain identifies one. There is
+// no ticker: two contracts may both answer to "USDT", and a test that used one
+// would be testing an identity the code no longer accepts.
+func testAsset() Asset {
+	return Asset{
+		Workchain:      0,
+		AccountID:      strings.Repeat("a", 64),
+		MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
+		WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
+		Decimals:       6,
+	}
+}
+
+func usdt(atomic string) Money {
+	return Money{Asset: testAsset(), Atomic: atomic}
 }
 
 func testMandate() Mandate {
@@ -24,21 +39,137 @@ func testMandate() Mandate {
 		Objective:        "audit one smart contract",
 		Authority:        AuthorityCommit,
 		CapabilityClass:  "software.audit",
-		MaxTotal:         usdt(120_000_000),
-		ApprovalAbove:    usdt(100_000_000),
+		MaxTotal:         usdt("120000000"),
+		ApprovalAbove:    usdt("100000000"),
 		MaxCounteroffers: 3,
 		ExpiresAtUnix:    baseUnix + 86_400,
 	}
 }
 
-func terms(units uint64) Terms {
+func terms(atomic string) Terms {
 	return Terms{
-		CapabilityID:      capabilityID,
-		CapabilityVersion: "1.4.0",
-		CapabilityClass:   "software.audit",
-		Total:             usdt(units),
-		NotAfterUnix:      baseUnix + 3600,
+		CapabilityID:           capabilityID,
+		CapabilityVersion:      "1.4.0",
+		CapabilityClass:        "software.audit",
+		ProviderAgentID:        counterparty,
+		ManifestDigest:         "sha256:" + strings.Repeat("d", 64),
+		TransportBindingDigest: "sha256:" + strings.Repeat("e", 64),
+		Price:                  usdt(atomic),
+		EscrowTermsDigest:      "sha256:" + strings.Repeat("f", 64),
+		DisputePolicyDigest:    "sha256:" + strings.Repeat("1", 64),
+		NotAfterUnix:           baseUnix + 3600,
 	}
+}
+
+// memoryLedger is a budget ledger for tests. A budget with nowhere to survive
+// a restart is one the code refuses to open.
+type memoryLedger struct {
+	state BudgetState
+	held  bool
+}
+
+func (m *memoryLedger) Load() (BudgetState, bool, error) { return m.state, m.held, nil }
+
+func (m *memoryLedger) Record(state BudgetState) error {
+	reserved := make(map[string]Money, len(state.Reserved))
+	for id, amount := range state.Reserved {
+		reserved[id] = amount
+	}
+	m.state = BudgetState{Total: state.Total, Spent: state.Spent, Reserved: reserved}
+	m.held = true
+	return nil
+}
+
+func testBudget(t *testing.T, total string) *Budget {
+	t.Helper()
+	budget, err := OpenBudget(usdt(total), &memoryLedger{})
+	if err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	return budget
+}
+
+// stubResolver stands in for reading a finalized Accepted Quote off the chain.
+type stubResolver struct {
+	quote VerifiedAcceptedQuote
+	found bool
+	err   error
+}
+
+func (s stubResolver) ResolveAcceptedQuote(string) (VerifiedAcceptedQuote, bool, error) {
+	return s.quote, s.found, s.err
+}
+
+func finalizedQuote(agreed Terms) VerifiedAcceptedQuote {
+	return VerifiedAcceptedQuote{
+		Commitment: commitment,
+		Terms:      agreed,
+		Reference: &nativev1.ChainReference{
+			Workchain: 0, Account: "0:" + strings.Repeat("d", 64),
+			LogicalTime: 42, TransactionHash: "sha256:" + strings.Repeat("e", 64),
+			ContractCodeHash:    "tvm-cell-sha256:" + strings.Repeat("f", 64),
+			FinalizedCheckpoint: 100,
+		},
+		Network:         &nativev1.NetworkDomain{NetworkId: "tos-local"},
+		FinalizedAtUnix: baseUnix + 10,
+	}
+}
+
+// approvedDigest is what the owner saw. An approval names the terms it was a
+// decision about, so a test that passed a bare confirmation would be
+// exercising the binding it is meant to check.
+func approvedDigest(t *testing.T, instance *Negotiation) string {
+	t.Helper()
+	agreed, ok := instance.Agreed()
+	if !ok {
+		t.Fatal("nothing has been agreed")
+	}
+	digest, err := agreed.Digest()
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	return digest
+}
+
+// testCandidate is a complete candidate: every field a canonical quote carries
+// is named rather than inferred.
+func testCandidate() Candidate {
+	return Candidate{
+		CapabilityID:           capabilityID,
+		CapabilityVersion:      "1.4.0",
+		CapabilityClass:        "software.audit",
+		ProviderAgentID:        counterparty,
+		ManifestDigest:         "sha256:" + strings.Repeat("d", 64),
+		TransportBindingDigest: "sha256:" + strings.Repeat("e", 64),
+		Price:                  usdt("10000000"),
+		EscrowTermsDigest:      "sha256:" + strings.Repeat("f", 64),
+		DisputePolicyDigest:    "sha256:" + strings.Repeat("1", 64),
+		NotAfterUnix:           baseUnix + 3600,
+	}
+}
+
+func withCapability(t Terms, id string) Terms     { t.CapabilityID = id; return t }
+func withVersion(t Terms, version string) Terms   { t.CapabilityVersion = version; return t }
+func withExpiry(t Terms, expiry uint64) Terms     { t.NotAfterUnix = expiry; return t }
+func withProvider(t Terms, provider string) Terms { t.ProviderAgentID = provider; return t }
+func withManifest(t Terms, digest string) Terms   { t.ManifestDigest = digest; return t }
+func withEscrow(t Terms, digest string) Terms     { t.EscrowTermsDigest = digest; return t }
+
+// otherMoney is an amount of a different asset.
+func otherMoney(atomic string) Money {
+	asset := testAsset()
+	asset.AccountID = strings.Repeat("9", 64)
+	return Money{Asset: asset, Atomic: atomic}
+}
+
+// left is what a budget has remaining.
+func left(t *testing.T, budget *Budget) Money {
+	t.Helper()
+	remaining, err := budget.Remaining()
+	if err != nil {
+		t.Fatalf("remaining: %v", err)
+	}
+	return remaining
 }
 
 func at(offset uint64) time.Time { return time.Unix(int64(baseUnix+offset), 0) }
@@ -55,11 +186,11 @@ func start(t *testing.T, budget *Budget) *Negotiation {
 // The exchange the design describes: an offer, a counter, agreement in
 // conversation, and only then a commitment.
 func TestNegotiationReachesACommitment(t *testing.T) {
-	instance := start(t, nil)
-	if err := instance.ReceiveProposal(terms(126_000_000), at(1)); err != nil {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("126000000"), at(1)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
-	if err := instance.Counter(terms(118_000_000), at(2)); err != nil {
+	if err := instance.Counter(terms("118000000"), at(2)); err != nil {
 		t.Fatalf("counter: %v", err)
 	}
 	if err := instance.AcceptIntent(at(3)); err != nil {
@@ -77,13 +208,13 @@ func TestNegotiationReachesACommitment(t *testing.T) {
 	if !instance.NeedsOwnerApproval() {
 		t.Fatal("a deal above the approval point did not ask for the owner")
 	}
-	if err := instance.ApproveByOwner(at(4)); err != nil {
+	if err := instance.ApproveByOwner(approvedDigest(t, instance), at(4)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if err := instance.BeginCanonicalization(at(4)); err != nil {
 		t.Fatalf("canonicalise: %v", err)
 	}
-	if err := instance.Finalize(terms(118_000_000), commitment, at(5)); err != nil {
+	if err := instance.Finalize(stubResolver{quote: finalizedQuote(terms("118000000")), found: true}, commitment, at(5)); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	if !instance.ActiveAgreement() {
@@ -98,8 +229,8 @@ func TestNegotiationReachesACommitment(t *testing.T) {
 // "I accept" is a sentence. It creates no Quote, funds no escrow, and obliges
 // nobody.
 func TestAcceptingIntentCreatesNothing(t *testing.T) {
-	instance := start(t, nil)
-	if err := instance.ReceiveProposal(terms(50_000_000), at(1)); err != nil {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
 	if err := instance.AcceptIntent(at(2)); err != nil {
@@ -116,18 +247,18 @@ func TestAcceptingIntentCreatesNothing(t *testing.T) {
 // An Agent may counter an offer above its ceiling. It may not counter with
 // one, and it cannot move the ceiling by arguing.
 func TestTheCeilingIsNotPartOfTheNegotiation(t *testing.T) {
-	instance := start(t, nil)
-	if err := instance.ReceiveProposal(terms(126_000_000), at(1)); err != nil {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("126000000"), at(1)); err != nil {
 		t.Fatalf("an offer above the ceiling could not even be recorded: %v", err)
 	}
-	if err := instance.Counter(terms(126_000_000), at(2)); err == nil {
+	if err := instance.Counter(terms("126000000"), at(2)); err == nil {
 		t.Fatal("an Agent countered with terms beyond its own mandate")
 	}
 	if err := instance.AcceptIntent(at(3)); err == nil {
 		t.Fatal("an Agent accepted terms beyond its own mandate")
 	}
 	// And the mandate is unchanged by any of it.
-	if instance.Mandate.MaxTotal.Units != 120_000_000 {
+	if instance.Mandate.MaxTotal.Atomic != "120000000" {
 		t.Fatalf("the ceiling moved: %v", instance.Mandate.MaxTotal)
 	}
 }
@@ -136,20 +267,22 @@ func TestTheCeilingIsNotPartOfTheNegotiation(t *testing.T) {
 // the asset from the budget.
 func TestNothingIsInferredFromContext(t *testing.T) {
 	mandate := testMandate()
-	complete := Candidate{
-		CapabilityID: capabilityID, CapabilityVersion: "1.4.0", CapabilityClass: "software.audit",
-		Asset: "USDT", Units: 10_000_000, Decimals: 6, NotAfterUnix: baseUnix + 3600,
-	}
+	complete := testCandidate()
 	if _, _, err := Compile(complete, mandate, at(1)); err != nil {
 		t.Fatalf("a complete candidate was refused: %v", err)
 	}
 	for name, mutate := range map[string]func(*Candidate){
-		"no asset":      func(c *Candidate) { c.Asset = "" },
-		"no amount":     func(c *Candidate) { c.Units = 0 },
-		"no capability": func(c *Candidate) { c.CapabilityID = "" },
-		"no version":    func(c *Candidate) { c.CapabilityVersion = "" },
-		"no class":      func(c *Candidate) { c.CapabilityClass = "" },
-		"no expiry":     func(c *Candidate) { c.NotAfterUnix = 0 },
+		"no asset":             func(c *Candidate) { c.Price.Asset = Asset{} },
+		"no amount":            func(c *Candidate) { c.Price.Atomic = "0" },
+		"no capability":        func(c *Candidate) { c.CapabilityID = "" },
+		"no version":           func(c *Candidate) { c.CapabilityVersion = "" },
+		"no class":             func(c *Candidate) { c.CapabilityClass = "" },
+		"no provider":          func(c *Candidate) { c.ProviderAgentID = "" },
+		"no manifest":          func(c *Candidate) { c.ManifestDigest = "" },
+		"no transport binding": func(c *Candidate) { c.TransportBindingDigest = "" },
+		"no escrow terms":      func(c *Candidate) { c.EscrowTermsDigest = "" },
+		"no dispute policy":    func(c *Candidate) { c.DisputePolicyDigest = "" },
+		"no expiry":            func(c *Candidate) { c.NotAfterUnix = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := complete
@@ -165,23 +298,23 @@ func TestNothingIsInferredFromContext(t *testing.T) {
 // a preference to resolve.
 func TestRenderingConflictFailsClosed(t *testing.T) {
 	mandate := testMandate()
-	rendered := usdt(120_000_000)
-	candidate := Candidate{
-		CapabilityID: capabilityID, CapabilityVersion: "1.4.0", CapabilityClass: "software.audit",
-		Asset: "USDT", Units: 12_000_000, Decimals: 6, NotAfterUnix: baseUnix + 3600,
-		RenderedTotal: &rendered,
-	}
+	rendered := usdt("120000000")
+	candidate := testCandidate()
+	candidate.Price = usdt("12000000")
+	candidate.RenderedPrice = &rendered
 	if _, _, err := Compile(candidate, mandate, at(1)); !errors.Is(err, ErrRenderingConflict) {
 		t.Fatalf("expected a rendering conflict, got %v", err)
 	}
 	// The same number in another asset is also a conflict, not a conversion.
-	otherAsset := Amount{Asset: "TOS", Units: 12_000_000, Decimals: 6}
-	candidate.RenderedTotal = &otherAsset
+	other := testAsset()
+	other.AccountID = strings.Repeat("9", 64)
+	otherAsset := Money{Asset: other, Atomic: "12000000"}
+	candidate.RenderedPrice = &otherAsset
 	if _, _, err := Compile(candidate, mandate, at(1)); !errors.Is(err, ErrRenderingConflict) {
 		t.Fatalf("expected an asset conflict, got %v", err)
 	}
-	agreeing := usdt(12_000_000)
-	candidate.RenderedTotal = &agreeing
+	agreeing := usdt("12000000")
+	candidate.RenderedPrice = &agreeing
 	if _, _, err := Compile(candidate, mandate, at(1)); err != nil {
 		t.Fatalf("agreeing representations were refused: %v", err)
 	}
@@ -191,16 +324,18 @@ func TestRenderingConflictFailsClosed(t *testing.T) {
 // rather than finalising on whichever version arrived last.
 func TestCanonicalTermsMustMatchWhatWasAgreed(t *testing.T) {
 	cases := map[string]Terms{
-		"another amount":  terms(120_000_000),
-		"another version": {CapabilityID: capabilityID, CapabilityVersion: "2.0.0", CapabilityClass: "software.audit", Total: usdt(50_000_000), NotAfterUnix: baseUnix + 3600},
-		"another expiry":  {CapabilityID: capabilityID, CapabilityVersion: "1.4.0", CapabilityClass: "software.audit", Total: usdt(50_000_000), NotAfterUnix: baseUnix + 7200},
-		"another capability": {CapabilityID: "cap_" + strings.Repeat("1", 64), CapabilityVersion: "1.4.0",
-			CapabilityClass: "software.audit", Total: usdt(50_000_000), NotAfterUnix: baseUnix + 3600},
+		"another amount":     terms("120000000"),
+		"another version":    withVersion(terms("50000000"), "2.0.0"),
+		"another expiry":     withExpiry(terms("50000000"), baseUnix+7200),
+		"another provider":   withProvider(terms("50000000"), "agent_"+strings.Repeat("7", 64)),
+		"another manifest":   withManifest(terms("50000000"), "sha256:"+strings.Repeat("2", 64)),
+		"another escrow":     withEscrow(terms("50000000"), "sha256:"+strings.Repeat("3", 64)),
+		"another capability": withCapability(terms("50000000"), "cap_"+strings.Repeat("1", 64)),
 	}
 	for name, canonical := range cases {
 		t.Run(name, func(t *testing.T) {
-			instance := start(t, nil)
-			if err := instance.ReceiveProposal(terms(50_000_000), at(1)); err != nil {
+			instance := start(t, testBudget(t, "1000000000"))
+			if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
 				t.Fatalf("proposal: %v", err)
 			}
 			if err := instance.AcceptIntent(at(2)); err != nil {
@@ -209,7 +344,7 @@ func TestCanonicalTermsMustMatchWhatWasAgreed(t *testing.T) {
 			if err := instance.BeginCanonicalization(at(3)); err != nil {
 				t.Fatalf("canonicalise: %v", err)
 			}
-			if err := instance.Finalize(canonical, commitment, at(4)); err == nil {
+			if err := instance.Finalize(stubResolver{quote: finalizedQuote(canonical), found: true}, commitment, at(4)); err == nil {
 				t.Fatalf("a commitment differing in %q was accepted", name)
 			}
 			if instance.State() != StateRejected {
@@ -228,8 +363,8 @@ func TestCanonicalTermsMustMatchWhatWasAgreed(t *testing.T) {
 
 // One commitment per negotiation. A repeated event does not produce a second.
 func TestFinalizingTwiceIsRefused(t *testing.T) {
-	instance := start(t, nil)
-	if err := instance.ReceiveProposal(terms(50_000_000), at(1)); err != nil {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
 	if err := instance.AcceptIntent(at(2)); err != nil {
@@ -238,10 +373,10 @@ func TestFinalizingTwiceIsRefused(t *testing.T) {
 	if err := instance.BeginCanonicalization(at(3)); err != nil {
 		t.Fatalf("canonicalise: %v", err)
 	}
-	if err := instance.Finalize(terms(50_000_000), commitment, at(4)); err != nil {
+	if err := instance.Finalize(stubResolver{quote: finalizedQuote(terms("50000000")), found: true}, commitment, at(4)); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
-	if err := instance.Finalize(terms(50_000_000), commitment, at(5)); err == nil {
+	if err := instance.Finalize(stubResolver{quote: finalizedQuote(terms("50000000")), found: true}, commitment, at(5)); err == nil {
 		t.Fatal("a second commitment was accepted")
 	}
 }
@@ -249,8 +384,8 @@ func TestFinalizingTwiceIsRefused(t *testing.T) {
 // Terms above the owner's approval point wait for the owner, and the owner's
 // decision is not something the counterparty can supply.
 func TestApprovalPointRequiresTheOwner(t *testing.T) {
-	instance := start(t, nil)
-	if err := instance.ReceiveProposal(terms(110_000_000), at(1)); err != nil {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("110000000"), at(1)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
 	if err := instance.AcceptIntent(at(2)); err != nil {
@@ -262,7 +397,7 @@ func TestApprovalPointRequiresTheOwner(t *testing.T) {
 	if err := instance.BeginCanonicalization(at(3)); err == nil {
 		t.Fatal("terms above the approval point were canonicalised without the owner")
 	}
-	if err := instance.ApproveByOwner(at(4)); err != nil {
+	if err := instance.ApproveByOwner(approvedDigest(t, instance), at(4)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if err := instance.BeginCanonicalization(at(5)); err != nil {
@@ -270,8 +405,8 @@ func TestApprovalPointRequiresTheOwner(t *testing.T) {
 	}
 
 	// Below the point the owner is not asked, and approving is meaningless.
-	small := start(t, nil)
-	if err := small.ReceiveProposal(terms(10_000_000), at(1)); err != nil {
+	small := start(t, testBudget(t, "1000000000"))
+	if err := small.ReceiveProposal(terms("10000000"), at(1)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
 	if err := small.AcceptIntent(at(2)); err != nil {
@@ -280,14 +415,14 @@ func TestApprovalPointRequiresTheOwner(t *testing.T) {
 	if small.NeedsOwnerApproval() {
 		t.Fatal("terms inside the mandate asked for the owner anyway")
 	}
-	if err := small.ApproveByOwner(at(3)); err == nil {
+	if err := small.ApproveByOwner(approvedDigest(t, small), at(3)); err == nil {
 		t.Fatal("an unnecessary approval was recorded")
 	}
 }
 
 func TestOwnerCanRefuse(t *testing.T) {
-	instance := start(t, nil)
-	if err := instance.ReceiveProposal(terms(110_000_000), at(1)); err != nil {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("110000000"), at(1)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
 	if err := instance.AcceptIntent(at(2)); err != nil {
@@ -307,19 +442,19 @@ func TestOwnerCanRefuse(t *testing.T) {
 // A negotiation that can run forever is one an unattended Agent can be kept in
 // indefinitely.
 func TestCounteroffersAreBounded(t *testing.T) {
-	instance := start(t, nil)
+	instance := start(t, testBudget(t, "1000000000"))
 	for round := uint64(0); round < 3; round++ {
-		if err := instance.ReceiveProposal(terms(100_000_000), at(round*2+1)); err != nil {
+		if err := instance.ReceiveProposal(terms("100000000"), at(round*2+1)); err != nil {
 			t.Fatalf("proposal: %v", err)
 		}
-		if err := instance.Counter(terms(90_000_000), at(round*2+2)); err != nil {
+		if err := instance.Counter(terms("90000000"), at(round*2+2)); err != nil {
 			t.Fatalf("counter %d: %v", round, err)
 		}
 	}
-	if err := instance.ReceiveProposal(terms(100_000_000), at(10)); err != nil {
+	if err := instance.ReceiveProposal(terms("100000000"), at(10)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
-	if err := instance.Counter(terms(90_000_000), at(11)); err == nil {
+	if err := instance.Counter(terms("90000000"), at(11)); err == nil {
 		t.Fatal("the counteroffer budget was exceeded")
 	}
 	if instance.State() != StateWithdrawn {
@@ -330,8 +465,8 @@ func TestCounteroffersAreBounded(t *testing.T) {
 // An expired mandate or expired terms end the exchange rather than letting it
 // finalise late.
 func TestExpiryEndsTheExchange(t *testing.T) {
-	instance := start(t, nil)
-	if err := instance.ReceiveProposal(terms(50_000_000), at(1)); err != nil {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
 	if err := instance.AcceptIntent(at(2)); err != nil {
@@ -341,7 +476,7 @@ func TestExpiryEndsTheExchange(t *testing.T) {
 		t.Fatalf("canonicalise: %v", err)
 	}
 	late := time.Unix(int64(testMandate().ExpiresAtUnix)+1, 0)
-	if err := instance.Finalize(terms(50_000_000), commitment, late); err == nil {
+	if err := instance.Finalize(stubResolver{quote: finalizedQuote(terms("50000000")), found: true}, commitment, late); err == nil {
 		t.Fatal("a commitment was accepted after the mandate expired")
 	}
 	if instance.State() != StateExpired || instance.ActiveAgreement() {
@@ -349,8 +484,8 @@ func TestExpiryEndsTheExchange(t *testing.T) {
 	}
 
 	// Agreed terms expire on their own too.
-	second := start(t, nil)
-	if err := second.ReceiveProposal(terms(50_000_000), at(1)); err != nil {
+	second := start(t, testBudget(t, "1000000000"))
+	if err := second.ReceiveProposal(terms("50000000"), at(1)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
 	if err := second.AcceptIntent(at(2)); err != nil {
@@ -367,7 +502,7 @@ func TestExpiryEndsTheExchange(t *testing.T) {
 // Several conversations, each inside its own ceiling, must not together agree
 // to more than the owner has.
 func TestConcurrentNegotiationsShareOneBudget(t *testing.T) {
-	budget, err := NewBudget(usdt(150_000_000))
+	budget, err := OpenBudget(usdt("150000000"), &memoryLedger{})
 	if err != nil {
 		t.Fatalf("budget: %v", err)
 	}
@@ -381,7 +516,7 @@ func TestConcurrentNegotiationsShareOneBudget(t *testing.T) {
 	}
 
 	for _, instance := range []*Negotiation{first, second} {
-		if err := instance.ReceiveProposal(terms(100_000_000), at(1)); err != nil {
+		if err := instance.ReceiveProposal(terms("100000000"), at(1)); err != nil {
 			t.Fatalf("proposal: %v", err)
 		}
 	}
@@ -392,7 +527,7 @@ func TestConcurrentNegotiationsShareOneBudget(t *testing.T) {
 	if err := second.AcceptIntent(at(3)); err == nil {
 		t.Fatal("two negotiations together agreed beyond the owner's budget")
 	}
-	if remaining := budget.Remaining(); remaining.Units != 50_000_000 {
+	if remaining := left(t, budget); remaining.Atomic != "50000000" {
 		t.Fatalf("unexpected remaining budget: %v", remaining)
 	}
 
@@ -400,7 +535,7 @@ func TestConcurrentNegotiationsShareOneBudget(t *testing.T) {
 	if err := first.Withdraw("changed our mind"); err != nil {
 		t.Fatalf("withdraw: %v", err)
 	}
-	if remaining := budget.Remaining(); remaining.Units != 150_000_000 {
+	if remaining := left(t, budget); remaining.Atomic != "150000000" {
 		t.Fatalf("a withdrawn negotiation kept the budget: %v", remaining)
 	}
 	if err := second.AcceptIntent(at(4)); err != nil {
@@ -409,7 +544,7 @@ func TestConcurrentNegotiationsShareOneBudget(t *testing.T) {
 }
 
 func TestBudgetCommitsOnlyWhatWasHeld(t *testing.T) {
-	budget, err := NewBudget(usdt(150_000_000))
+	budget, err := OpenBudget(usdt("150000000"), &memoryLedger{})
 	if err != nil {
 		t.Fatalf("budget: %v", err)
 	}
@@ -417,7 +552,7 @@ func TestBudgetCommitsOnlyWhatWasHeld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	if err := instance.ReceiveProposal(terms(90_000_000), at(1)); err != nil {
+	if err := instance.ReceiveProposal(terms("90000000"), at(1)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
 	if err := instance.AcceptIntent(at(2)); err != nil {
@@ -426,22 +561,22 @@ func TestBudgetCommitsOnlyWhatWasHeld(t *testing.T) {
 	if err := instance.BeginCanonicalization(at(3)); err != nil {
 		t.Fatalf("canonicalise: %v", err)
 	}
-	if err := instance.Finalize(terms(90_000_000), commitment, at(4)); err != nil {
+	if err := instance.Finalize(stubResolver{quote: finalizedQuote(terms("90000000")), found: true}, commitment, at(4)); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
-	if spent := budget.Spent(); spent.Units != 90_000_000 {
+	if spent := budget.Spent(); spent.Atomic != "90000000" {
 		t.Fatalf("unexpected spend: %v", spent)
 	}
-	if remaining := budget.Remaining(); remaining.Units != 60_000_000 {
+	if remaining := left(t, budget); remaining.Atomic != "60000000" {
 		t.Fatalf("unexpected remaining: %v", remaining)
 	}
 	if err := budget.Commit("neg-1"); err == nil {
 		t.Fatal("a committed hold was committed twice")
 	}
-	if err := budget.Reserve("neg-2", usdt(70_000_000)); err == nil {
+	if err := budget.Reserve("neg-2", usdt("70000000")); err == nil {
 		t.Fatal("a reservation beyond what is left was accepted")
 	}
-	if err := budget.Reserve("neg-2", Amount{Asset: "TOS", Units: 1, Decimals: 6}); err == nil {
+	if err := budget.Reserve("neg-2", Money{Asset: Asset{Workchain: 0, AccountID: strings.Repeat("9", 64), MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("8", 64), WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("7", 64), Decimals: 6}, Atomic: "1"}); err == nil {
 		t.Fatal("a reservation in another asset was drawn on this budget")
 	}
 }
@@ -449,8 +584,8 @@ func TestBudgetCommitsOnlyWhatWasHeld(t *testing.T) {
 // A commitment digest stands on its own: verifying settlement never needs the
 // conversation that produced it.
 func TestCommitmentDoesNotDependOnTheConversation(t *testing.T) {
-	instance := start(t, nil)
-	if err := instance.ReceiveProposal(terms(50_000_000), at(1)); err != nil {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
 	if err := instance.AcceptIntent(at(2)); err != nil {
@@ -459,7 +594,7 @@ func TestCommitmentDoesNotDependOnTheConversation(t *testing.T) {
 	if err := instance.BeginCanonicalization(at(3)); err != nil {
 		t.Fatalf("canonicalise: %v", err)
 	}
-	if err := instance.Finalize(terms(50_000_000), commitment, at(4)); err != nil {
+	if err := instance.Finalize(stubResolver{quote: finalizedQuote(terms("50000000")), found: true}, commitment, at(4)); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 	digest, committed := instance.Committed()
@@ -480,8 +615,8 @@ func TestMandateMustBeUsable(t *testing.T) {
 		"no authority":       func(m *Mandate) { m.Authority = "" },
 		"conversation only":  func(m *Mandate) { m.Authority = AuthorityConverse },
 		"bad class":          func(m *Mandate) { m.CapabilityClass = "Software.Audit" },
-		"mixed assets":       func(m *Mandate) { m.ApprovalAbove = Amount{Asset: "TOS", Units: 1, Decimals: 6} },
-		"approval above cap": func(m *Mandate) { m.ApprovalAbove = usdt(130_000_000) },
+		"mixed assets":       func(m *Mandate) { m.ApprovalAbove = otherMoney("1") },
+		"approval above cap": func(m *Mandate) { m.ApprovalAbove = usdt("130000000") },
 		"no counteroffers":   func(m *Mandate) { m.MaxCounteroffers = 0 },
 		"endless":            func(m *Mandate) { m.ExpiresAtUnix = 0 },
 	}
@@ -494,7 +629,7 @@ func TestMandateMustBeUsable(t *testing.T) {
 				if err := mandate.Validate(); err != nil {
 					t.Fatalf("a conversation mandate was refused: %v", err)
 				}
-				if _, err := mandate.Permits(terms(1), at(1)); err == nil {
+				if _, err := mandate.Permits(terms("1"), at(1)); err == nil {
 					t.Fatal("a conversation mandate permitted terms")
 				}
 				return
@@ -507,24 +642,74 @@ func TestMandateMustBeUsable(t *testing.T) {
 }
 
 func TestAmountsAreExactAndTyped(t *testing.T) {
-	if usdt(1_500_000).String() != "1.5 USDT" {
-		t.Fatalf("unexpected rendering: %s", usdt(1_500_000).String())
+	// The rendering shows the amount and enough of the asset to tell two
+	// tokens apart. It is presentation, and nothing parses it back.
+	if rendered := usdt("1500000").String(); !strings.HasPrefix(rendered, "1.5 (") {
+		t.Fatalf("unexpected rendering: %s", rendered)
 	}
-	if _, err := usdt(1).AtMost(Amount{Asset: "TOS", Units: 1, Decimals: 6}); err == nil {
-		t.Fatal("amounts in different assets were compared")
+	if _, err := usdt("1").AtMost(otherMoney("1")); err == nil {
+		t.Fatal("amounts of different assets were compared")
 	}
-	if _, err := usdt(1).AtMost(Amount{Asset: "USDT", Units: 1, Decimals: 2}); err == nil {
+	// Same contract, different precision, is a different asset: a count of
+	// atomic units means nothing without the scale it is counted in.
+	shifted := testAsset()
+	shifted.Decimals = 2
+	if _, err := usdt("1").AtMost(Money{Asset: shifted, Atomic: "1"}); err == nil {
 		t.Fatal("amounts at different precisions were compared")
 	}
-	if _, err := (Amount{Asset: "USDT", Units: ^uint64(0), Decimals: 6}).Add(usdt(1)); err == nil {
-		t.Fatal("an overflowing sum wrapped instead of failing")
+
+	// The count is arbitrary precision, so an amount no fixed-width integer
+	// could hold is an ordinary amount here rather than an overflow.
+	huge := strings.Repeat("9", 40)
+	sum, err := (Money{Asset: testAsset(), Atomic: huge}).Add(usdt("1"))
+	if err != nil {
+		t.Fatalf("a large sum failed: %v", err)
 	}
-	for _, invalid := range []Amount{
-		{Asset: "", Units: 1}, {Asset: "usdt", Units: 1}, {Asset: "USDT", Units: 1, Decimals: MaxDecimals + 1},
+	if len(sum.Atomic) != 41 {
+		t.Fatalf("a large sum was truncated: %s", sum.Atomic)
+	}
+
+	for name, invalid := range map[string]Money{
+		"no asset":            {Atomic: "1"},
+		"non-canonical count": {Asset: testAsset(), Atomic: "007"},
+		"negative":            {Asset: testAsset(), Atomic: "-1"},
+		"unbounded":           {Asset: testAsset(), Atomic: strings.Repeat("9", MaxAtomicDigits+1)},
+		"empty count":         {Asset: testAsset()},
 	} {
 		if err := invalid.Validate(); err == nil {
-			t.Fatalf("expected %+v to be refused", invalid)
+			t.Fatalf("expected %q to be refused", name)
 		}
+	}
+	for name, invalid := range map[string]Asset{
+		"no account":     {MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64), WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64)},
+		"no master code": {AccountID: strings.Repeat("a", 64), WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64)},
+		"no wallet code": {AccountID: strings.Repeat("a", 64), MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64)},
+		"too precise": {AccountID: strings.Repeat("a", 64),
+			MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
+			WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64), Decimals: MaxDecimals + 1},
+	} {
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("expected asset %q to be refused", name)
+		}
+	}
+}
+
+// Two contracts may both call themselves USDT. What identifies an asset is the
+// contract, not the label, and there is no label to confuse.
+func TestAssetsAreIdentifiedByContract(t *testing.T) {
+	first := testAsset()
+	second := testAsset()
+	second.AccountID = strings.Repeat("9", 64)
+	if first.Same(second) {
+		t.Fatal("two different master contracts were treated as one asset")
+	}
+	wallet := testAsset()
+	wallet.WalletCodeHash = "tvm-cell-sha256:" + strings.Repeat("5", 64)
+	if first.Same(wallet) {
+		t.Fatal("two different wallet implementations were treated as one asset")
+	}
+	if _, err := first.Proto(); err != nil {
+		t.Fatalf("an asset could not be expressed in protocol form: %v", err)
 	}
 }
 
@@ -543,5 +728,187 @@ func TestNegotiationRefusesUnusableInput(t *testing.T) {
 	expired.ExpiresAtUnix = baseUnix
 	if _, err := New("neg-1", conversation, counterparty, expired, nil, at(0)); err == nil {
 		t.Fatal("a negotiation started under an expired mandate")
+	}
+}
+
+// The exact case an owner would never expect: they approve one number, the
+// counterparty sends another, and the Agent accepts again. The old approval
+// must not carry.
+func TestApprovalDoesNotSurviveAChangeOfTerms(t *testing.T) {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("110000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if err := instance.AcceptIntent(at(2)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if !instance.NeedsOwnerApproval() {
+		t.Fatal("terms above the approval point did not need the owner")
+	}
+	if err := instance.ApproveByOwner(approvedDigest(t, instance), at(3)); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// Continuing to bargain from an agreed state is refused outright: terms
+	// freeze when both parties say yes.
+	if err := instance.ReceiveProposal(terms("119000000"), at(4)); err == nil {
+		t.Fatal("an agreed negotiation silently returned to bargaining")
+	}
+	if err := instance.AcceptIntent(at(4)); err == nil {
+		t.Fatal("an agreed negotiation was accepted a second time")
+	}
+
+	// Reopening is explicit, and it takes the approval and the hold with it.
+	if err := instance.Reopen("the counterparty came back with a new price", at(4)); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if _, held := instance.Approval(); held {
+		t.Fatal("the owner's approval survived a reopening")
+	}
+	if err := instance.ReceiveProposal(terms("119000000"), at(5)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if err := instance.AcceptIntent(at(6)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := instance.BeginCanonicalization(at(7)); err == nil {
+		t.Fatal("the higher price proceeded on the earlier approval")
+	}
+}
+
+// An approval names the terms it was a decision about.
+func TestApprovalMustNameWhatWasApproved(t *testing.T) {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("110000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if err := instance.AcceptIntent(at(2)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	other, err := terms("119000000").Digest()
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	if err := instance.ApproveByOwner(other, at(3)); err == nil {
+		t.Fatal("an approval for other terms was accepted")
+	}
+	if err := instance.BeginCanonicalization(at(4)); err == nil {
+		t.Fatal("a negotiation proceeded with no approval at all")
+	}
+}
+
+// A commitment is not a string that looks like a digest.
+func TestFinalizeNeedsAQuoteThatExists(t *testing.T) {
+	prepare := func(t *testing.T) *Negotiation {
+		t.Helper()
+		instance := start(t, testBudget(t, "1000000000"))
+		if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+			t.Fatalf("proposal: %v", err)
+		}
+		if err := instance.AcceptIntent(at(2)); err != nil {
+			t.Fatalf("accept: %v", err)
+		}
+		if err := instance.BeginCanonicalization(at(3)); err != nil {
+			t.Fatalf("canonicalise: %v", err)
+		}
+		return instance
+	}
+
+	absent := prepare(t)
+	if err := absent.Finalize(stubResolver{}, commitment, at(4)); err == nil {
+		t.Fatal("a commitment nothing on chain backs was accepted")
+	}
+	if _, committed := absent.Committed(); committed {
+		t.Fatal("an unbacked commitment was reported as committed")
+	}
+
+	if err := prepare(t).Finalize(nil, commitment, at(4)); err == nil {
+		t.Fatal("a commitment was accepted with nothing to verify it against")
+	}
+
+	unfinalized := prepare(t)
+	quote := finalizedQuote(terms("50000000"))
+	quote.Reference.FinalizedCheckpoint = 0
+	if err := unfinalized.Finalize(stubResolver{quote: quote, found: true}, commitment, at(4)); err == nil {
+		t.Fatal("a quote that was never final was accepted")
+	}
+
+	mismatched := prepare(t)
+	other := finalizedQuote(terms("50000000"))
+	other.Commitment = "sha256:" + strings.Repeat("1", 64)
+	if err := mismatched.Finalize(stubResolver{quote: other, found: true}, commitment, at(4)); err == nil {
+		t.Fatal("a resolver returned another commitment and it was accepted")
+	}
+
+	good := prepare(t)
+	if err := good.Finalize(stubResolver{quote: finalizedQuote(terms("50000000")), found: true},
+		commitment, at(4)); err != nil {
+		t.Fatalf("a verified quote was refused: %v", err)
+	}
+	if _, committed := good.Committed(); !committed {
+		t.Fatal("a verified quote did not commit")
+	}
+	if _, held := good.Quote(); !held {
+		t.Fatal("the finalized quote was not kept")
+	}
+}
+
+// A mandate that may commit needs somewhere to commit against.
+func TestCommitAuthorityNeedsABudget(t *testing.T) {
+	if _, err := New("neg-1", conversation, counterparty, testMandate(), nil, at(0)); err == nil {
+		t.Fatal("a commit mandate was started with no budget")
+	}
+	converse := testMandate()
+	converse.Authority = AuthorityConverse
+	if _, err := New("neg-1", conversation, counterparty, converse, nil, at(0)); err != nil {
+		t.Fatalf("a conversation mandate needed a budget: %v", err)
+	}
+}
+
+// Reservations that lived only in memory would return to zero on a restart,
+// and several negotiations could commit against the same money again.
+func TestBudgetSurvivesARestart(t *testing.T) {
+	ledger := &memoryLedger{}
+	budget, err := OpenBudget(usdt("150000000"), ledger)
+	if err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	if err := budget.Reserve("neg-1", usdt("100000000")); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+
+	// The process ends here. Everything below is what comes back.
+	restored, err := OpenBudget(usdt("150000000"), ledger)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if held, found := restored.Reserved("neg-1"); !found || held.Atomic != "100000000" {
+		t.Fatalf("a reservation did not survive: %v %v", held, found)
+	}
+	if remaining := left(t, restored); remaining.Atomic != "50000000" {
+		t.Fatalf("the budget forgot what was held: %v", remaining)
+	}
+	if err := restored.Reserve("neg-2", usdt("100000000")); err == nil {
+		t.Fatal("a restart let the same money back a second commitment")
+	}
+
+	// A spend survives too.
+	if err := restored.Commit("neg-1"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	again, err := OpenBudget(usdt("150000000"), ledger)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if spent := again.Spent(); spent.Atomic != "100000000" {
+		t.Fatalf("a spend did not survive: %v", spent)
+	}
+
+	// Reopening with a different ceiling is refused rather than resolved.
+	if _, err := OpenBudget(usdt("200000000"), ledger); err == nil {
+		t.Fatal("a budget was reopened with a different total")
+	}
+	if _, err := OpenBudget(usdt("150000000"), nil); err == nil {
+		t.Fatal("a budget was opened with nowhere to survive")
 	}
 }

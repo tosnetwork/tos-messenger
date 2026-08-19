@@ -42,21 +42,25 @@ var ErrMandatesFull = errors.New("this installation holds as many mandates as it
 // the owner has to be able to read back what they authorised. A record only a
 // program can interpret is a permission nobody can review.
 type StoredMandate struct {
-	Schema           string `json:"schema"`
-	MandateID        string `json:"mandate_id"`
-	Objective        string `json:"objective"`
-	Authority        string `json:"authority"`
-	CapabilityClass  string `json:"capability_class"`
-	MaxTotalAsset    string `json:"max_total_asset"`
-	MaxTotalUnits    uint64 `json:"max_total_units"`
-	MaxTotalDecimals uint8  `json:"max_total_decimals"`
-	ApprovalAsset    string `json:"approval_above_asset"`
-	ApprovalUnits    uint64 `json:"approval_above_units"`
-	ApprovalDecimals uint8  `json:"approval_above_decimals"`
-	MaxCounteroffers uint32 `json:"max_counteroffers"`
-	ExpiresAtUnix    uint64 `json:"expires_at_unix"`
-	PlacedAtUnix     uint64 `json:"placed_at_unix"`
-	RevokedAtUnix    uint64 `json:"revoked_at_unix,omitempty"`
+	Schema          string `json:"schema"`
+	MandateID       string `json:"mandate_id"`
+	Objective       string `json:"objective"`
+	Authority       string `json:"authority"`
+	CapabilityClass string `json:"capability_class"`
+	// Asset names the asset the way the chain does. A ticker is a label; two
+	// contracts may both answer to one, and an authorisation that named its
+	// asset by ticker could be satisfied with a different token.
+	Workchain           int32  `json:"asset_workchain"`
+	AssetAccountID      string `json:"asset_master_account_id"`
+	AssetMasterCodeHash string `json:"asset_master_code_hash"`
+	AssetWalletCodeHash string `json:"asset_wallet_code_hash"`
+	AssetDecimals       uint32 `json:"asset_decimals"`
+	MaxTotalAtomic      string `json:"max_total_atomic"`
+	ApprovalAboveAtomic string `json:"approval_above_atomic"`
+	MaxCounteroffers    uint32 `json:"max_counteroffers"`
+	ExpiresAtUnix       uint64 `json:"expires_at_unix"`
+	PlacedAtUnix        uint64 `json:"placed_at_unix"`
+	RevokedAtUnix       uint64 `json:"revoked_at_unix,omitempty"`
 }
 
 // Live reports whether a mandate may still authorise anything.
@@ -79,12 +83,13 @@ func MandateID(mandate StoredMandate) (string, error) {
 	canon.Text(buffer, mandate.Objective)
 	canon.Text(buffer, mandate.Authority)
 	canon.Text(buffer, mandate.CapabilityClass)
-	canon.Text(buffer, mandate.MaxTotalAsset)
-	canon.Uint64(buffer, mandate.MaxTotalUnits)
-	buffer.WriteByte(mandate.MaxTotalDecimals)
-	canon.Text(buffer, mandate.ApprovalAsset)
-	canon.Uint64(buffer, mandate.ApprovalUnits)
-	buffer.WriteByte(mandate.ApprovalDecimals)
+	canon.Uint32(buffer, uint32(mandate.Workchain))
+	canon.Text(buffer, mandate.AssetAccountID)
+	canon.Text(buffer, mandate.AssetMasterCodeHash)
+	canon.Text(buffer, mandate.AssetWalletCodeHash)
+	canon.Uint32(buffer, mandate.AssetDecimals)
+	canon.Text(buffer, mandate.MaxTotalAtomic)
+	canon.Text(buffer, mandate.ApprovalAboveAtomic)
 	canon.Uint32(buffer, mandate.MaxCounteroffers)
 	canon.Uint64(buffer, mandate.ExpiresAtUnix)
 	digest := canon.Digest(buffer.Bytes())
@@ -280,9 +285,12 @@ func validateStoredMandate(mandate StoredMandate) error {
 	if mandate.CapabilityClass == "" || len(mandate.CapabilityClass) > 128 {
 		return errors.New("a mandate must name what may be bought")
 	}
-	if mandate.MaxTotalAsset == "" || len(mandate.MaxTotalAsset) > 32 ||
-		mandate.ApprovalAsset == "" || len(mandate.ApprovalAsset) > 32 {
-		return errors.New("a mandate must name its asset")
+	if mandate.AssetAccountID == "" || mandate.AssetMasterCodeHash == "" ||
+		mandate.AssetWalletCodeHash == "" {
+		return errors.New("a mandate must name its asset the way the chain does")
+	}
+	if mandate.MaxTotalAtomic == "" || mandate.ApprovalAboveAtomic == "" {
+		return errors.New("a mandate must name its ceiling and its approval point")
 	}
 	if mandate.ExpiresAtUnix == 0 {
 		return errors.New("a mandate must expire")

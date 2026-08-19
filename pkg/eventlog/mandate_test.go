@@ -9,10 +9,15 @@ import (
 func testMandate() StoredMandate {
 	return StoredMandate{
 		Objective: "buy transcription", Authority: "commit",
-		CapabilityClass: "transcription.audio",
-		MaxTotalAsset:   "TOS", MaxTotalUnits: 1000, MaxTotalDecimals: 2,
-		ApprovalAsset: "TOS", ApprovalUnits: 500, ApprovalDecimals: 2,
-		MaxCounteroffers: 4, ExpiresAtUnix: 1_800_086_400,
+		CapabilityClass:     "transcription.audio",
+		Workchain:           0,
+		AssetAccountID:      strings.Repeat("a", 64),
+		AssetMasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
+		AssetWalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
+		AssetDecimals:       2,
+		MaxTotalAtomic:      "1000",
+		ApprovalAboveAtomic: "500",
+		MaxCounteroffers:    4, ExpiresAtUnix: 1_800_086_400,
 	}
 }
 
@@ -24,7 +29,7 @@ func TestMandateIdentifierCommitsItsTerms(t *testing.T) {
 		t.Fatalf("identify: %v", err)
 	}
 	larger := testMandate()
-	larger.MaxTotalUnits = 9000
+	larger.MaxTotalAtomic = "9000"
 	second, err := MandateID(larger)
 	if err != nil {
 		t.Fatalf("identify: %v", err)
@@ -98,11 +103,13 @@ func TestMandateInputsAreValidated(t *testing.T) {
 	journal := approvalJournal(t)
 	now := time.Unix(1_800_000_060, 0)
 	cases := map[string]func(*StoredMandate){
-		"no objective": func(m *StoredMandate) { m.Objective = "" },
-		"no authority": func(m *StoredMandate) { m.Authority = "" },
-		"no class":     func(m *StoredMandate) { m.CapabilityClass = "" },
-		"no asset":     func(m *StoredMandate) { m.MaxTotalAsset = "" },
-		"no expiry":    func(m *StoredMandate) { m.ExpiresAtUnix = 0 },
+		"no objective":   func(m *StoredMandate) { m.Objective = "" },
+		"no authority":   func(m *StoredMandate) { m.Authority = "" },
+		"no class":       func(m *StoredMandate) { m.CapabilityClass = "" },
+		"no asset":       func(m *StoredMandate) { m.AssetAccountID = "" },
+		"no wallet code": func(m *StoredMandate) { m.AssetWalletCodeHash = "" },
+		"no ceiling":     func(m *StoredMandate) { m.MaxTotalAtomic = "" },
+		"no expiry":      func(m *StoredMandate) { m.ExpiresAtUnix = 0 },
 		"long objective": func(m *StoredMandate) {
 			m.Objective = strings.Repeat("x", MaxApprovalSummaryBytes+1)
 		},

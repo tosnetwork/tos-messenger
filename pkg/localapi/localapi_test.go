@@ -798,15 +798,29 @@ func sendAttempt(t *testing.T, h *harness, eventID string, seed byte) string {
 	return id
 }
 
+func testAssetIdentity() AssetIdentity {
+	return AssetIdentity{
+		Workchain:      0,
+		AccountID:      strings.Repeat("a", 64),
+		MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
+		WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
+		Decimals:       2,
+	}
+}
+
 func testPurchase(units uint64) *PurchaseTerms {
 	return &PurchaseTerms{
-		CapabilityID:      "cap_" + strings.Repeat("9", 64),
-		CapabilityVersion: "1.0.0",
-		CapabilityClass:   "transcription.audio",
-		Asset:             "TOS",
-		Units:             units,
-		Decimals:          2,
-		NotAfterUnix:      baseUnix + 600,
+		CapabilityID:           "cap_" + strings.Repeat("9", 64),
+		CapabilityVersion:      "1.0.0",
+		CapabilityClass:        "transcription.audio",
+		ProviderAgentID:        senderID,
+		ManifestDigest:         "sha256:" + strings.Repeat("4", 64),
+		TransportBindingDigest: "sha256:" + strings.Repeat("5", 64),
+		Asset:                  testAssetIdentity(),
+		PriceAtomic:            strconv.FormatUint(units, 10),
+		EscrowTermsDigest:      "sha256:" + strings.Repeat("6", 64),
+		DisputePolicyDigest:    "sha256:" + strings.Repeat("7", 64),
+		NotAfterUnix:           baseUnix + 600,
 	}
 }
 
@@ -815,8 +829,8 @@ func (h *harness) placeMandate(t *testing.T) string {
 	t.Helper()
 	placed := h.owner(t, Request{Op: OpPlaceMandate, Mandate: &MandateTerms{
 		Objective: "buy transcription", Authority: "commit",
-		CapabilityClass: "transcription.audio", Asset: "TOS", Decimals: 2,
-		MaxTotalUnits: 1000, ApprovalAbove: 500, MaxCounteroffers: 4,
+		CapabilityClass: "transcription.audio", Asset: testAssetIdentity(),
+		MaxTotalAtomic: "1000", ApprovalAboveAtomic: "500", MaxCounteroffers: 4,
 		ExpiresAtUnix: baseUnix + 86_400,
 	}})
 	if !placed.OK || placed.MandateID == "" {
@@ -1028,7 +1042,7 @@ func TestOnlyTheOwnerWritesMandates(t *testing.T) {
 	writes := []Request{
 		{Op: OpPlaceMandate, Mandate: &MandateTerms{
 			Objective: "spend freely", Authority: "commit", CapabilityClass: "anything",
-			Asset: "TOS", Decimals: 2, MaxTotalUnits: 1, ApprovalAbove: 1,
+			Asset: testAssetIdentity(), MaxTotalAtomic: "1", ApprovalAboveAtomic: "1",
 			MaxCounteroffers: 1, ExpiresAtUnix: baseUnix + 10,
 		}},
 		{Op: OpRevokeMandate, MandateID: "mdt_" + strings.Repeat("a", 64)},

@@ -204,44 +204,68 @@ type Request struct {
 	MandateID string `json:"mandate_id,omitempty"`
 }
 
+// AssetIdentity names an asset the way the chain does.
+//
+// A ticker is not carried, because a ticker is not an identity: two contracts
+// may both call themselves USDT, and an authorisation that named one by ticker
+// could be satisfied with the other.
+type AssetIdentity struct {
+	Workchain      int32  `json:"workchain"`
+	AccountID      string `json:"master_account_id"`
+	MasterCodeHash string `json:"master_code_hash"`
+	WalletCodeHash string `json:"wallet_code_hash"`
+	Decimals       uint32 `json:"decimals"`
+}
+
 // MandateTerms is what an owner authorises in advance.
 type MandateTerms struct {
-	Objective        string `json:"objective"`
-	Authority        string `json:"authority"`
-	CapabilityClass  string `json:"capability_class"`
-	Asset            string `json:"asset"`
-	Decimals         uint8  `json:"decimals"`
-	MaxTotalUnits    uint64 `json:"max_total_units"`
-	ApprovalAbove    uint64 `json:"approval_above_units"`
-	MaxCounteroffers uint32 `json:"max_counteroffers"`
-	ExpiresAtUnix    uint64 `json:"expires_at_unix"`
+	Objective       string        `json:"objective"`
+	Authority       string        `json:"authority"`
+	CapabilityClass string        `json:"capability_class"`
+	Asset           AssetIdentity `json:"asset"`
+	// MaxTotalAtomic and ApprovalAboveAtomic are counts of atomic units as
+	// canonical decimal strings, which is what the chain carries. A fixed-width
+	// integer cannot express eighteen decimal places of an ordinary token.
+	MaxTotalAtomic      string `json:"max_total_atomic"`
+	ApprovalAboveAtomic string `json:"approval_above_atomic"`
+	MaxCounteroffers    uint32 `json:"max_counteroffers"`
+	ExpiresAtUnix       uint64 `json:"expires_at_unix"`
 }
 
 // PurchaseTerms is the exact purchase a proposed spend would commit to.
+//
+// It carries every field a canonical Quote Proposal carries. Terms that named
+// only the capability and the price would let the canonical form differ from
+// what was approved in provider, manifest, escrow conditions, dispute policy
+// or transport binding -- each of which changes what was bought while the
+// number stays the same.
 type PurchaseTerms struct {
-	CapabilityID      string `json:"capability_id"`
-	CapabilityVersion string `json:"capability_version"`
-	CapabilityClass   string `json:"capability_class"`
-	Asset             string `json:"asset"`
-	Units             uint64 `json:"units"`
-	Decimals          uint8  `json:"decimals"`
-	NotAfterUnix      uint64 `json:"not_after_unix"`
+	CapabilityID           string        `json:"capability_id"`
+	CapabilityVersion      string        `json:"capability_version"`
+	CapabilityClass        string        `json:"capability_class"`
+	ProviderAgentID        string        `json:"provider_agent_id"`
+	ManifestDigest         string        `json:"manifest_digest"`
+	TransportBindingDigest string        `json:"transport_binding_digest"`
+	Asset                  AssetIdentity `json:"asset"`
+	PriceAtomic            string        `json:"price_atomic"`
+	EscrowTermsDigest      string        `json:"escrow_terms_digest"`
+	DisputePolicyDigest    string        `json:"dispute_policy_digest"`
+	NotAfterUnix           uint64        `json:"not_after_unix"`
 }
 
 // HeldMandate is one standing authorisation as it is read back.
 type HeldMandate struct {
-	MandateID        string `json:"mandate_id"`
-	Objective        string `json:"objective"`
-	Authority        string `json:"authority"`
-	CapabilityClass  string `json:"capability_class"`
-	Asset            string `json:"asset"`
-	Decimals         uint8  `json:"decimals"`
-	MaxTotalUnits    uint64 `json:"max_total_units"`
-	ApprovalAbove    uint64 `json:"approval_above_units"`
-	MaxCounteroffers uint32 `json:"max_counteroffers"`
-	ExpiresAtUnix    uint64 `json:"expires_at_unix"`
-	PlacedAtUnix     uint64 `json:"placed_at_unix"`
-	RevokedAtUnix    uint64 `json:"revoked_at_unix,omitempty"`
+	MandateID           string        `json:"mandate_id"`
+	Objective           string        `json:"objective"`
+	Authority           string        `json:"authority"`
+	CapabilityClass     string        `json:"capability_class"`
+	Asset               AssetIdentity `json:"asset"`
+	MaxTotalAtomic      string        `json:"max_total_atomic"`
+	ApprovalAboveAtomic string        `json:"approval_above_atomic"`
+	MaxCounteroffers    uint32        `json:"max_counteroffers"`
+	ExpiresAtUnix       uint64        `json:"expires_at_unix"`
+	PlacedAtUnix        uint64        `json:"placed_at_unix"`
+	RevokedAtUnix       uint64        `json:"revoked_at_unix,omitempty"`
 }
 
 // ProposedAction is what a runtime says it intends to do.

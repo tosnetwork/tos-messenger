@@ -339,14 +339,16 @@ func ActionID(action Action) (string, error) {
 	}
 	// The terms are committed, so an approval for one price cannot be spent on
 	// another. A spend with no terms never reaches here: it fails validation.
+	// The terms are committed through their own digest, so every field a
+	// canonical quote carries is part of the action's identity: an approval
+	// for one purchase cannot be spent on another that differs in provider,
+	// manifest, escrow terms, or price.
 	if action.Terms != nil {
-		canon.Text(buffer, action.Terms.CapabilityID)
-		canon.Text(buffer, action.Terms.CapabilityVersion)
-		canon.Text(buffer, action.Terms.CapabilityClass)
-		canon.Text(buffer, action.Terms.Total.Asset)
-		canon.Uint64(buffer, action.Terms.Total.Units)
-		buffer.WriteByte(action.Terms.Total.Decimals)
-		canon.Uint64(buffer, action.Terms.NotAfterUnix)
+		digest, err := action.Terms.Digest()
+		if err != nil {
+			return "", err
+		}
+		canon.Text(buffer, digest)
 	}
 	digest := canon.Digest(buffer.Bytes())
 	return "act_" + digest[len("sha256:"):], nil

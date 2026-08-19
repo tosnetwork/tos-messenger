@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -163,8 +164,8 @@ func testMandate() negotiation.Mandate {
 		Objective:        "buy transcription",
 		Authority:        negotiation.AuthorityCommit,
 		CapabilityClass:  "transcription.audio",
-		MaxTotal:         negotiation.Amount{Asset: "TOS", Units: 1000, Decimals: 2},
-		ApprovalAbove:    negotiation.Amount{Asset: "TOS", Units: 500, Decimals: 2},
+		MaxTotal:         negotiation.Money{Asset: testAsset(), Atomic: "1000"},
+		ApprovalAbove:    negotiation.Money{Asset: testAsset(), Atomic: "500"},
 		MaxCounteroffers: 4,
 		ExpiresAtUnix:    baseUnix + 3600,
 	}
@@ -172,11 +173,28 @@ func testMandate() negotiation.Mandate {
 
 func testTerms(units uint64) negotiation.Terms {
 	return negotiation.Terms{
-		CapabilityID:      "cap_" + strings.Repeat("2", 64),
-		CapabilityVersion: "1.0.0",
-		CapabilityClass:   "transcription.audio",
-		Total:             negotiation.Amount{Asset: "TOS", Units: units, Decimals: 2},
-		NotAfterUnix:      baseUnix + 600,
+		CapabilityID:           "cap_" + strings.Repeat("2", 64),
+		CapabilityVersion:      "1.0.0",
+		CapabilityClass:        "transcription.audio",
+		ProviderAgentID:        "agent_" + strings.Repeat("3", 64),
+		ManifestDigest:         "sha256:" + strings.Repeat("4", 64),
+		TransportBindingDigest: "sha256:" + strings.Repeat("5", 64),
+		Price:                  negotiation.Money{Asset: testAsset(), Atomic: strconv.FormatUint(units, 10)},
+		EscrowTermsDigest:      "sha256:" + strings.Repeat("6", 64),
+		DisputePolicyDigest:    "sha256:" + strings.Repeat("7", 64),
+		NotAfterUnix:           baseUnix + 600,
+	}
+}
+
+// testAsset identifies an asset the way the chain does: by contract, not by
+// ticker.
+func testAsset() negotiation.Asset {
+	return negotiation.Asset{
+		Workchain:      0,
+		AccountID:      strings.Repeat("a", 64),
+		MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
+		WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
+		Decimals:       6,
 	}
 }
 
@@ -261,7 +279,7 @@ func TestExpiredMandateGoesToTheOwner(t *testing.T) {
 // Where the number and the words disagree, both are returned and neither is
 // chosen. Picking the text would make prose authoritative through a side door.
 func TestAmountRenderingDisagreementIsSurfacedNotResolved(t *testing.T) {
-	amount := negotiation.Amount{Asset: "TOS", Units: 250, Decimals: 2}
+	amount := negotiation.Money{Asset: testAsset(), Atomic: "250"}
 	agreeing, err := CheckAmountRendering(amount, "the price is "+amount.String()+" total")
 	if err != nil {
 		t.Fatalf("check: %v", err)

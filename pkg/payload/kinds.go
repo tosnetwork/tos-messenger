@@ -323,23 +323,41 @@ func encodeTerms(buffer *bytes.Buffer, terms negotiation.Terms) {
 	canon.Text(buffer, terms.CapabilityID)
 	canon.Text(buffer, terms.CapabilityVersion)
 	canon.Text(buffer, terms.CapabilityClass)
-	canon.Text(buffer, terms.Total.Asset)
-	canon.Uint64(buffer, terms.Total.Units)
-	buffer.WriteByte(terms.Total.Decimals)
+	canon.Text(buffer, terms.ProviderAgentID)
+	canon.Text(buffer, terms.ManifestDigest)
+	canon.Text(buffer, terms.TransportBindingDigest)
+	canon.Uint32(buffer, uint32(terms.Price.Asset.Workchain))
+	canon.Text(buffer, terms.Price.Asset.AccountID)
+	canon.Text(buffer, terms.Price.Asset.MasterCodeHash)
+	canon.Text(buffer, terms.Price.Asset.WalletCodeHash)
+	canon.Uint32(buffer, terms.Price.Asset.Decimals)
+	canon.Text(buffer, terms.Price.Atomic)
+	canon.Text(buffer, terms.EscrowTermsDigest)
+	canon.Text(buffer, terms.DisputePolicyDigest)
 	canon.Uint64(buffer, terms.NotAfterUnix)
 }
 
 func decodeTerms(reader *canon.Reader) negotiation.Terms {
 	return negotiation.Terms{
-		CapabilityID:      reader.Text(MaxShortTextBytes),
-		CapabilityVersion: reader.Text(MaxShortTextBytes),
-		CapabilityClass:   reader.Text(MaxShortTextBytes),
-		Total: negotiation.Amount{
-			Asset:    reader.Text(MaxShortTextBytes),
-			Units:    reader.Uint64(),
-			Decimals: reader.Uint8(),
+		CapabilityID:           reader.Text(MaxShortTextBytes),
+		CapabilityVersion:      reader.Text(MaxShortTextBytes),
+		CapabilityClass:        reader.Text(MaxShortTextBytes),
+		ProviderAgentID:        reader.Text(MaxShortTextBytes),
+		ManifestDigest:         reader.Text(MaxDigestBytes),
+		TransportBindingDigest: reader.Text(MaxDigestBytes),
+		Price: negotiation.Money{
+			Asset: negotiation.Asset{
+				Workchain:      int32(reader.Uint32()),
+				AccountID:      reader.Text(MaxShortTextBytes),
+				MasterCodeHash: reader.Text(MaxDigestBytes),
+				WalletCodeHash: reader.Text(MaxDigestBytes),
+				Decimals:       reader.Uint32(),
+			},
+			Atomic: reader.Text(MaxShortTextBytes),
 		},
-		NotAfterUnix: reader.Uint64(),
+		EscrowTermsDigest:   reader.Text(MaxDigestBytes),
+		DisputePolicyDigest: reader.Text(MaxDigestBytes),
+		NotAfterUnix:        reader.Uint64(),
 	}
 }
 

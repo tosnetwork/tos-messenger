@@ -92,11 +92,25 @@ func sample(kind string) Payload {
 
 func sampleTerms() negotiation.Terms {
 	return negotiation.Terms{
-		CapabilityID:      "cap_" + strings.Repeat("2", 64),
-		CapabilityVersion: "1.0.0",
-		CapabilityClass:   "transcription.audio",
-		Total:             negotiation.Amount{Asset: "TOS", Units: 250, Decimals: 2},
-		NotAfterUnix:      1_800_000_000,
+		CapabilityID:           "cap_" + strings.Repeat("2", 64),
+		CapabilityVersion:      "1.0.0",
+		CapabilityClass:        "transcription.audio",
+		ProviderAgentID:        "agent_" + strings.Repeat("3", 64),
+		ManifestDigest:         "sha256:" + strings.Repeat("4", 64),
+		TransportBindingDigest: "sha256:" + strings.Repeat("5", 64),
+		Price: negotiation.Money{
+			Asset: negotiation.Asset{
+				Workchain:      0,
+				AccountID:      strings.Repeat("a", 64),
+				MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
+				WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
+				Decimals:       2,
+			},
+			Atomic: "250",
+		},
+		EscrowTermsDigest:   "sha256:" + strings.Repeat("6", 64),
+		DisputePolicyDigest: "sha256:" + strings.Repeat("7", 64),
+		NotAfterUnix:        1_800_000_000,
 	}
 }
 

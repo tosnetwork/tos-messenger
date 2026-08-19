@@ -4,7 +4,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 )
 
@@ -48,22 +47,39 @@ type Negotiation struct {
 	Mandate             Mandate
 
 	state         State
+	generation    uint64
 	counteroffers uint32
 	onTable       *Terms
 	agreed        *Terms
 	needsApproval bool
-	ownerApproved bool
-	commitment    string
-	failure       string
-	budget        *Budget
+	// approval is the owner's decision, bound to exactly what they saw. A
+	// boolean would survive a change of terms, and the change a counterparty
+	// makes right after an approval is the one they have the most reason to
+	// make.
+	approval   *Approval
+	commitment string
+	quote      *VerifiedAcceptedQuote
+	failure    string
+	budget     *Budget
 }
 
-// New starts a negotiation under a live mandate.
-// New starts a negotiation drawing on an owner budget.
+// Approval is an owner decision bound to what it was a decision about.
+type Approval struct {
+	// TermsDigest is what the owner approved.
+	TermsDigest string
+	// Generation is the version of the negotiation they approved it at, so an
+	// approval cannot survive a reopening.
+	Generation uint64
+	// MandateDigest ties the approval to the authority it was given under.
+	MandateDigest string
+	AtUnix        uint64
+}
+
+// New starts a negotiation under a live mandate, drawing on an owner budget.
 //
-// The budget may be nil for an exchange that spends nothing, and must not be
-// nil for one that does: several conversations each inside their own ceiling
-// can still agree to more than the owner has.
+// A mandate that may commit needs a budget. Without one, several conversations
+// each inside their own ceiling can agree to more than the owner has, and the
+// shortfall only appears once every yes already exists.
 func New(id, conversationID, counterpartyAgentID string, mandate Mandate, budget *Budget, now time.Time) (*Negotiation, error) {
 	if !ids.Conversation.MatchString(conversationID) {
 		return nil, errors.New("invalid conversation identifier")
@@ -76,6 +92,9 @@ func New(id, conversationID, counterpartyAgentID string, mandate Mandate, budget
 	}
 	if err := mandate.Live(now); err != nil {
 		return nil, err
+	}
+	if mandate.Authority == AuthorityCommit && budget == nil {
+		return nil, errors.New("a mandate that may commit needs a budget to commit against")
 	}
 	return &Negotiation{
 		ID: id, ConversationID: conversationID, CounterpartyAgentID: counterpartyAgentID,
@@ -106,8 +125,10 @@ func (n *Negotiation) Agreed() (Terms, bool) {
 
 // Committed reports whether a canonical commitment exists.
 //
-// This is the only method whose answer means value can move. Every other
-// signal in this package describes a conversation.
+// This is the only method whose answer means value can move, and it means it
+// because Finalize read the quote out of finalized state rather than being
+// handed a digest. Every other signal in this package describes a
+// conversation.
 func (n *Negotiation) Committed() (string, bool) {
 	if n.state != StateFinalized || n.commitment == "" {
 		return "", false
@@ -179,7 +200,7 @@ func (n *Negotiation) AcceptIntent(now time.Time) error {
 	// would let several conversations each say yes inside their own ceiling
 	// and discover the shortfall only once the yeses already exist.
 	if n.budget != nil {
-		if err := n.budget.Reserve(n.ID, n.onTable.Total); err != nil {
+		if err := n.budget.Reserve(n.ID, n.onTable.Price); err != nil {
 			return err
 		}
 	}
@@ -188,6 +209,48 @@ func (n *Negotiation) AcceptIntent(now time.Time) error {
 	n.needsApproval = needsApproval
 	n.state = StateIntentAgreed
 	return nil
+}
+
+// Reopen returns an agreed negotiation to discussion.
+//
+// It is explicit, and it is the only way back. Terms freeze when both parties
+// say yes, and continuing to bargain from that state without saying so would
+// carry the owner's approval and the budget hold across a change they never
+// saw. Reopening releases the hold, clears the approval, and moves the
+// generation on, so anything bound to the old terms no longer matches.
+func (n *Negotiation) Reopen(reason string, now time.Time) error {
+	if n.state != StateIntentAgreed {
+		return errors.New("only an agreed intent can be reopened")
+	}
+	if err := n.Mandate.Live(now); err != nil {
+		return err
+	}
+	if reason == "" || len(reason) > 512 {
+		return errors.New("reopening must say why")
+	}
+	if n.budget != nil {
+		if err := n.budget.Release(n.ID); err != nil {
+			return err
+		}
+	}
+	n.agreed = nil
+	n.needsApproval = false
+	n.approval = nil
+	n.generation++
+	n.state = StateDiscussing
+	return nil
+}
+
+// Generation is how many times this negotiation has been reopened. It is what
+// an owner approval is bound to alongside the terms.
+func (n *Negotiation) Generation() uint64 { return n.generation }
+
+// Approval returns the owner's decision, if one stands.
+func (n *Negotiation) Approval() (Approval, bool) {
+	if n.approval == nil {
+		return Approval{}, false
+	}
+	return *n.approval, true
 }
 
 // RejectIntent ends the exchange without agreement.
@@ -214,7 +277,12 @@ func (n *Negotiation) Withdraw(reason string) error {
 // a counterparty can supply: the event kinds that carry an owner decision are
 // refused on every network route, so this can only be reached through the
 // owner's own local interface.
-func (n *Negotiation) ApproveByOwner(now time.Time) error {
+// ApproveByOwner takes the digest of the terms the owner was shown. It is not
+// a confirmation that something was approved; it is a statement of what was.
+// An approval that named only the negotiation could be carried across a change
+// of terms, and a counterparty who wanted one number approved and another
+// committed would only have to send the second one afterwards.
+func (n *Negotiation) ApproveByOwner(termsDigest string, now time.Time) error {
 	if n.state != StateIntentAgreed {
 		return errors.New("there is no agreed intent to approve")
 	}
@@ -224,7 +292,24 @@ func (n *Negotiation) ApproveByOwner(now time.Time) error {
 	if !n.needsApproval {
 		return errors.New("these terms are inside what the owner already permitted")
 	}
-	n.ownerApproved = true
+	if n.agreed == nil {
+		return errors.New("there are no agreed terms to approve")
+	}
+	current, err := n.agreed.Digest()
+	if err != nil {
+		return err
+	}
+	if termsDigest != current {
+		return errors.New("the owner approved terms other than the ones on the table")
+	}
+	mandateDigest, err := n.Mandate.Digest()
+	if err != nil {
+		return err
+	}
+	n.approval = &Approval{
+		TermsDigest: current, Generation: n.generation,
+		MandateDigest: mandateDigest, AtUnix: uint64(now.Unix()),
+	}
 	return nil
 }
 
@@ -245,49 +330,41 @@ func (n *Negotiation) BeginCanonicalization(now time.Time) error {
 	if err := n.Mandate.Live(now); err != nil {
 		return err
 	}
-	if n.needsApproval && !n.ownerApproved {
-		return errors.New("these terms need the owner's decision first")
+	if n.needsApproval {
+		if err := n.approvalStands(); err != nil {
+			return err
+		}
 	}
 	n.state = StateCanonicalizationPending
 	return nil
 }
 
-// Finalize records a canonical commitment.
-//
-// The canonical terms must reproduce what was agreed in every field. If they
-// do not, the negotiation ends rejected rather than finalising on whichever
-// version arrived last: a conversation that agreed twelve and a commitment
-// that says a hundred and twenty is not a rounding difference to reconcile.
-func (n *Negotiation) Finalize(canonical Terms, commitment string, now time.Time) error {
-	if n.state != StateCanonicalizationPending {
-		return errors.New("nothing is being canonicalised")
+// approvalStands checks that the owner's decision still describes this
+// negotiation. Anything that changed since they made it invalidates it.
+func (n *Negotiation) approvalStands() error {
+	if n.approval == nil {
+		return errors.New("these terms need the owner's decision first")
 	}
-	if err := n.Mandate.Live(now); err != nil {
-		n.end(StateExpired, "the mandate expired before the commitment existed")
+	if n.agreed == nil {
+		return errors.New("there are no agreed terms to act on")
+	}
+	current, err := n.agreed.Digest()
+	if err != nil {
 		return err
 	}
-	if !canon.ValidDigest(commitment) {
-		return errors.New("invalid commitment digest")
+	if n.approval.TermsDigest != current {
+		return errors.New("the terms changed after the owner approved them")
 	}
-	if err := canonical.Validate(); err != nil {
+	if n.approval.Generation != n.generation {
+		return errors.New("this negotiation was reopened after the owner approved it")
+	}
+	mandateDigest, err := n.Mandate.Digest()
+	if err != nil {
 		return err
 	}
-	if n.agreed == nil || !n.agreed.Equal(canonical) {
-		n.end(StateRejected, "the canonical terms do not match what was agreed")
-		return errors.New("the canonical terms do not match what was agreed")
+	if n.approval.MandateDigest != mandateDigest {
+		return errors.New("the mandate changed after the owner approved these terms")
 	}
-	if _, err := n.Mandate.Permits(canonical, now); err != nil {
-		n.end(StateRejected, "the canonical terms fall outside the mandate")
-		return err
-	}
-	if n.budget != nil {
-		if err := n.budget.Commit(n.ID); err != nil {
-			n.end(StateRejected, "the owner's budget could not cover the commitment")
-			return err
-		}
-	}
-	n.commitment = commitment
-	n.state = StateFinalized
 	return nil
 }
 
@@ -323,6 +400,12 @@ func (n *Negotiation) open(now time.Time) error {
 	}
 	if n.state == StateCanonicalizationPending {
 		return errors.New("this negotiation is being canonicalised")
+	}
+	// Terms freeze when both parties say yes. Bargaining on from that state
+	// would carry the owner's approval and the budget hold across a change
+	// they never saw, so it takes an explicit Reopen, which drops both.
+	if n.state == StateIntentAgreed {
+		return errors.New("these terms are agreed; reopen the negotiation to change them")
 	}
 	return n.Mandate.Live(now)
 }

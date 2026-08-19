@@ -81,7 +81,7 @@ type AmountRendering struct {
 // neither is authoritative. Letting the caller pick the text would make the
 // prose authoritative through a side door; letting it silently pick the number
 // would hide that the message said something else to the person reading it.
-func CheckAmountRendering(amount negotiation.Amount, rendering string) (AmountRendering, error) {
+func CheckAmountRendering(amount negotiation.Money, rendering string) (AmountRendering, error) {
 	if err := amount.Validate(); err != nil {
 		return AmountRendering{}, err
 	}
