@@ -58,6 +58,12 @@ than silently forking two implementations.
 | Queue without send | a dispatcher may have a journal and no transport, which is the state this project is in; the sending half is all or nothing | `dispatch.New`, `dispatch.ErrNoTransport` |
 | Outbound expiry | applied on a schedule rather than only on an attempt, or an install with no transport would accumulate records that never sweep and never prune | `eventlog.ExpireDeliveries` |
 | Unknown configuration keys | refused, because a misspelled setting that is dropped is one an operator believes is in force | `daemon.DecodeConfig` |
+| Money representation | integer units and a decimal exponent, never a float; amounts in different assets or precisions are refused rather than compared | `negotiation.Amount` |
+| Authority separation | conversation, proposal, and commit are set by the owner before the exchange and cannot be climbed by arguing | `negotiation.Authority` |
+| Intent boundary | every field a commitment needs must be present in the candidate; nothing is inferred, including the asset, which would otherwise come from the budget | `negotiation.Compile` |
+| Rendering conflict | a named error so a client can display the disagreement, because resolving it in favour of either side is what makes text authoritative | `negotiation.ErrRenderingConflict` |
+| Agreement versus commitment | agreeing in conversation creates nothing; only canonical terms matching the agreed terms in every field finalise, and a mismatch ends the exchange | `negotiation.Finalize` |
+| Shared budget | held at the moment of agreement rather than the moment money moves, so several conversations each inside their own ceiling cannot together exceed the owner's total | `negotiation.Budget` |
 | Decision record contents | event identifier, outcome, code, route, class, and a salted per-install sender reference; no Agent, endpoint, conversation, or device identifier | `admission.Record` |
 | Inbox policy interface | the mechanism is fixed and always consulted; what an unknown sender must present is not | `admission.ContactPolicy` |
 | Study acceptance policy | content-addressed, and required to cover NAT, consumer ISP, carrier-grade NAT, mobile, two address families, two UDP-policy environments, a low-cost class, and a mobile endpoint | `reachability.Policy.Validate` |

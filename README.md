@@ -33,6 +33,7 @@ decision:
 | `pkg/dispatch` | The outbound half: seal once, send, and apply the retry disposition of whatever came back |
 | `pkg/localapi` | The owner-private socket an Agent runtime drives, and the only place an owner approval exists |
 | `pkg/daemon` | Assembly: one state directory, one socket, one schedule |
+| `pkg/negotiation` | The layer between what an Agent says and what the system may do: mandates, exact amounts, the intent boundary, and the negotiation state machine |
 | `pkg/e2ee` | The contract a candidate encryption suite must satisfy as a pure state transition, message bindings, and published prekey bundles |
 | `pkg/e2ee/conformance` | Refutes a candidate suite: ten properties a black-box run can disprove |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
@@ -91,6 +92,12 @@ Deliberately absent, with the reason:
 - An installation with no transport queues durably and says so. It does not
   seal for a route that does not exist, and it does not read as one that is
   delivering.
+- Natural language communicates meaning and moves nothing. Agreeing in
+  conversation is not a Quote, a Quote is not funded escrow, and the only
+  signal that means value can move is a canonical commitment.
+- Where a structured amount and its rendering disagree, both are shown and
+  neither is chosen. Letting a model pick would make the text authoritative
+  through a side door.
 - Evidence is judged against thresholds that were fixed before it was
   collected, and a study that misses its own minimums produces no decision.
 - A conformance run can only refute. Passing every check clears a floor; it
