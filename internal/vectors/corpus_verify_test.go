@@ -32,13 +32,46 @@ import (
 // bundle is neither unissued nor expired when the binding is checked.
 func verifyNow() time.Time { return time.Unix(int64(baseUnix)+10, 0) }
 
+// inPolicyCoordinatorKey signs attestations a trial policy predeclares; the
+// baseline trial uses it, so a foreign-coordinator mutation is refused for the
+// coordinator alone and not for a broken attestation.
+func inPolicyCoordinatorKey() ed25519.PrivateKey {
+	return ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+}
+
+// foreignCoordinatorKey signs a self-consistent attestation from a coordinator
+// no policy predeclared.
+func foreignCoordinatorKey() ed25519.PrivateKey {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = 0x07
+	}
+	return ed25519.NewKeyFromSeed(seed)
+}
+
+// trialPolicy predeclares exactly the in-policy coordinator, which is all
+// VerifyTrial reads from a policy.
+func trialPolicy(t *testing.T) reachability.Policy {
+	t.Helper()
+	public, ok := inPolicyCoordinatorKey().Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected public key type")
+	}
+	id, err := reachability.CoordinatorID(public)
+	if err != nil {
+		t.Fatalf("coordinator id: %v", err)
+	}
+	return reachability.Policy{Coordinators: []string{id}}
+}
+
 // buildVerifiers returns the verify-layer checks, each closing over the fixed
-// context (a delegation, the current instant) a second implementation would
-// supply from its own state.
+// context (a delegation, a trial policy, the current instant) a second
+// implementation would supply from its own state.
 func buildVerifiers(t *testing.T) map[string]func([]byte) error {
 	t.Helper()
 	del := delegation(t)
 	now := verifyNow()
+	policy := trialPolicy(t)
 	return map[string]func([]byte) error{
 		"prekey-bundle-binding": func(b []byte) error {
 			bundle, err := e2ee.DecodeBundleJSON(b)
@@ -70,6 +103,13 @@ func buildVerifiers(t *testing.T) map[string]func([]byte) error {
 			}
 			return reachability.VerifyObservation(observation)
 		},
+		"reachability-trial": func(b []byte) error {
+			trial, err := reachability.DecodeTrialJSON(b)
+			if err != nil {
+				return err
+			}
+			return reachability.VerifyTrial(policy, trial)
+		},
 	}
 }
 
@@ -86,6 +126,7 @@ func verifyDecoders() map[string]func([]byte) error {
 			var observation reachability.Observation
 			return json.Unmarshal(b, &observation)
 		},
+		"reachability-trial": func(b []byte) error { _, err := reachability.DecodeTrialJSON(b); return err },
 	}
 }
 
@@ -233,4 +274,106 @@ func observationJSON(t *testing.T, tamper bool) string {
 		t.Fatalf("encode observation: %v", err)
 	}
 	return string(encoded)
+}
+
+// signedTrial builds a complete measurement half signed by the endpoint that
+// produced it, with a coordinator attestation over the same session, role,
+// endpoint key, and probe. The coordinator key is a parameter so a baseline can
+// use one the policy predeclares and a mutation can use one it does not.
+func signedTrial(t *testing.T, coordinatorKey ed25519.PrivateKey) reachability.Trial {
+	t.Helper()
+	public, ok := endpointKey().Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected public key type")
+	}
+	endpointHex := hex.EncodeToString(public)
+	const session = "ses-trial-1"
+	pairID, err := reachability.PairID(session)
+	if err != nil {
+		t.Fatalf("pair id: %v", err)
+	}
+	siteID, err := reachability.SiteID("site-verify-1")
+	if err != nil {
+		t.Fatalf("site id: %v", err)
+	}
+	operatorID, err := reachability.OperatorID("operator-verify-1")
+	if err != nil {
+		t.Fatalf("operator id: %v", err)
+	}
+	observation, err := reachability.SignObservation(reachability.Observation{
+		SessionID:            session,
+		Role:                 string(reachability.RoleA),
+		EndpointPublicKeyHex: endpointHex,
+		Probe:                string(reachability.ProbeUDP),
+		Observed:             "203.0.113.7:41234",
+		PeerPublic:           "no",
+		AtUnix:               baseUnix,
+	}, coordinatorKey)
+	if err != nil {
+		t.Fatalf("sign observation: %v", err)
+	}
+	trial := reachability.Trial{
+		Local: reachability.EndpointStratum{
+			Family: reachability.FamilyIPv4, Reachability: reachability.BehindNAT,
+			NATBehavior: reachability.NATEndpointIndependent, Carrier: reachability.CarrierConsumerISP,
+			UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
+			EndpointClass: reachability.ClassDesktop, Assistance: reachability.AssistanceNone,
+		},
+		PairID:          pairID,
+		SiteID:          siteID,
+		OperatorID:      operatorID,
+		SessionID:       session,
+		Role:            reachability.RoleA,
+		Observation:     observation,
+		Probe:           reachability.ProbeUDP,
+		Outcome:         reachability.OutcomeDirect,
+		Failure:         reachability.FailureNone,
+		EstablishMillis: 42,
+		StartedAtUnix:   baseUnix,
+		LocalCommit:     strings.Repeat("a", 40),
+		PeerCommit:      strings.Repeat("b", 40),
+	}
+	signed, err := reachability.SignTrial(trial, endpointKey())
+	if err != nil {
+		t.Fatalf("sign trial: %v", err)
+	}
+	return signed
+}
+
+func encodeTrial(t *testing.T, trial reachability.Trial) string {
+	t.Helper()
+	encoded, err := reachability.EncodeTrialJSON(trial)
+	if err != nil {
+		t.Fatalf("encode trial: %v", err)
+	}
+	return string(encoded)
+}
+
+// validTrialJSON is the verify-layer baseline for a measurement half: it is
+// signed and its coordinator is predeclared, so the mutations below prove the
+// refusal and not a broken baseline.
+func validTrialJSON(t *testing.T) []byte {
+	t.Helper()
+	return []byte(encodeTrial(t, signedTrial(t, inPolicyCoordinatorKey())))
+}
+
+// trialForeignCoordinatorJSON is a fully valid, signed trial whose attestation
+// comes from a coordinator no policy predeclared.
+func trialForeignCoordinatorJSON(t *testing.T) string {
+	t.Helper()
+	return encodeTrial(t, signedTrial(t, foreignCoordinatorKey()))
+}
+
+// trialTamperedSignatureJSON keeps a valid-length endpoint signature that is
+// not the endpoint's over this trial.
+func trialTamperedSignatureJSON(t *testing.T) string {
+	t.Helper()
+	trial := signedTrial(t, inPolicyCoordinatorKey())
+	signature, err := hex.DecodeString(trial.EndpointSignatureHex)
+	if err != nil || len(signature) == 0 {
+		t.Fatalf("decode endpoint signature: %v", err)
+	}
+	signature[0] ^= 0xff
+	trial.EndpointSignatureHex = hex.EncodeToString(signature)
+	return encodeTrial(t, trial)
 }

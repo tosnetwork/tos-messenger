@@ -48,7 +48,7 @@ gate status: this repository carries none and consumes no gate capacity.
 | Agent Packet-to-Execution-Gate adapter and replay tests | ⬜ | — | Nothing |
 | Native desktop, Web, iOS, and Android Messenger clients | ⬜ | — | Nothing |
 | Relay, attachment, history, and inbox-bond commercial profiles | 🔒 | — | Expansion Gate |
-| Cross-implementation positive vectors and adversarial corpus | 🟡 | `internal/vectors` (positive vectors + adversarial corpus at both layers), fuzz seeds | Positive vectors and a self-verifying adversarial corpus exist at **both** layers. The decode layer covers the JSON and binary decoders (unknown fields, trailing data, truncation, inverted windows, zeroed digests, oversized length prefixes). The verify layer covers refusals owed to claimed authority: a forged prekey-bundle signature, a bundle outliving its delegation, a bundle naming a foreign Agent, a local-only kind arriving over the network, and a coordinator attestation whose signature does not verify. Each entry carries its `layer`; verify entries are proven to decode cleanly and be refused only at verify. **Named gap:** reachability *trial*-level refusals (a trial citing a coordinator outside the policy, insufficient operators/sites) are not yet in the corpus, and there is still no second implementation to check against |
+| Cross-implementation positive vectors and adversarial corpus | 🟡 | `internal/vectors` (positive vectors + adversarial corpus at both layers), fuzz seeds | Positive vectors and a self-verifying adversarial corpus exist at **both** layers. The decode layer covers the JSON and binary decoders (unknown fields, trailing data, truncation, inverted windows, zeroed digests, oversized length prefixes). The verify layer covers refusals owed to claimed authority: a forged prekey-bundle signature, a bundle outliving its delegation, a bundle naming a foreign Agent, a local-only kind arriving over the network, a coordinator attestation whose signature does not verify, and a reachability trial that is either attested by a coordinator outside the policy or carries a broken endpoint signature. Each entry carries its `layer`; verify entries are proven to decode cleanly and be refused only at verify. **Named gap:** there is still no second implementation to check against — the corpus is the artifact one would be measured by, not evidence one exists |
 | Independent multi-operator interoperability evidence | ⬜ | — | Needs a second implementation |
 
 ## The policy engine, split honestly
@@ -83,14 +83,15 @@ repository, and one ✅ or one 🟡 would misstate both halves.
    run of the whole chain is scripted in
    [`M0R_PILOT_RUNBOOK.md`](M0R_PILOT_RUNBOOK.md). *(Blocked: needs external
    operators.)*
-2. **The adversarial corpus.** *(Done at both the decode and verify layers.
-   The remaining gap is reachability trial-level refusals, item 4.)*
+2. **The adversarial corpus.** *(Done at both the decode and verify layers,
+   including the reachability trial layer. The only remaining gap is that no
+   second implementation exists to check against — that is item 4's blocker,
+   not a corpus gap.)*
 3. **Membership epochs for rooms.** *(Done: `pkg/room` state machine +
    durable epoch ledger. Group key agreement is the remaining half of the
-   rooms row and is the next codeable rooms work.)*
-4. **Reachability trial-layer corpus** — a trial citing a coordinator outside
-   the policy, or a cell short of the required operators/sites. Extends the
-   verify-layer corpus into `reachability.VerifyTrial` and the policy checks.
+   rooms row and is the next codeable rooms work — item 5.)*
+4. **Independent multi-operator interoperability evidence.** *(Blocked: needs a
+   second implementation and the multi-operator study.)*
 5. **A room authority / group key agreement design.** Membership epochs commit
    *who* is in a room; group encryption needs a per-epoch secret and a way to
    deliver it to exactly the current members. This depends on a design decision

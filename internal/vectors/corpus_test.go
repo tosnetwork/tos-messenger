@@ -224,6 +224,7 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	verifyBaselines := map[string][]byte{
 		"prekey-bundle-binding":    boundBundleJSON(t),
 		"reachability-observation": validObservationJSON(t),
+		"reachability-trial":       validTrialJSON(t),
 	}
 	for target, valid := range verifyBaselines {
 		verify, known := verifiers[target]
@@ -259,6 +260,16 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	addVerify("reachability-observation/tampered-signature", "reachability-observation",
 		tamperedObservationJSON(t),
 		"an attestation whose signature does not verify under its named coordinator key attests nothing")
+
+	// A trial is a complete, signed record and still not evidence unless the
+	// coordinator that attested it was predeclared and the endpoint signature
+	// holds. Both are what keep the policy's thresholds from being advisory.
+	addVerify("reachability-trial/foreign-coordinator", "reachability-trial",
+		trialForeignCoordinatorJSON(t),
+		"a trial attested by a coordinator the policy did not predeclare can be minted by anyone and must not count")
+	addVerify("reachability-trial/tampered-endpoint-signature", "reachability-trial",
+		trialTamperedSignatureJSON(t),
+		"a trial whose endpoint signature does not verify is rewritable after the fact and is not the measurement it claims")
 
 	sort.Slice(corpus, func(i, j int) bool { return corpus[i].Name < corpus[j].Name })
 	return corpus
