@@ -19,6 +19,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
+	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
@@ -121,7 +122,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("dispatcher: %v", err)
 	}
 	server, err := NewServer(Config{
-		Journal: journal, Dispatcher: dispatcher,
+		Journal: journal, Dispatcher: dispatcher, Policy: firewall.Default(),
 		Now: func() time.Time { return instance.clock },
 	})
 	if err != nil {
@@ -522,13 +523,18 @@ func TestServerRequiresEveryDependency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatcher: %v", err)
 	}
-	if _, err := NewServer(Config{Dispatcher: dispatcher}); err == nil {
+	if _, err := NewServer(Config{Dispatcher: dispatcher, Policy: firewall.Default()}); err == nil {
 		t.Fatal("a server without a journal was accepted")
 	}
-	if _, err := NewServer(Config{Journal: h.journal}); err == nil {
+	if _, err := NewServer(Config{Journal: h.journal, Policy: firewall.Default()}); err == nil {
 		t.Fatal("a server without a dispatcher was accepted")
 	}
-	if _, err := NewServer(Config{Journal: h.journal, Dispatcher: dispatcher, Timeout: -1}); err == nil {
+	if _, err := NewServer(Config{Journal: h.journal, Dispatcher: dispatcher}); err == nil {
+		t.Fatal("a server with no firewall policy was accepted")
+	}
+	if _, err := NewServer(Config{
+		Journal: h.journal, Dispatcher: dispatcher, Policy: firewall.Default(), Timeout: -1,
+	}); err == nil {
 		t.Fatal("a negative timeout was accepted")
 	}
 }
@@ -707,4 +713,150 @@ func sendAttempt(t *testing.T, h *harness, eventID string, seed byte) string {
 		t.Fatalf("claim for send: %v", err)
 	}
 	return id
+}
+
+func testProposal(effect string, origins ...ActionOrigin) *ProposedAction {
+	return &ProposedAction{Effect: effect, Summary: "call the payments tool", Derived: origins}
+}
+
+func testActionOrigin() ActionOrigin {
+	return ActionOrigin{
+		AgentID:        senderID,
+		EndpointID:     senderMEP,
+		DeviceID:       senderDev,
+		EventID:        "evt_" + strings.Repeat("7", 64),
+		ConversationID: convoID,
+		Kind:           "text",
+		ReceivedAtUnix: baseUnix,
+	}
+}
+
+// An action a stranger's message led to stops, waits for a person, and
+// proceeds exactly once when that person says yes.
+func TestActionDerivedFromReceivedContentWaitsForTheOwner(t *testing.T) {
+	h := newHarness(t)
+
+	asked := h.call(t, Request{Op: OpRequestAction, Action: testProposal("tool-call", testActionOrigin())})
+	if !asked.OK || asked.Decision != "require-owner-approval" {
+		t.Fatalf("a tool call a stranger's message drove ran unattended: %+v", asked)
+	}
+	if asked.ActionID == "" || asked.Authorised {
+		t.Fatalf("the runtime was told it could proceed: %+v", asked)
+	}
+
+	// The runtime may look, and looking consumes nothing.
+	status := h.call(t, Request{Op: OpActionStatus, ActionID: asked.ActionID})
+	if status.State != "pending" {
+		t.Fatalf("unexpected state before a decision: %+v", status)
+	}
+	if claimed := h.call(t, Request{Op: OpClaimAction, ActionID: asked.ActionID}); claimed.Authorised {
+		t.Fatal("an undecided action was performed")
+	}
+
+	// The owner sees the question, and what caused it.
+	waiting := h.owner(t, Request{Op: OpPendingActions})
+	if len(waiting.Actions) != 1 || waiting.Actions[0].ActionID != asked.ActionID {
+		t.Fatalf("the owner was not asked: %+v", waiting)
+	}
+	if len(waiting.Actions[0].Origins) != 1 ||
+		waiting.Actions[0].Origins[0].EventID != testActionOrigin().EventID {
+		t.Fatalf("the owner would not know what caused it: %+v", waiting.Actions[0])
+	}
+
+	if granted := h.owner(t, Request{Op: OpGrantAction, ActionID: asked.ActionID}); !granted.OK {
+		t.Fatalf("grant: %+v", granted)
+	}
+	first := h.call(t, Request{Op: OpClaimAction, ActionID: asked.ActionID})
+	if !first.Authorised {
+		t.Fatalf("a granted action could not proceed: %+v", first)
+	}
+	second := h.call(t, Request{Op: OpClaimAction, ActionID: asked.ActionID})
+	if second.Authorised {
+		t.Fatal("one decision authorised the same action twice")
+	}
+}
+
+// The identifier is derived from the action, so an approval cannot be spent on
+// a different one.
+func TestApprovalCannotBeSpentOnAnotherAction(t *testing.T) {
+	h := newHarness(t)
+	origin := testActionOrigin()
+
+	harmless := h.call(t, Request{Op: OpRequestAction, Action: testProposal("tool-call", origin)})
+	if harmless.ActionID == "" {
+		t.Fatalf("request: %+v", harmless)
+	}
+	if granted := h.owner(t, Request{Op: OpGrantAction, ActionID: harmless.ActionID}); !granted.OK {
+		t.Fatalf("grant: %+v", granted)
+	}
+
+	// The same words, a stronger effect. A different action, and so a
+	// different identifier with no approval behind it.
+	stronger := h.call(t, Request{Op: OpRequestAction, Action: testProposal("spend", origin)})
+	if stronger.ActionID == harmless.ActionID {
+		t.Fatal("two different actions shared one identifier")
+	}
+	if claimed := h.call(t, Request{Op: OpClaimAction, ActionID: stronger.ActionID}); claimed.Authorised {
+		t.Fatal("an approval for one action authorised another")
+	}
+}
+
+// The party that asks for an approval must not be able to grant it, and the
+// party that grants does no Agent work.
+func TestNeitherSideCanPlayTheOtherOnActions(t *testing.T) {
+	h := newHarness(t)
+	asked := h.call(t, Request{Op: OpRequestAction, Action: testProposal("tool-call", testActionOrigin())})
+	if asked.ActionID == "" {
+		t.Fatalf("request: %+v", asked)
+	}
+	for _, operation := range []Operation{OpGrantAction, OpDenyAction, OpPendingActions} {
+		request := Request{Op: operation, ActionID: asked.ActionID}
+		if operation == OpDenyAction {
+			request.Reason = "no"
+		}
+		if operation == OpPendingActions {
+			request.ActionID = ""
+		}
+		if response := h.call(t, request); response.OK {
+			t.Fatalf("the runtime performed %q", operation)
+		}
+	}
+	for _, operation := range []Operation{OpRequestAction, OpActionStatus, OpClaimAction} {
+		request := Request{Op: operation, ActionID: asked.ActionID}
+		if operation == OpRequestAction {
+			request.ActionID = ""
+			request.Action = testProposal("tool-call", testActionOrigin())
+		}
+		if response := h.owner(t, request); response.OK {
+			t.Fatalf("the owner performed %q", operation)
+		}
+	}
+}
+
+// Replying is ordinary Agent work and does not stop for a person.
+func TestOrdinaryWorkNeedsNoDecision(t *testing.T) {
+	h := newHarness(t)
+	reply := h.call(t, Request{Op: OpRequestAction, Action: &ProposedAction{
+		Effect: "message", Summary: "answer the message", Derived: []ActionOrigin{testActionOrigin()},
+	}})
+	if !reply.OK || !reply.Authorised || reply.Decision != "allow" {
+		t.Fatalf("answering a message required a person: %+v", reply)
+	}
+	// Nothing was written down, because nothing was asked.
+	if waiting := h.owner(t, Request{Op: OpPendingActions}); len(waiting.Actions) != 0 {
+		t.Fatalf("an allowed action was put to the owner: %+v", waiting)
+	}
+}
+
+// A malformed proposal is refused as a result rather than escalated: no owner
+// decision makes it coherent.
+func TestMalformedProposalIsRefusedNotAsked(t *testing.T) {
+	h := newHarness(t)
+	response := h.call(t, Request{Op: OpRequestAction, Action: testProposal("delete-everything")})
+	if !response.OK || response.Decision != "refuse" {
+		t.Fatalf("an unknown effect was not refused: %+v", response)
+	}
+	if waiting := h.owner(t, Request{Op: OpPendingActions}); len(waiting.Actions) != 0 {
+		t.Fatalf("a malformed proposal was put to the owner: %+v", waiting)
+	}
 }

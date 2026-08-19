@@ -70,6 +70,23 @@ const (
 	OpApprove Operation = "owner.approve"
 	// OpDeny is the owner abandoning one.
 	OpDeny Operation = "owner.deny"
+
+	// OpRequestAction is the runtime asking the owner to authorise an action
+	// the firewall stopped. The runtime may ask; it may not answer.
+	OpRequestAction Operation = "actions.request"
+	// OpActionStatus is the runtime reading whether an action it asked about
+	// has been decided. It changes nothing, so a runtime may poll it.
+	OpActionStatus Operation = "actions.status"
+	// OpClaimAction consumes a granted authorisation. It succeeds exactly
+	// once: an authorisation that could be claimed twice would permit the
+	// second occurrence of an action the owner saw once.
+	OpClaimAction Operation = "actions.claim"
+	// OpPendingActions lists the actions waiting for the owner.
+	OpPendingActions Operation = "actions.pending"
+	// OpGrantAction is the owner authorising one action.
+	OpGrantAction Operation = "actions.grant"
+	// OpDenyAction is the owner refusing one.
+	OpDenyAction Operation = "actions.deny"
 )
 
 // Principal is which side of the boundary a connection speaks for.
@@ -92,10 +109,12 @@ const (
 var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
 		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {},
+		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {},
 	},
 	PrincipalOwner: {
 		OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
 		OpApprove: {}, OpDeny: {},
+		OpPendingActions: {}, OpGrantAction: {}, OpDenyAction: {},
 	},
 }
 
@@ -113,6 +132,8 @@ var operations = map[Operation]struct{}{
 	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
 	OpApprove: {}, OpDeny: {},
+	OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpPendingActions: {},
+	OpGrantAction: {}, OpDenyAction: {},
 }
 
 var (
@@ -120,6 +141,7 @@ var (
 	leasePattern    = regexp.MustCompile(`^lease_[0-9a-f]{64}$`)
 	sessionPattern  = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
 	endpointPattern = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
+	actionPattern   = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
 )
 
 // Request is one call over the local socket.
@@ -138,6 +160,37 @@ type Request struct {
 	SessionID           string          `json:"session_id,omitempty"`
 	RecipientEndpointID string          `json:"recipient_endpoint_id,omitempty"`
 	ExpiresAtUnix       uint64          `json:"expires_at_unix,omitempty"`
+
+	// Action is one proposed action, for the firewall operations. It is the
+	// action itself rather than an identifier, because the identifier is
+	// derived from it: a runtime that could name an identifier without
+	// presenting the action could have one approved and perform another.
+	Action *ProposedAction `json:"action,omitempty"`
+	// ActionID names an already-proposed action.
+	ActionID string `json:"action_id,omitempty"`
+	// Reason is why the owner refused.
+	Reason string `json:"reason,omitempty"`
+}
+
+// ProposedAction is what a runtime says it intends to do.
+type ProposedAction struct {
+	Effect  string         `json:"effect"`
+	Summary string         `json:"summary"`
+	Derived []ActionOrigin `json:"derived_from,omitempty"`
+	// Terms is the exact purchase, when the effect is a spend. Its presence is
+	// what lets the mandate be applied rather than assumed.
+	Terms json.RawMessage `json:"terms,omitempty"`
+}
+
+// ActionOrigin is one piece of received content behind a proposed action.
+type ActionOrigin struct {
+	AgentID        string `json:"agent_id"`
+	EndpointID     string `json:"messaging_endpoint_id"`
+	DeviceID       string `json:"device_id"`
+	EventID        string `json:"event_id"`
+	ConversationID string `json:"conversation_id"`
+	Kind           string `json:"event_kind"`
+	ReceivedAtUnix uint64 `json:"received_at_unix"`
 }
 
 // PendingEvent is one inbound event offered to the runtime.
@@ -159,6 +212,28 @@ type Response struct {
 	Events []PendingEvent `json:"events,omitempty"`
 	Event  *PendingEvent  `json:"claimed,omitempty"`
 	Fresh  bool           `json:"fresh,omitempty"`
+
+	// Actions lists decisions waiting for the owner.
+	Actions []WaitingAction `json:"actions,omitempty"`
+	// ActionID is the identifier derived from a proposed action.
+	ActionID string `json:"action_id,omitempty"`
+	// Decision is what the firewall said, and Authorised reports whether the
+	// runtime may proceed now. They are separate because "allowed" and "the
+	// owner has decided" are different answers to different questions.
+	Decision   string `json:"decision,omitempty"`
+	Authorised bool   `json:"authorised,omitempty"`
+	// State is where an approval request has got to.
+	State string `json:"approval_state,omitempty"`
+}
+
+// WaitingAction is one decision the owner has not made yet.
+type WaitingAction struct {
+	ActionID    string         `json:"action_id"`
+	Effect      string         `json:"effect"`
+	Summary     string         `json:"summary"`
+	Reason      string         `json:"reason"`
+	Origins     []ActionOrigin `json:"origins,omitempty"`
+	AskedAtUnix uint64         `json:"asked_at_unix"`
 }
 
 // EncodeRequest returns one framed request.
@@ -322,6 +397,40 @@ func ValidateRequest(request Request) error {
 			return errors.New("an owner decision needs an event")
 		}
 		return requireEmpty(request, "an owner decision", request.LeaseID, request.SessionID)
+	case OpRequestAction:
+		if request.Action == nil {
+			return errors.New("a firewall decision needs the action itself")
+		}
+		if request.ActionID != "" {
+			return errors.New("the action identifier is derived, not declared")
+		}
+		return nil
+	case OpActionStatus, OpClaimAction:
+		if !actionPattern.MatchString(request.ActionID) {
+			return errors.New("an action status needs an action")
+		}
+		return requireEmpty(request, "an action status", request.EventID, request.LeaseID, request.SessionID)
+	case OpPendingActions:
+		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
+			return errors.New("invalid pending limit")
+		}
+		return requireEmpty(request, "a listing", request.EventID, request.LeaseID, request.SessionID)
+	case OpGrantAction:
+		if !actionPattern.MatchString(request.ActionID) {
+			return errors.New("an owner decision needs an action")
+		}
+		if request.Reason != "" {
+			return errors.New("a grant carries no reason")
+		}
+		return requireEmpty(request, "an owner decision", request.EventID, request.LeaseID, request.SessionID)
+	case OpDenyAction:
+		if !actionPattern.MatchString(request.ActionID) {
+			return errors.New("an owner decision needs an action")
+		}
+		if request.Reason == "" {
+			return errors.New("a refusal must say why")
+		}
+		return requireEmpty(request, "an owner decision", request.EventID, request.LeaseID, request.SessionID)
 	case OpRefuse:
 		if !eventPattern.MatchString(request.EventID) {
 			return errors.New("an owner decision needs an event")

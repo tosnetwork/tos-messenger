@@ -38,6 +38,9 @@ var (
 	RelayMessage = regexp.MustCompile(`^msg_[0-9a-f]{64}$`)
 	// ADNL matches an ADNL identity commitment.
 	ADNL = regexp.MustCompile(`^adnl:[0-9a-f]{64}$`)
+	// Action identifies one proposed Agent action, committing what the action
+	// is so an approval cannot be spent on a different one.
+	Action = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
 )
 
 // Format renders 32 bytes under a prefix. A short or all-zero value is never a

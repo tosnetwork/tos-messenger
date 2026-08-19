@@ -78,7 +78,7 @@ func Open(config Config, observer Observer) (*Daemon, error) {
 	}
 	instance.dispatch = dispatcher
 
-	server, err := localapi.NewServer(localapi.Config{Journal: journal, Dispatcher: dispatcher})
+	server, err := localapi.NewServer(localapi.Config{Policy: config.FirewallPolicy(), Journal: journal, Dispatcher: dispatcher})
 	if err != nil {
 		_ = journal.Close()
 		return nil, err

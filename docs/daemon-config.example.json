@@ -22,6 +22,11 @@
   "endpoint_id": "mep_3333333333333333333333333333333333333333333333333333333333333333",
   "device_id": "dev_4444444444444444444444444444444444444444444444444444444444444444",
 
+  "firewall": {
+    "unattended_ceiling": "message",
+    "own_initiative_ceiling": "tool-call"
+  },
+
   "transport": "none",
 
   "sweep_interval_seconds": 5,

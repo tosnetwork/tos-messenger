@@ -1,0 +1,274 @@
+package firewall
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
+)
+
+const baseUnix = uint64(1_800_000_000)
+
+func testOrigin(seed string) Origin {
+	return Origin{
+		AgentID:        "agent_" + strings.Repeat(seed, 64),
+		EndpointID:     "mep_" + strings.Repeat(seed, 64),
+		DeviceID:       "dev_" + strings.Repeat(seed, 64),
+		EventID:        "evt_" + strings.Repeat(seed, 64),
+		ConversationID: "conv_" + strings.Repeat(seed, 64),
+		Kind:           "text",
+		ReceivedAtUnix: baseUnix,
+	}
+}
+
+func testAction(effect Effect, origins ...Origin) Action {
+	return Action{Effect: effect, Summary: "do the thing", DerivedFrom: origins}
+}
+
+// The same action is judged differently depending on whether something a
+// stranger sent contributed to it. That difference is the whole point.
+func TestReceivedContentIsHeldToATighterCeiling(t *testing.T) {
+	policy := Default()
+
+	ownWork, err := Evaluate(policy, testAction(EffectToolCall))
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if ownWork.Outcome != Allow {
+		t.Fatalf("the Agent's own tool call was stopped: %+v", ownWork)
+	}
+
+	prompted, err := Evaluate(policy, testAction(EffectToolCall, testOrigin("1")))
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if prompted.Outcome != RequireOwnerApproval {
+		t.Fatalf("a tool call a stranger's message led to ran unattended: %+v", prompted)
+	}
+	if len(prompted.Provenance) != 1 {
+		t.Fatalf("the owner would not be told what caused it: %+v", prompted)
+	}
+}
+
+// Replying is what a messenger is. An Agent that needed a person for every
+// answer would not be an Agent.
+func TestRepliesRunUnattended(t *testing.T) {
+	decision, err := Evaluate(Default(), testAction(EffectMessage, testOrigin("2")))
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if decision.Outcome != Allow {
+		t.Fatalf("answering a message required a person: %+v", decision)
+	}
+}
+
+// A key authorises whatever it signs, and a configuration change can remove
+// this check. No policy may permit either unattended.
+func TestNoPolicyCanReachAKeyOrTheConfiguration(t *testing.T) {
+	for _, ceiling := range []Effect{EffectKeyUse, EffectConfiguration} {
+		policy := Policy{UnattendedCeiling: ceiling, OwnInitiativeCeiling: EffectConfiguration}
+		if err := policy.Validate(); err == nil {
+			t.Fatalf("a policy raised the unattended ceiling to %q", ceiling)
+		}
+	}
+	if err := (Policy{UnattendedCeiling: EffectMessage, OwnInitiativeCeiling: EffectConfiguration}).Validate(); err == nil {
+		t.Fatal("a policy let the runtime reconfigure the installation")
+	}
+	// Even own-initiative configuration goes to the owner.
+	decision, err := Evaluate(Default(), testAction(EffectConfiguration))
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if decision.Outcome != RequireOwnerApproval {
+		t.Fatalf("the runtime reconfigured the installation: %+v", decision)
+	}
+}
+
+// Received content cannot be trusted further than the Agent's own initiative.
+func TestUnattendedCeilingCannotExceedOwnInitiative(t *testing.T) {
+	policy := Policy{UnattendedCeiling: EffectToolCall, OwnInitiativeCeiling: EffectMessage}
+	if err := policy.Validate(); err == nil {
+		t.Fatal("received content was trusted further than the Agent itself")
+	}
+}
+
+func TestMalformedActionsAreRefused(t *testing.T) {
+	duplicate := testOrigin("3")
+	cases := map[string]Action{
+		"unknown effect":   {Effect: "delete-everything", Summary: "x"},
+		"no summary":       {Effect: EffectMessage},
+		"summary too long": {Effect: EffectMessage, Summary: strings.Repeat("x", MaxSummaryBytes+1)},
+		"broken origin":    {Effect: EffectMessage, Summary: "x", DerivedFrom: []Origin{{}}},
+		"same event twice": {Effect: EffectMessage, Summary: "x", DerivedFrom: []Origin{duplicate, duplicate}},
+		"too much lineage": {Effect: EffectMessage, Summary: "x", DerivedFrom: tooManyOrigins()},
+	}
+	for name, action := range cases {
+		t.Run(name, func(t *testing.T) {
+			decision, err := Evaluate(Default(), action)
+			if err != nil {
+				t.Fatalf("evaluate: %v", err)
+			}
+			if decision.Outcome != Refuse {
+				t.Fatalf("expected %q to be refused, got %+v", name, decision)
+			}
+		})
+	}
+}
+
+func tooManyOrigins() []Origin {
+	origins := make([]Origin, 0, MaxProvenance+1)
+	for index := 0; index <= MaxProvenance; index++ {
+		origin := testOrigin("1")
+		origin.EventID = "evt_" + strings.Repeat("0", 62) + string([]byte{
+			"0123456789abcdef"[index>>4], "0123456789abcdef"[index&0xf],
+		})
+		origins = append(origins, origin)
+	}
+	return origins
+}
+
+// Two renderings of one approval prompt must read the same way, or an owner
+// comparing them would see a difference that is not there.
+func TestProvenanceIsOrderedStably(t *testing.T) {
+	first, second := testOrigin("1"), testOrigin("2")
+	forward, err := Evaluate(Default(), testAction(EffectToolCall, first, second))
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	backward, err := Evaluate(Default(), testAction(EffectToolCall, second, first))
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	for index := range forward.Provenance {
+		if forward.Provenance[index].EventID != backward.Provenance[index].EventID {
+			t.Fatal("the approval prompt depended on the order the runtime listed its sources")
+		}
+	}
+}
+
+func testMandate() negotiation.Mandate {
+	return negotiation.Mandate{
+		Objective:        "buy transcription",
+		Authority:        negotiation.AuthorityCommit,
+		CapabilityClass:  "transcription.audio",
+		MaxTotal:         negotiation.Amount{Asset: "TOS", Units: 1000, Decimals: 2},
+		ApprovalAbove:    negotiation.Amount{Asset: "TOS", Units: 500, Decimals: 2},
+		MaxCounteroffers: 4,
+		ExpiresAtUnix:    baseUnix + 3600,
+	}
+}
+
+func testTerms(units uint64) negotiation.Terms {
+	return negotiation.Terms{
+		CapabilityID:      "cap_" + strings.Repeat("2", 64),
+		CapabilityVersion: "1.0.0",
+		CapabilityClass:   "transcription.audio",
+		Total:             negotiation.Amount{Asset: "TOS", Units: units, Decimals: 2},
+		NotAfterUnix:      baseUnix + 600,
+	}
+}
+
+// The mandate and the ceiling are independent, and neither substitutes for the
+// other. A spend the owner authorised in advance is still stopped when a
+// stranger's message drove it, and a spend inside the ceiling is still stopped
+// when it is outside the mandate.
+func TestSpendNeedsBothTheMandateAndTheCeiling(t *testing.T) {
+	now := time.Unix(int64(baseUnix)+60, 0)
+	permissive := Policy{UnattendedCeiling: EffectSpend, OwnInitiativeCeiling: EffectSpend}
+
+	within, err := EvaluateSpend(permissive, testMandate(), testTerms(200),
+		testAction(EffectSpend, testOrigin("1")), now)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if within.Outcome != Allow {
+		t.Fatalf("a spend inside both bounds was stopped: %+v", within)
+	}
+
+	// Inside the ceiling, above the amount the owner reserved for themselves.
+	above, err := EvaluateSpend(permissive, testMandate(), testTerms(800),
+		testAction(EffectSpend, testOrigin("1")), now)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if above.Outcome != RequireOwnerApproval {
+		t.Fatalf("a spend above the approval threshold ran unattended: %+v", above)
+	}
+
+	// Inside the mandate, but the default ceiling does not let received
+	// content reach a spend at all.
+	ceilinged, err := EvaluateSpend(Default(), testMandate(), testTerms(200),
+		testAction(EffectSpend, testOrigin("1")), now)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if ceilinged.Outcome != RequireOwnerApproval {
+		t.Fatalf("the mandate alone authorised a spend a stranger's message drove: %+v", ceilinged)
+	}
+
+	// Outside the mandate entirely.
+	outside, err := EvaluateSpend(permissive, testMandate(), testTerms(5000),
+		testAction(EffectSpend, testOrigin("1")), now)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if outside.Outcome != RequireOwnerApproval {
+		t.Fatalf("a spend above the ceiling the owner set was allowed: %+v", outside)
+	}
+
+	// Terms that do not describe a purchase are refused, not escalated: no
+	// owner decision makes them coherent.
+	broken, err := EvaluateSpend(permissive, testMandate(), negotiation.Terms{},
+		testAction(EffectSpend, testOrigin("1")), now)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if broken.Outcome != Refuse {
+		t.Fatalf("incoherent terms were put to the owner: %+v", broken)
+	}
+
+	if _, err := EvaluateSpend(permissive, testMandate(), testTerms(200),
+		testAction(EffectMessage), now); err == nil {
+		t.Fatal("a non-spend was judged as a spend")
+	}
+}
+
+// An expired mandate is not a smaller mandate. The owner may still say yes;
+// what they cannot do is have said yes in advance.
+func TestExpiredMandateGoesToTheOwner(t *testing.T) {
+	late := time.Unix(int64(baseUnix)+7200, 0)
+	decision, err := EvaluateSpend(
+		Policy{UnattendedCeiling: EffectSpend, OwnInitiativeCeiling: EffectSpend},
+		testMandate(), testTerms(100), testAction(EffectSpend), late)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if decision.Outcome != RequireOwnerApproval {
+		t.Fatalf("an expired mandate still authorised a spend: %+v", decision)
+	}
+}
+
+// Where the number and the words disagree, both are returned and neither is
+// chosen. Picking the text would make prose authoritative through a side door.
+func TestAmountRenderingDisagreementIsSurfacedNotResolved(t *testing.T) {
+	amount := negotiation.Amount{Asset: "TOS", Units: 250, Decimals: 2}
+	agreeing, err := CheckAmountRendering(amount, "the price is "+amount.String()+" total")
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if !agreeing.Agrees {
+		t.Fatalf("a rendering containing the exact amount was reported as disagreeing: %+v", agreeing)
+	}
+
+	lying, err := CheckAmountRendering(amount, "the price is 0.01 TOS, a bargain")
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if lying.Agrees {
+		t.Fatal("a rendering that showed another number was accepted")
+	}
+	if lying.Structured != amount.String() || lying.Rendered == "" {
+		t.Fatalf("the disagreement did not carry both sides: %+v", lying)
+	}
+}

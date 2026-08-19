@@ -17,6 +17,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
+	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/tosaddr"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
@@ -82,6 +83,12 @@ type Config struct {
 	EndpointID string `json:"endpoint_id"`
 	DeviceID   string `json:"device_id"`
 
+	// Firewall is what the Agent may reach unattended. Like the transport it
+	// must be stated: an operator should have to write down what their Agent
+	// may do because a stranger asked, and a permissive value nobody chose is
+	// the one that would be copied forward.
+	Firewall FirewallConfig `json:"firewall"`
+
 	// Transport must be stated. There is no default, because a daemon that
 	// quietly carried nothing would look like a working one.
 	Transport TransportMode `json:"transport"`
@@ -103,6 +110,24 @@ func (c Config) Network() *nativev1.NetworkDomain {
 // Identity returns who this installation speaks for.
 func (c Config) Identity() dispatch.Identity {
 	return dispatch.Identity{AgentID: c.AgentID, EndpointID: c.EndpointID, DeviceID: c.DeviceID}
+}
+
+// FirewallConfig is the pair of ceilings the context firewall applies.
+type FirewallConfig struct {
+	// UnattendedCeiling is the strongest effect an action derived from
+	// received content may have without an owner decision.
+	UnattendedCeiling string `json:"unattended_ceiling"`
+	// OwnInitiativeCeiling is the same for an action no received content
+	// contributed to.
+	OwnInitiativeCeiling string `json:"own_initiative_ceiling"`
+}
+
+// FirewallPolicy returns the configured context-firewall policy.
+func (c Config) FirewallPolicy() firewall.Policy {
+	return firewall.Policy{
+		UnattendedCeiling:    firewall.Effect(c.Firewall.UnattendedCeiling),
+		OwnInitiativeCeiling: firewall.Effect(c.Firewall.OwnInitiativeCeiling),
+	}
 }
 
 // RegistryConfig is one registry contract and everything needed to address
@@ -204,6 +229,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.Identity().Validate(); err != nil {
+		return err
+	}
+	if err := c.FirewallPolicy().Validate(); err != nil {
 		return err
 	}
 	if _, known := transports[c.Transport]; !known {

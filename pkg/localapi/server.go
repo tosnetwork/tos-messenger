@@ -12,6 +12,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
+	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 )
 
 // DefaultRequestTimeout bounds how long one call may hold a connection.
@@ -21,8 +22,12 @@ const DefaultRequestTimeout = 30 * time.Second
 type Config struct {
 	Journal    *eventlog.Journal
 	Dispatcher *dispatch.Dispatcher
-	Now        func() time.Time
-	Timeout    time.Duration
+	// Policy is what the Agent may reach unattended. It is required: a server
+	// with no policy would answer every firewall question with whatever the
+	// zero value happened to mean.
+	Policy  firewall.Policy
+	Now     func() time.Time
+	Timeout time.Duration
 }
 
 // Server answers calls on the owner-private socket.
@@ -37,6 +42,9 @@ func NewServer(config Config) (*Server, error) {
 	}
 	if config.Dispatcher == nil {
 		return nil, errors.New("the local API requires a dispatcher")
+	}
+	if err := config.Policy.Validate(); err != nil {
+		return nil, err
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -137,6 +145,18 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.approve(request, now)
 	case OpDeny:
 		return s.deny(request, now)
+	case OpRequestAction:
+		return s.requestAction(request, now)
+	case OpActionStatus:
+		return s.actionStatus(request)
+	case OpClaimAction:
+		return s.claimAction(request, now)
+	case OpPendingActions:
+		return s.pendingActions(request)
+	case OpGrantAction:
+		return s.grantAction(request, now)
+	case OpDenyAction:
+		return s.denyAction(request, now)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
 }
@@ -309,4 +329,150 @@ func refuse(code fault.Code, err error) Response {
 	// Detail is local. This socket has one caller and it is the owner's own
 	// runtime, so the reason is useful here in a way it never is to a peer.
 	return Response{OK: false, Code: code, Detail: detail}
+}
+
+// requestAction puts one proposed action to the firewall.
+//
+// The identifier is derived from the action, never taken from the request. A
+// runtime that could name an identifier without presenting the action could
+// have a harmless one approved and perform a different one under the same
+// permission.
+func (s *Server) requestAction(request Request, now time.Time) Response {
+	action, err := toAction(*request.Action)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	decision, err := firewall.Evaluate(s.config.Policy, action)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	if decision.Outcome == firewall.Refuse {
+		// A refusal is a result, not a local failure.
+		return Response{Schema: ResponseSchema, OK: true, Decision: string(decision.Outcome),
+			Detail: decision.Reason}
+	}
+	actionID, err := firewall.ActionID(action)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	if decision.Outcome == firewall.Allow {
+		return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
+			Decision: string(decision.Outcome), Detail: decision.Reason, Authorised: true}
+	}
+	approval, err := s.config.Journal.RequestApproval(eventlog.ApprovalRequest{
+		ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
+		Reason: decision.Reason, Origins: toApprovalOrigins(decision.Provenance),
+		AskedAt: uint64(now.Unix()),
+	})
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
+		Decision: string(decision.Outcome), Detail: decision.Reason,
+		State: string(approval.State)}
+}
+
+// actionStatus reads where a request has got to. It changes nothing, so a
+// runtime may poll it without consuming anything.
+func (s *Server) actionStatus(request Request) Response {
+	approval, found, err := s.config.Journal.LookupApproval(request.ActionID)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	if !found {
+		return Response{Schema: ResponseSchema, OK: true, ActionID: request.ActionID,
+			Detail: "no decision was ever asked for about this action"}
+	}
+	return Response{Schema: ResponseSchema, OK: true, ActionID: request.ActionID,
+		State: string(approval.State), Detail: approval.DenialReason}
+}
+
+// claimAction consumes a granted authorisation, once.
+//
+// The state change is durable before the runtime is told it may proceed, so a
+// crash between the two loses the permission rather than reusing it. Losing a
+// permission costs the owner one more decision; reusing one spends their
+// authority on something they never saw.
+func (s *Server) claimAction(request Request, now time.Time) Response {
+	approval, err := s.config.Journal.SpendApproval(request.ActionID, now)
+	if err != nil {
+		if errors.Is(err, eventlog.ErrApprovalNotGranted) || errors.Is(err, eventlog.ErrApprovalUnknown) {
+			return Response{Schema: ResponseSchema, OK: true, ActionID: request.ActionID,
+				Authorised: false, Detail: err.Error()}
+		}
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{Schema: ResponseSchema, OK: true, ActionID: request.ActionID,
+		State: string(approval.State), Authorised: true}
+}
+
+func (s *Server) pendingActions(request Request) Response {
+	waiting, err := s.config.Journal.ListPendingApprovals(request.Limit)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	actions := make([]WaitingAction, 0, len(waiting))
+	for _, approval := range waiting {
+		actions = append(actions, WaitingAction{
+			ActionID: approval.ActionID, Effect: approval.Effect, Summary: approval.Summary,
+			Reason: approval.Reason, Origins: fromApprovalOrigins(approval.Origins),
+			AskedAtUnix: approval.AskedAtUnix,
+		})
+	}
+	return Response{Schema: ResponseSchema, OK: true, Actions: actions}
+}
+
+func (s *Server) grantAction(request Request, now time.Time) Response {
+	approval, err := s.config.Journal.GrantAction(request.ActionID, now)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{Schema: ResponseSchema, OK: true, ActionID: request.ActionID,
+		State: string(approval.State)}
+}
+
+func (s *Server) denyAction(request Request, now time.Time) Response {
+	approval, err := s.config.Journal.DenyAction(request.ActionID, request.Reason, now)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{Schema: ResponseSchema, OK: true, ActionID: request.ActionID,
+		State: string(approval.State)}
+}
+
+func toAction(proposed ProposedAction) (firewall.Action, error) {
+	origins := make([]firewall.Origin, 0, len(proposed.Derived))
+	for _, origin := range proposed.Derived {
+		origins = append(origins, firewall.Origin{
+			AgentID: origin.AgentID, EndpointID: origin.EndpointID, DeviceID: origin.DeviceID,
+			EventID: origin.EventID, ConversationID: origin.ConversationID,
+			Kind: origin.Kind, ReceivedAtUnix: origin.ReceivedAtUnix,
+		})
+	}
+	action := firewall.Action{
+		Effect: firewall.Effect(proposed.Effect), Summary: proposed.Summary, DerivedFrom: origins,
+	}
+	return action, nil
+}
+
+func toApprovalOrigins(origins []firewall.Origin) []eventlog.ApprovalOrigin {
+	stored := make([]eventlog.ApprovalOrigin, 0, len(origins))
+	for _, origin := range origins {
+		stored = append(stored, eventlog.ApprovalOrigin{
+			AgentID: origin.AgentID, EndpointID: origin.EndpointID, EventID: origin.EventID,
+			ConversationID: origin.ConversationID, Kind: origin.Kind,
+		})
+	}
+	return stored
+}
+
+func fromApprovalOrigins(origins []eventlog.ApprovalOrigin) []ActionOrigin {
+	shown := make([]ActionOrigin, 0, len(origins))
+	for _, origin := range origins {
+		shown = append(shown, ActionOrigin{
+			AgentID: origin.AgentID, EndpointID: origin.EndpointID, EventID: origin.EventID,
+			ConversationID: origin.ConversationID, Kind: origin.Kind,
+		})
+	}
+	return shown
 }

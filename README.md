@@ -30,8 +30,11 @@ decision:
 | `pkg/eventlog` | Single-writer durable journal: stored inbound events with pending recovery and application leases, outbound delivery state, retry schedule, and pruning |
 | `pkg/fault` | Typed failures, retry dispositions, and what a peer may be told |
 | `pkg/admission` | The lower half of the context firewall: authority, scope, window, inbox policy, and the durable claim |
+| `pkg/firewall` | The upper half: what an Agent may reach unattended, which received content an action came from, and the channel separation that keeps a stranger's words out of the instruction position |
 | `pkg/dispatch` | The outbound half: seal once, send, and apply the retry disposition of whatever came back |
 | `pkg/localapi` | The owner-private socket an Agent runtime drives, and the only place an owner approval exists |
+| `pkg/tosaddr` | Recomputes TOS account addresses through the protocol SDK, so finalized state must come from the account it belongs to |
+| `pkg/payload` | A typed body for every event kind, in canonical binary |
 | `pkg/daemon` | Assembly: one state directory, one socket, one schedule |
 | `pkg/negotiation` | The layer between what an Agent says and what the system may do: mandates, exact amounts, the intent boundary, and the negotiation state machine |
 | `pkg/e2ee` | The contract a candidate encryption suite must satisfy as a pure state transition, message bindings, and published prekey bundles |
@@ -114,6 +117,16 @@ Deliberately absent, with the reason:
 - The party that asks for an approval cannot grant it. The runtime and the
   owner speak over separate sockets, and the runtime's has no approval
   operation on it.
+- An approval names a deed, not a request. The identifier of a proposed action
+  is derived from what the action is and what it came from, so a permission
+  cannot be moved to a different action, and it is spent the first time it is
+  used.
+- Defence against instructions hidden in content is structural, not detective.
+  There are no patterns for recognising manipulation, because a filter that
+  tries to recognise an attack fails open on the ones it has not seen while
+  manufacturing confidence about the rest. What the code enforces instead is
+  that provenance cannot be dropped and that received content cannot reach a
+  key, a payment, or this installation's own configuration without a person.
 - A commitment nobody reads is worse than none, because it implies an
   enforcement that does not exist. The policy digests a delegation carries are
   checked against the documents they name.

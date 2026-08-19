@@ -44,7 +44,10 @@ func testConfig(t *testing.T) Config {
 		AgentID:         "agent_" + strings.Repeat("2", 64),
 		EndpointID:      "mep_" + strings.Repeat("3", 64),
 		DeviceID:        "dev_" + strings.Repeat("4", 64),
-		Transport:       TransportNone,
+		Firewall: FirewallConfig{
+			UnattendedCeiling: "message", OwnInitiativeCeiling: "tool-call",
+		},
+		Transport: TransportNone,
 	}
 }
 
@@ -330,6 +333,7 @@ func TestUnknownConfigurationKeysAreRefused(t *testing.T) {
 		"agent_id": "agent_` + strings.Repeat("2", 64) + `",
 		"endpoint_id": "mep_` + strings.Repeat("3", 64) + `",
 		"device_id": "dev_` + strings.Repeat("4", 64) + `",
+		"firewall": {"unattended_ceiling": "message", "own_initiative_ceiling": "tool-call"},
 		"transport": "none"
 	}`
 	if _, err := DecodeConfig([]byte(valid)); err != nil {

@@ -198,7 +198,7 @@ func Open(root string) (*Journal, error) {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return nil, errors.New("event journal root must be a private directory")
 	}
-	for _, name := range []string{inboundDir, outboundDir, sessionDir} {
+	for _, name := range []string{inboundDir, outboundDir, sessionDir, approvalDir} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			return nil, errors.New("create event journal directory")
 		}

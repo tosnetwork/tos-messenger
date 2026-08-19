@@ -36,6 +36,10 @@ nobody made:
   deployed registry;
 - **who this installation speaks for** — its Agent, endpoint and device — since
   an outbound event must say it came from here; and
+- the **firewall ceilings**, which say what the Agent may do unattended: one
+  for what it reaches on its own initiative, and a tighter one for anything a
+  received message drove. Neither may be raised to a key or to this
+  installation's own configuration, whatever an operator writes; and
 - the **transport**, which today can only be `"none"`.
 
 An unknown key in the configuration is refused rather than ignored. A
