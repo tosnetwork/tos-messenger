@@ -41,6 +41,25 @@ func endpointKey(t *testing.T, seed byte) ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
 }
 
+func testPolicy() DescriptorPolicy {
+	return DescriptorPolicy{
+		MaxEnvelopeBytes:   128 << 10,
+		MaxLifetimeSeconds: 24 * 60 * 60,
+		AllowHTTPSEndpoint: true,
+	}
+}
+
+func testPolicyDigest(t *testing.T) string {
+	t.Helper()
+	digest, err := testPolicy().Digest()
+	if err != nil {
+		t.Fatalf("policy digest: %v", err)
+	}
+	return digest
+}
+
+const testInboxDigest = "sha256:" + "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c"
+
 func testDelegation(t *testing.T, key ed25519.PrivateKey) identity.Delegation {
 	t.Helper()
 	network := testNetwork()
@@ -63,8 +82,8 @@ func testDelegation(t *testing.T, key ed25519.PrivateKey) identity.Delegation {
 		NotBeforeUnix:                 baseUnix,
 		ExpiresAtUnix:                 baseUnix + 86_400,
 		MaximumSessionLifetimeSeconds: 3600,
-		ContactDescriptorPolicyDigest: "sha256:" + strings.Repeat("3d", 32),
-		MailboxPolicyDigest:           "sha256:" + strings.Repeat("4c", 32),
+		ContactDescriptorPolicyDigest: testPolicyDigest(t),
+		InboxAdmissionPolicyDigest:    testInboxDigest,
 	}
 	if err := identity.Validate(delegation); err != nil {
 		t.Fatalf("delegation: %v", err)
@@ -89,7 +108,8 @@ func testDescriptor(t *testing.T, delegation identity.Delegation) Descriptor {
 		ADNLID:                     delegation.ADNLID,
 		HTTPSEndpoint:              "https://endpoint.example/messaging",
 		PrekeyBundleDigest:         "sha256:" + strings.Repeat("7a", 32),
-		MailboxRelaySetDigest:      "sha256:" + strings.Repeat("8b", 32),
+		MailboxRelaySetDigest:      EmptyRelaySetDigest(),
+		InboxAdmissionPolicyDigest: testInboxDigest,
 		AttachmentServiceDigest:    "",
 		MaximumEnvelopeBytes:       64 << 10,
 		IssuedAtUnix:               baseUnix,
@@ -135,7 +155,7 @@ func TestResolveAdmitsDelegatedDescriptor(t *testing.T) {
 		t.Fatalf("encode descriptor: %v", err)
 	}
 	now := time.Unix(int64(baseUnix)+60, 0)
-	resolvedDelegation, resolvedDescriptor, err := Resolve(liveResolver(t, delegation), testNetwork(), delegationJSON, descriptorJSON, now)
+	resolvedDelegation, resolvedDescriptor, err := Resolve(liveResolver(t, delegation), testNetwork(), delegationJSON, descriptorJSON, testPolicy(), now)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -157,7 +177,7 @@ func TestDescriptorRoundTripPreservesSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if err := Bind(delegation, decoded, time.Unix(int64(baseUnix)+60, 0)); err != nil {
+	if err := Bind(delegation, decoded, testPolicy(), time.Unix(int64(baseUnix)+60, 0)); err != nil {
 		t.Fatalf("bind after round trip: %v", err)
 	}
 }
@@ -194,7 +214,7 @@ func TestBindRejectsUnauthorizedDescriptors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			descriptor := signedDescriptor(t, delegation, key)
 			mutate(&descriptor)
-			if err := Bind(delegation, descriptor, now); err == nil {
+			if err := Bind(delegation, descriptor, testPolicy(), now); err == nil {
 				t.Fatalf("expected %q to be rejected", name)
 			}
 		})
@@ -206,22 +226,22 @@ func TestBindEnforcesTimeBounds(t *testing.T) {
 	delegation := testDelegation(t, key)
 	descriptor := signedDescriptor(t, delegation, key)
 
-	if err := Bind(delegation, descriptor, time.Unix(int64(descriptor.IssuedAtUnix), 0)); err != nil {
+	if err := Bind(delegation, descriptor, testPolicy(), time.Unix(int64(descriptor.IssuedAtUnix), 0)); err != nil {
 		t.Fatalf("issued_at must be inclusive: %v", err)
 	}
-	if err := Bind(delegation, descriptor, time.Unix(int64(descriptor.ExpiresAtUnix)-1, 0)); err != nil {
+	if err := Bind(delegation, descriptor, testPolicy(), time.Unix(int64(descriptor.ExpiresAtUnix)-1, 0)); err != nil {
 		t.Fatalf("last valid second rejected: %v", err)
 	}
-	if err := Bind(delegation, descriptor, time.Unix(int64(descriptor.ExpiresAtUnix), 0)); err == nil {
+	if err := Bind(delegation, descriptor, testPolicy(), time.Unix(int64(descriptor.ExpiresAtUnix), 0)); err == nil {
 		t.Fatal("expired descriptor accepted")
 	}
-	if err := Bind(delegation, descriptor, time.Unix(int64(descriptor.IssuedAtUnix)-1, 0)); err == nil {
+	if err := Bind(delegation, descriptor, testPolicy(), time.Unix(int64(descriptor.IssuedAtUnix)-1, 0)); err == nil {
 		t.Fatal("descriptor accepted before it was issued")
 	}
-	if err := Bind(delegation, descriptor, time.Unix(int64(delegation.ExpiresAtUnix), 0)); err == nil {
+	if err := Bind(delegation, descriptor, testPolicy(), time.Unix(int64(delegation.ExpiresAtUnix), 0)); err == nil {
 		t.Fatal("descriptor accepted under an expired delegation")
 	}
-	if err := Bind(delegation, descriptor, time.Time{}); err == nil {
+	if err := Bind(delegation, descriptor, testPolicy(), time.Time{}); err == nil {
 		t.Fatal("descriptor accepted with a zero clock")
 	}
 }
@@ -243,7 +263,8 @@ func TestDescriptorValidationRejectsMalformedShapes(t *testing.T) {
 		"bad adapter version":  func(d *Descriptor) { d.SupportedA2AVersions = []string{"Alpha!"} },
 		"unsorted adapters":    func(d *Descriptor) { d.SupportedMCPVersions = []string{"2025-06-18", "2024-01-01"} },
 		"zero prekey digest":   func(d *Descriptor) { d.PrekeyBundleDigest = "sha256:" + strings.Repeat("0", 64) },
-		"missing relay digest": func(d *Descriptor) { d.MailboxRelaySetDigest = "" },
+		"bad relay digest":     func(d *Descriptor) { d.MailboxRelaySetDigest = "sha256:zz" },
+		"missing inbox policy": func(d *Descriptor) { d.InboxAdmissionPolicyDigest = "" },
 		"inverted window":      func(d *Descriptor) { d.ExpiresAtUnix = d.IssuedAtUnix },
 		"overlong window": func(d *Descriptor) {
 			d.ExpiresAtUnix = d.IssuedAtUnix + MaxDescriptorLifetimeSeconds + 1
@@ -528,5 +549,132 @@ func TestLocatorSizeBoundIsEnforcedOnDecode(t *testing.T) {
 	}
 	if _, err := DecodeLocator(bytes.Repeat([]byte{0}, 200)); err == nil {
 		t.Fatal("expected an unversioned value to be rejected")
+	}
+}
+
+// A delegated key lives online and may be taken. The policy the Agent
+// committed to is what bounds what a taken key can advertise.
+func TestCommittedPolicyBoundsADelegatedKey(t *testing.T) {
+	key := endpointKey(t, 0x11)
+	delegation := testDelegation(t, key)
+	now := time.Unix(int64(baseUnix)+60, 0)
+
+	// A descriptor inside the policy is fine.
+	inside := signedDescriptor(t, delegation, key)
+	if err := Bind(delegation, inside, testPolicy(), now); err != nil {
+		t.Fatalf("a compliant descriptor was refused: %v", err)
+	}
+
+	// The same key, signing perfectly well, cannot exceed the committed bound.
+	oversized := testDescriptor(t, delegation)
+	oversized.MaximumEnvelopeBytes = MaxEnvelopeBytes
+	signed, err := SignDescriptor(oversized, key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := Bind(delegation, signed, testPolicy(), now); err == nil {
+		t.Fatal("a descriptor beyond the committed envelope bound was accepted")
+	}
+
+	// Nor can a caller swap in a policy the Agent never committed.
+	permissive := testPolicy()
+	permissive.MaxEnvelopeBytes = MaxEnvelopeBytes
+	if err := Bind(delegation, signed, permissive, now); err == nil {
+		t.Fatal("a substituted policy was accepted")
+	}
+}
+
+func TestPolicyMustLeaveARouteOpen(t *testing.T) {
+	closed := DescriptorPolicy{MaxEnvelopeBytes: 64 << 10, MaxLifetimeSeconds: 3600}
+	if err := closed.Validate(); err == nil {
+		t.Fatal("a policy permitting no route at all was accepted")
+	}
+	if _, err := closed.Digest(); err == nil {
+		t.Fatal("an unusable policy produced a digest")
+	}
+	for name, policy := range map[string]DescriptorPolicy{
+		"tiny envelope": {MaxEnvelopeBytes: 1, MaxLifetimeSeconds: 3600, AllowHTTPSEndpoint: true},
+		"huge envelope": {MaxEnvelopeBytes: MaxEnvelopeBytes + 1, MaxLifetimeSeconds: 3600, AllowHTTPSEndpoint: true},
+		"no lifetime":   {MaxEnvelopeBytes: 64 << 10, AllowHTTPSEndpoint: true},
+		"long lifetime": {MaxEnvelopeBytes: 64 << 10, MaxLifetimeSeconds: MaxDescriptorLifetimeSeconds + 1, AllowHTTPSEndpoint: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := policy.Validate(); err == nil {
+				t.Fatalf("expected %q to be refused", name)
+			}
+		})
+	}
+}
+
+func TestPolicyCanRequireADirectRoute(t *testing.T) {
+	key := endpointKey(t, 0x11)
+	delegation := testDelegation(t, key)
+	now := time.Unix(int64(baseUnix)+60, 0)
+
+	strict := DescriptorPolicy{MaxEnvelopeBytes: 128 << 10, MaxLifetimeSeconds: 24 * 60 * 60, RequireADNL: true}
+	digest, err := strict.Digest()
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	delegation.ContactDescriptorPolicyDigest = digest
+
+	bootstrap := testDescriptor(t, delegation)
+	bootstrap.ADNLID = ""
+	signed, err := SignDescriptor(bootstrap, key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := Bind(delegation, signed, strict, now); err == nil {
+		t.Fatal("a descriptor with no ADNL identity was accepted under a policy requiring one")
+	}
+
+	noHTTPS := testDescriptor(t, delegation)
+	signedFull, err := SignDescriptor(noHTTPS, key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := Bind(delegation, signedFull, strict, now); err == nil {
+		t.Fatal("an HTTPS endpoint was accepted under a policy that did not permit one")
+	}
+}
+
+// An endpoint with no Relays publishes a value everyone computes the same way,
+// rather than each implementer inventing a placeholder.
+func TestEmptyRelaySetHasOneDigest(t *testing.T) {
+	first := EmptyRelaySetDigest()
+	if first != EmptyRelaySetDigest() {
+		t.Fatal("the empty Relay set digest is not stable")
+	}
+	populated, err := RelaySetDigest([]string{"https://relay-a.example", "https://relay-b.example"})
+	if err != nil {
+		t.Fatalf("relay set: %v", err)
+	}
+	if populated == first {
+		t.Fatal("a populated Relay set matches the empty one")
+	}
+	if _, err := RelaySetDigest([]string{"https://relay-b.example", "https://relay-a.example"}); err == nil {
+		t.Fatal("an unsorted Relay set was accepted")
+	}
+	if _, err := RelaySetDigest([]string{"https://relay-a.example", "https://relay-a.example"}); err == nil {
+		t.Fatal("a duplicated Relay was accepted")
+	}
+	if _, err := RelaySetDigest(make([]string, MaxCandidateRelays+1)); err == nil {
+		t.Fatal("an oversized Relay set was accepted")
+	}
+}
+
+// Until offline delivery exists no endpoint has Relays, so a descriptor
+// without a Relay set is ordinary rather than incomplete.
+func TestDescriptorWithoutRelaysIsValid(t *testing.T) {
+	key := endpointKey(t, 0x11)
+	delegation := testDelegation(t, key)
+	descriptor := testDescriptor(t, delegation)
+	descriptor.MailboxRelaySetDigest = ""
+	signed, err := SignDescriptor(descriptor, key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := Bind(delegation, signed, testPolicy(), time.Unix(int64(baseUnix)+60, 0)); err != nil {
+		t.Fatalf("a descriptor with no Relays was refused: %v", err)
 	}
 }

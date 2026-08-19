@@ -36,6 +36,7 @@ decision:
 | `pkg/probe` | M0-R measurement transport: rendezvous coordinator and UDP establishment probe |
 | `internal/canon` | Domain-separated length-prefixed canonical encoding shared by every signed object |
 | `internal/ids` | Every identifier pattern, defined once |
+| `internal/vectors` | The canonical forms a second implementation checks itself against |
 | `internal/dirlock` | Exclusive process ownership of one private state directory |
 
 The measurement side is deliberately separate from the protocol side. Nothing
@@ -90,6 +91,12 @@ Deliberately absent, with the reason:
 - A valid signature proves origin, not safety. Admission establishes who sent
   an event and whether it may enter; what the content means is the runtime's
   problem and is deliberately not decided here.
+- Approval is two things. A counterparty attestation is what the other party
+  says it decided, which is information and may travel. An owner approval is
+  authority granted here, and it is not expressible on the wire at all.
+- A commitment nobody reads is worse than none, because it implies an
+  enforcement that does not exist. The policy digests a delegation carries are
+  checked against the documents they name.
 - Every domain separator is registered in one list, because a reused separator
   is signature confusion rather than a merge conflict.
 
@@ -99,6 +106,14 @@ Go 1.26.5.
 
 ```sh
 make verify
+```
+
+Continuous integration runs the same checks plus a cross-architecture build,
+the fuzz seed corpora, and a check that the committed vectors are unchanged.
+Vectors are rewritten deliberately:
+
+```sh
+go test ./internal/vectors -update
 ```
 
 The module builds standalone. `GOWORK=off` in the Makefile keeps a developer

@@ -25,7 +25,14 @@ than silently forking two implementations.
 | Envelope size bounds | advertised maximum between 4 KiB and 1 MiB; stored ciphertext at most 1 MiB | `directory.MinEnvelopeBytes`, `envelope.MaxCiphertextBytes` |
 | Relay retention bound | at most 30 days, and never beyond the operator's own bound | `envelope.AcceptedForStorage` |
 | Event ID derivation | content addressed: `evt_` + SHA-256 over the canonical event preimage excluding the identifier itself | `envelope.DeriveEventID` |
-| Event kind to delegated class mapping | explicit table; an unrecognised kind has no class | `envelope.eventClasses` |
+| Event kind to delegated class mapping | explicit table; an unrecognised kind has no class | `envelope.eventKinds` |
+| Payload schema | fixed by the kind and carried explicitly, so a decoder reads a declared shape rather than guessing one from a name | `envelope.PayloadSchemaOf` |
+| Human rendering | carried, covered by the event identifier, and never automation input; a disagreement with the payload is not a preference to resolve | `envelope.Event.Rendering` |
+| Owner approval | a local-only kind refused on every network route, so a remote party cannot express local authority at all | `envelope.LocalOnly` |
+| Negotiation kinds | conversation, not commitment; none of them create, accept, or fund anything | `envelope.eventKinds` |
+| Descriptor policy | committed by the Agent and enforced at bind time, which bounds what a delegated key can advertise even after it is taken | `directory.DescriptorPolicy` |
+| Relay set | optional, with a defined digest for the empty set so nobody invents a placeholder | `directory.EmptyRelaySetDigest` |
+| Prekey set coherence | one network, one Agent, one endpoint, one suite, unique devices, all signed, enforced in the digest rather than left to each caller | `e2ee.ValidateSet` |
 | Event body bounds | content at most 128 KiB, 16 causal parents, 16 attachment references | `envelope` constants |
 | Durable store format | one JSON record per event in a private directory owned by one process, carrying the event itself so an accepted event survives a crash | `pkg/eventlog` |
 | Inbound dimensions | application state (queued, claimed, applied, rejected) and reading are independent, so a read receipt can never block delivery to a runtime | `eventlog.Record` |

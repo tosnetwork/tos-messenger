@@ -24,6 +24,8 @@ const (
 	MaxCausalParents = 16
 	// MaxAttachmentReferences bounds the attachments one event may reference.
 	MaxAttachmentReferences = 16
+	// MaxRenderingBytes bounds the optional human presentation.
+	MaxRenderingBytes = 4 << 10
 )
 
 var (
@@ -36,34 +38,76 @@ var (
 	bindingPattern      = regexp.MustCompile(`^(?:sha256|tvm-cell-sha256):[0-9a-f]{64}$`)
 )
 
-// eventClasses is the initial typed event set. The class is what a Messaging
-// Endpoint delegation grants, so a kind with no class here can never be
-// admitted by scope: an unrecognised kind fails closed rather than inheriting
-// a neighbour's authority.
-var eventClasses = map[string]string{
-	"text":                      "text",
-	"conversation.invite":       "conversation",
-	"conversation.accept":       "conversation",
-	"presence.hint":             "presence",
-	"agent.task.request":        "agent.task",
-	"agent.task.progress":       "agent.task",
-	"agent.task.result":         "agent.task",
-	"approval.request":          "approval",
-	"approval.grant":            "approval",
-	"approval.deny":             "approval",
-	"a2a.message":               "a2a",
-	"mcp.call":                  "mcp",
-	"mcp.result":                "mcp",
-	"artifact.offer":            "artifact",
-	"artifact.reference":        "artifact",
-	"service.quote.reference":   "service",
-	"service.escrow.reference":  "service",
-	"service.receipt.reference": "service",
-	"delivery.ack":              "delivery",
-	"application.ack":           "application",
-	"room.invite":               "room",
-	"room.membership.commit":    "room",
-	"room.message":              "room",
+// kindSpec is everything the protocol fixes about one event kind.
+type kindSpec struct {
+	class string
+	// schema names the structured payload this kind carries. Automation reads
+	// the payload; a kind whose payload has no schema cannot be interpreted by
+	// anything except a human, which is not a basis for acting.
+	schema string
+	// localOnly marks a kind that may only arrive over the owner's own local
+	// interface and never from the network.
+	localOnly bool
+}
+
+// eventKinds is the typed event set.
+//
+// The class is what a Messaging Endpoint delegation grants, so a kind with no
+// entry here can never be admitted by scope: an unrecognised kind fails closed
+// rather than inheriting a neighbour's authority.
+//
+// Approval appears twice on purpose. A counterparty attestation is a remote
+// Agent telling us what it decided about its own side, which is information.
+// An owner approval is this owner authorising an action here, which is
+// authority. They were one kind, and a single loose check in a context
+// firewall would then have let a remote Agent approve a local wallet or tool
+// operation. Splitting them means the dangerous one is not expressible on the
+// wire at all.
+var eventKinds = map[string]kindSpec{
+	"text":                {class: "text", schema: "tos.messaging.payload.text.v1"},
+	"conversation.invite": {class: "conversation", schema: "tos.messaging.payload.conversation-invite.v1"},
+	"conversation.accept": {class: "conversation", schema: "tos.messaging.payload.conversation-accept.v1"},
+	"presence.hint":       {class: "presence", schema: "tos.messaging.payload.presence-hint.v1"},
+
+	"agent.task.request":        {class: "agent.task", schema: "tos.messaging.payload.task-request.v1"},
+	"agent.task.progress":       {class: "agent.task", schema: "tos.messaging.payload.task-progress.v1"},
+	"agent.task.result":         {class: "agent.task", schema: "tos.messaging.payload.task-result.v1"},
+	"agent.task.status.request": {class: "agent.task", schema: "tos.messaging.payload.task-status-request.v1"},
+
+	// Negotiation is conversation, not commitment. None of these create,
+	// accept, or fund anything; they carry what the parties said they intend.
+	"negotiation.proposal":        {class: "negotiation", schema: "tos.messaging.payload.negotiation-proposal.v1"},
+	"negotiation.counterproposal": {class: "negotiation", schema: "tos.messaging.payload.negotiation-counterproposal.v1"},
+	"negotiation.withdraw":        {class: "negotiation", schema: "tos.messaging.payload.negotiation-withdraw.v1"},
+	"negotiation.intent.accept":   {class: "negotiation", schema: "tos.messaging.payload.negotiation-intent-accept.v1"},
+	"negotiation.intent.reject":   {class: "negotiation", schema: "tos.messaging.payload.negotiation-intent-reject.v1"},
+
+	// What the other party says it decided.
+	"counterparty.approval.request": {class: "counterparty.approval", schema: "tos.messaging.payload.counterparty-approval-request.v1"},
+	"counterparty.approval.granted": {class: "counterparty.approval", schema: "tos.messaging.payload.counterparty-approval-granted.v1"},
+	"counterparty.approval.denied":  {class: "counterparty.approval", schema: "tos.messaging.payload.counterparty-approval-denied.v1"},
+
+	// What this owner authorises here. Never accepted from the network.
+	"owner.approval.grant": {class: "owner.approval", schema: "tos.messaging.payload.owner-approval-grant.v1", localOnly: true},
+	"owner.approval.deny":  {class: "owner.approval", schema: "tos.messaging.payload.owner-approval-deny.v1", localOnly: true},
+
+	"a2a.message": {class: "a2a", schema: "tos.messaging.payload.a2a-message.v1"},
+	"mcp.call":    {class: "mcp", schema: "tos.messaging.payload.mcp-call.v1"},
+	"mcp.result":  {class: "mcp", schema: "tos.messaging.payload.mcp-result.v1"},
+
+	"artifact.offer":     {class: "artifact", schema: "tos.messaging.payload.artifact-offer.v1"},
+	"artifact.reference": {class: "artifact", schema: "tos.messaging.payload.artifact-reference.v1"},
+
+	"service.quote.reference":   {class: "service", schema: "tos.messaging.payload.quote-reference.v1"},
+	"service.escrow.reference":  {class: "service", schema: "tos.messaging.payload.escrow-reference.v1"},
+	"service.receipt.reference": {class: "service", schema: "tos.messaging.payload.receipt-reference.v1"},
+
+	"delivery.ack":    {class: "delivery", schema: "tos.messaging.payload.delivery-ack.v1"},
+	"application.ack": {class: "application", schema: "tos.messaging.payload.application-ack.v1"},
+
+	"room.invite":            {class: "room", schema: "tos.messaging.payload.room-invite.v1"},
+	"room.membership.commit": {class: "room", schema: "tos.messaging.payload.room-membership-commit.v1"},
+	"room.message":           {class: "room", schema: "tos.messaging.payload.room-message.v1"},
 }
 
 // Event is the inner typed object obtained after decryption.
@@ -72,21 +116,33 @@ var eventClasses = map[string]string{
 // in this struct. A high-value control event may additionally carry an
 // independently verifiable signature, which is a separate profile.
 type Event struct {
-	Network              *nativev1.NetworkDomain
-	ConversationID       string
-	EventID              string
-	SenderAgentID        string
-	SenderEndpointID     string
-	SenderDeviceID       string
-	RoomID               string
-	ThreadID             string
-	ReplyToEventID       string
-	CausalParents        []string
-	CreatedAtUnix        uint64
-	ExpiresAtUnix        uint64
-	Kind                 string
-	IdempotencyKey       string
-	Content              []byte
+	Network          *nativev1.NetworkDomain
+	ConversationID   string
+	EventID          string
+	SenderAgentID    string
+	SenderEndpointID string
+	SenderDeviceID   string
+	RoomID           string
+	ThreadID         string
+	ReplyToEventID   string
+	CausalParents    []string
+	CreatedAtUnix    uint64
+	ExpiresAtUnix    uint64
+	Kind             string
+	// PayloadSchema names the structure of Content. It is fixed by the kind,
+	// and carried explicitly so a decoder is reading a declared shape rather
+	// than guessing one from a name.
+	PayloadSchema  string
+	IdempotencyKey string
+	// Content is the structured payload. It is what automation reads.
+	Content []byte
+	// Rendering is an optional human presentation of the same event.
+	//
+	// It is presentation and never input. Where the two disagree the
+	// difference is not a preference to resolve: a caller that let a model
+	// choose which one to believe would have made the rendering authoritative
+	// by another route.
+	Rendering            string
 	AttachmentReferences []string
 	ServiceBinding       string
 }
@@ -108,8 +164,10 @@ type wireEvent struct {
 	CreatedAtUnix        uint64   `json:"created_at_unix"`
 	ExpiresAtUnix        uint64   `json:"expires_at_unix,omitempty"`
 	Kind                 string   `json:"event_kind"`
+	PayloadSchema        string   `json:"payload_schema"`
 	IdempotencyKey       string   `json:"idempotency_key,omitempty"`
 	ContentBase64        string   `json:"content_base64,omitempty"`
+	Rendering            string   `json:"rendering,omitempty"`
 	AttachmentReferences []string `json:"attachment_references,omitempty"`
 	ServiceBinding       string   `json:"service_binding,omitempty"`
 }
@@ -117,14 +175,30 @@ type wireEvent struct {
 // ClassOf returns the delegated class of an event kind. An unknown kind has no
 // class and therefore no scope.
 func ClassOf(kind string) (string, bool) {
-	class, known := eventClasses[kind]
-	return class, known
+	spec, known := eventKinds[kind]
+	return spec.class, known
+}
+
+// PayloadSchemaOf returns the structured payload schema a kind carries.
+func PayloadSchemaOf(kind string) (string, bool) {
+	spec, known := eventKinds[kind]
+	return spec.schema, known
+}
+
+// LocalOnly reports whether a kind may only arrive over the owner's own local
+// interface.
+//
+// A local-only kind carries authority rather than information, so it is not
+// something a remote party may express. Callers on the network path refuse it
+// outright rather than evaluating it and deciding it is not allowed.
+func LocalOnly(kind string) bool {
+	return eventKinds[kind].localOnly
 }
 
 // KnownKinds returns the recognised event kinds.
 func KnownKinds() []string {
-	kinds := make([]string, 0, len(eventClasses))
-	for kind := range eventClasses {
+	kinds := make([]string, 0, len(eventKinds))
+	for kind := range eventKinds {
 		kinds = append(kinds, kind)
 	}
 	return kinds
@@ -155,8 +229,10 @@ func EventCanonicalBytes(event Event) ([]byte, error) {
 	canon.Uint64(buffer, event.CreatedAtUnix)
 	canon.Uint64(buffer, event.ExpiresAtUnix)
 	canon.Text(buffer, event.Kind)
+	canon.Text(buffer, event.PayloadSchema)
 	canon.Text(buffer, event.IdempotencyKey)
 	canon.Bytes(buffer, event.Content)
+	canon.Text(buffer, event.Rendering)
 	canon.Uint32(buffer, uint32(len(event.AttachmentReferences)))
 	for _, reference := range event.AttachmentReferences {
 		canon.Text(buffer, reference)
@@ -177,9 +253,13 @@ func DeriveEventID(event Event) (string, error) {
 	return "evt_" + digest[len("sha256:"):], nil
 }
 
-// NewEvent completes an event by deriving its identifier.
+// NewEvent completes an event by filling the schema its kind fixes and
+// deriving its identifier.
 func NewEvent(event Event) (Event, error) {
 	event.EventID = ""
+	if spec, known := eventKinds[event.Kind]; known && event.PayloadSchema == "" {
+		event.PayloadSchema = spec.schema
+	}
 	eventID, err := DeriveEventID(event)
 	if err != nil {
 		return Event{}, err
@@ -214,7 +294,9 @@ func EncodeEventJSON(event Event) ([]byte, error) {
 		CreatedAtUnix:        event.CreatedAtUnix,
 		ExpiresAtUnix:        event.ExpiresAtUnix,
 		Kind:                 event.Kind,
+		PayloadSchema:        event.PayloadSchema,
 		IdempotencyKey:       event.IdempotencyKey,
+		Rendering:            event.Rendering,
 		AttachmentReferences: event.AttachmentReferences,
 		ServiceBinding:       event.ServiceBinding,
 	}
@@ -288,8 +370,10 @@ func decodeEvent(raw []byte) (Event, error) {
 		CreatedAtUnix:        value.CreatedAtUnix,
 		ExpiresAtUnix:        value.ExpiresAtUnix,
 		Kind:                 value.Kind,
+		PayloadSchema:        value.PayloadSchema,
 		IdempotencyKey:       value.IdempotencyKey,
 		Content:              content,
+		Rendering:            value.Rendering,
 		AttachmentReferences: value.AttachmentReferences,
 		ServiceBinding:       value.ServiceBinding,
 	}
@@ -378,6 +462,19 @@ func validateEventFields(event Event) error {
 		!eventKindPattern.MatchString(event.Kind) {
 		return errors.New("invalid event kind")
 	}
+	// A known kind carries the schema the protocol fixed for it. An unknown
+	// kind may declare its own, which is what makes a forward-compatible event
+	// storable without making it interpretable.
+	if spec, known := eventKinds[event.Kind]; known {
+		if event.PayloadSchema != spec.schema {
+			return errors.New("event payload schema does not match its kind")
+		}
+	} else if !payloadSchemaPattern.MatchString(event.PayloadSchema) {
+		return errors.New("invalid event payload schema")
+	}
+	if len(event.Rendering) > MaxRenderingBytes {
+		return errors.New("event rendering exceeds its bound")
+	}
 	if event.IdempotencyKey != "" && !idempotencyPattern.MatchString(event.IdempotencyKey) {
 		return errors.New("invalid event idempotency key")
 	}
@@ -394,6 +491,8 @@ func validateEventFields(event Event) error {
 }
 
 var eventKindPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$`)
+
+var payloadSchemaPattern = regexp.MustCompile(`^tos\.messaging\.payload\.[a-z0-9-]{1,48}\.v[0-9]{1,3}$`)
 
 func validateCausalParents(event Event) error {
 	if len(event.CausalParents) > MaxCausalParents {

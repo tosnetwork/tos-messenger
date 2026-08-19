@@ -42,6 +42,8 @@ const (
 	MaxEnvelopeBytes = 1 << 20
 	// MaxHTTPSEndpointBytes bounds the optional bootstrap endpoint.
 	MaxHTTPSEndpointBytes = 512
+	// MaxCandidateRelays bounds a published Mailbox Relay set.
+	MaxCandidateRelays = 8
 )
 
 var adapterVersionPattern = regexp.MustCompile(`^[0-9a-z][0-9a-z.\-]{0,31}$`)
@@ -59,6 +61,7 @@ type Descriptor struct {
 	HTTPSEndpoint              string
 	PrekeyBundleDigest         string
 	MailboxRelaySetDigest      string
+	InboxAdmissionPolicyDigest string
 	AttachmentServiceDigest    string
 	MaximumEnvelopeBytes       uint32
 	IssuedAtUnix               uint64
@@ -80,7 +83,8 @@ type wireDescriptor struct {
 	ADNLID                     string   `json:"adnl_id,omitempty"`
 	HTTPSEndpoint              string   `json:"optional_https_endpoint,omitempty"`
 	PrekeyBundleDigest         string   `json:"prekey_bundle_digest"`
-	MailboxRelaySetDigest      string   `json:"mailbox_relay_set_digest"`
+	MailboxRelaySetDigest      string   `json:"mailbox_relay_set_digest,omitempty"`
+	InboxAdmissionPolicyDigest string   `json:"inbox_admission_policy_digest"`
 	AttachmentServiceDigest    string   `json:"attachment_service_digest,omitempty"`
 	MaximumEnvelopeBytes       uint32   `json:"maximum_envelope_bytes"`
 	IssuedAtUnix               uint64   `json:"issued_at_unix"`
@@ -117,6 +121,7 @@ func SigningBytes(descriptor Descriptor) ([]byte, error) {
 	canon.Text(buffer, descriptor.HTTPSEndpoint)
 	canon.Text(buffer, descriptor.PrekeyBundleDigest)
 	canon.Text(buffer, descriptor.MailboxRelaySetDigest)
+	canon.Text(buffer, descriptor.InboxAdmissionPolicyDigest)
 	canon.Text(buffer, descriptor.AttachmentServiceDigest)
 	canon.Uint32(buffer, descriptor.MaximumEnvelopeBytes)
 	canon.Uint64(buffer, descriptor.IssuedAtUnix)
@@ -170,6 +175,7 @@ func EncodeDescriptorJSON(descriptor Descriptor) ([]byte, error) {
 		HTTPSEndpoint:              descriptor.HTTPSEndpoint,
 		PrekeyBundleDigest:         descriptor.PrekeyBundleDigest,
 		MailboxRelaySetDigest:      descriptor.MailboxRelaySetDigest,
+		InboxAdmissionPolicyDigest: descriptor.InboxAdmissionPolicyDigest,
 		AttachmentServiceDigest:    descriptor.AttachmentServiceDigest,
 		MaximumEnvelopeBytes:       descriptor.MaximumEnvelopeBytes,
 		IssuedAtUnix:               descriptor.IssuedAtUnix,
@@ -214,6 +220,7 @@ func DecodeDescriptorJSON(raw []byte) (Descriptor, error) {
 		HTTPSEndpoint:              value.HTTPSEndpoint,
 		PrekeyBundleDigest:         value.PrekeyBundleDigest,
 		MailboxRelaySetDigest:      value.MailboxRelaySetDigest,
+		InboxAdmissionPolicyDigest: value.InboxAdmissionPolicyDigest,
 		AttachmentServiceDigest:    value.AttachmentServiceDigest,
 		MaximumEnvelopeBytes:       value.MaximumEnvelopeBytes,
 		IssuedAtUnix:               value.IssuedAtUnix,
@@ -232,7 +239,7 @@ func DecodeDescriptorJSON(raw []byte) (Descriptor, error) {
 //
 // A descriptor may never outlive its delegation. If it could, a revoked
 // endpoint would keep a usable locator until the descriptor's own expiry.
-func Bind(delegation identity.Delegation, descriptor Descriptor, now time.Time) error {
+func Bind(delegation identity.Delegation, descriptor Descriptor, policy DescriptorPolicy, now time.Time) error {
 	if now.IsZero() {
 		return errors.New("invalid descriptor verification time")
 	}
@@ -268,6 +275,22 @@ func Bind(delegation identity.Delegation, descriptor Descriptor, now time.Time) 
 	if descriptor.ExpiresAtUnix > delegation.ExpiresAtUnix {
 		return errors.New("descriptor outlives its delegation")
 	}
+	// The policy the Agent committed to is checked against the descriptor the
+	// endpoint signed. This is what bounds a delegated key: whoever holds it
+	// can sign, but only inside limits fixed before the key existed anywhere.
+	policyDigest, err := policy.Digest()
+	if err != nil {
+		return err
+	}
+	if policyDigest != delegation.ContactDescriptorPolicyDigest {
+		return errors.New("descriptor policy is not the one the Agent committed")
+	}
+	if err := policy.Permits(descriptor); err != nil {
+		return err
+	}
+	if descriptor.InboxAdmissionPolicyDigest != delegation.InboxAdmissionPolicyDigest {
+		return errors.New("descriptor advertises an inbox policy its Agent did not commit")
+	}
 	seconds := now.Unix()
 	if seconds < 0 || uint64(seconds) >= descriptor.ExpiresAtUnix {
 		return errors.New("descriptor is expired")
@@ -275,9 +298,9 @@ func Bind(delegation identity.Delegation, descriptor Descriptor, now time.Time) 
 	if uint64(seconds) < descriptor.IssuedAtUnix {
 		return errors.New("descriptor is not yet issued")
 	}
-	preimage, err := SigningBytes(descriptor)
-	if err != nil {
-		return err
+	preimage, signErr := SigningBytes(descriptor)
+	if signErr != nil {
+		return signErr
 	}
 	if !ed25519.Verify(delegation.IdentityPublicKey, preimage, descriptor.EndpointSignature) {
 		return errors.New("descriptor signature is not from the delegated endpoint key")
@@ -292,7 +315,7 @@ func Bind(delegation identity.Delegation, descriptor Descriptor, now time.Time) 
 // Establishing a session is deliberately not part of this function. Route
 // selection is frozen only after the reachability study, and a prekey bundle
 // belongs to the encryption profile.
-func Resolve(resolver identity.AgentResolver, network *nativev1.NetworkDomain, delegationJSON, descriptorJSON []byte, now time.Time) (identity.Delegation, Descriptor, error) {
+func Resolve(resolver identity.AgentResolver, network *nativev1.NetworkDomain, delegationJSON, descriptorJSON []byte, policy DescriptorPolicy, now time.Time) (identity.Delegation, Descriptor, error) {
 	delegation, err := identity.Verify(resolver, network, delegationJSON, now)
 	if err != nil {
 		return identity.Delegation{}, Descriptor{}, err
@@ -301,7 +324,7 @@ func Resolve(resolver identity.AgentResolver, network *nativev1.NetworkDomain, d
 	if err != nil {
 		return identity.Delegation{}, Descriptor{}, err
 	}
-	if err := Bind(delegation, descriptor, now); err != nil {
+	if err := Bind(delegation, descriptor, policy, now); err != nil {
 		return identity.Delegation{}, Descriptor{}, err
 	}
 	return delegation, descriptor, nil
@@ -320,8 +343,14 @@ func ValidateDescriptor(descriptor Descriptor, signed bool) error {
 		return errors.New("invalid descriptor identity")
 	}
 	if !canon.ValidDigest(descriptor.DelegationDigest) || !canon.ValidDigest(descriptor.PrekeyBundleDigest) ||
-		!canon.ValidDigest(descriptor.MailboxRelaySetDigest) {
+		!canon.ValidDigest(descriptor.InboxAdmissionPolicyDigest) {
 		return errors.New("invalid descriptor digest")
+	}
+	// A Relay set is optional. Every endpoint has none until offline delivery
+	// exists, and requiring one would have made implementers invent a
+	// placeholder rather than say so.
+	if descriptor.MailboxRelaySetDigest != "" && !canon.ValidDigest(descriptor.MailboxRelaySetDigest) {
+		return errors.New("invalid descriptor Relay set digest")
 	}
 	if descriptor.AttachmentServiceDigest != "" && !canon.ValidDigest(descriptor.AttachmentServiceDigest) {
 		return errors.New("invalid descriptor attachment service digest")

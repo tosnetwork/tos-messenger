@@ -62,7 +62,7 @@ func testDelegation(t *testing.T) Delegation {
 		ExpiresAtUnix:                 1_800_086_400,
 		MaximumSessionLifetimeSeconds: 3600,
 		ContactDescriptorPolicyDigest: "sha256:" + strings.Repeat("3d", 32),
-		MailboxPolicyDigest:           "sha256:" + strings.Repeat("4c", 32),
+		InboxAdmissionPolicyDigest:    "sha256:" + strings.Repeat("4c", 32),
 	}
 }
 
@@ -141,7 +141,7 @@ func TestEveryFieldChangesTheDigest(t *testing.T) {
 		"descriptor policy": func(d *Delegation) {
 			d.ContactDescriptorPolicyDigest = "sha256:" + strings.Repeat("5b", 32)
 		},
-		"mailbox policy": func(d *Delegation) { d.MailboxPolicyDigest = "sha256:" + strings.Repeat("6a", 32) },
+		"mailbox policy": func(d *Delegation) { d.InboxAdmissionPolicyDigest = "sha256:" + strings.Repeat("6a", 32) },
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
@@ -254,8 +254,8 @@ func TestValidateRejectsBoundaryViolations(t *testing.T) {
 		"session over window":   func(d *Delegation) { d.MaximumSessionLifetimeSeconds = 90000 },
 		"session over bound":    func(d *Delegation) { d.MaximumSessionLifetimeSeconds = MaxSessionLifetimeSeconds + 1 },
 		"bad policy digest":     func(d *Delegation) { d.ContactDescriptorPolicyDigest = "sha256:zz" },
-		"zero policy digest":    func(d *Delegation) { d.MailboxPolicyDigest = "sha256:" + strings.Repeat("0", 64) },
-		"missing mailbox":       func(d *Delegation) { d.MailboxPolicyDigest = "" },
+		"zero policy digest":    func(d *Delegation) { d.InboxAdmissionPolicyDigest = "sha256:" + strings.Repeat("0", 64) },
+		"missing mailbox":       func(d *Delegation) { d.InboxAdmissionPolicyDigest = "" },
 		"tvm digest not sha256": func(d *Delegation) { d.ContactDescriptorPolicyDigest = "tvm-cell-sha256:" + strings.Repeat("3d", 32) },
 	}
 	for name, mutate := range cases {

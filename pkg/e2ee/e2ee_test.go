@@ -54,12 +54,23 @@ func testDelegation(t *testing.T, key ed25519.PrivateKey) identity.Delegation {
 		ExpiresAtUnix:                 baseUnix + 86_400,
 		MaximumSessionLifetimeSeconds: 3600,
 		ContactDescriptorPolicyDigest: "sha256:" + strings.Repeat("3d", 32),
-		MailboxPolicyDigest:           "sha256:" + strings.Repeat("4c", 32),
+		InboxAdmissionPolicyDigest:    "sha256:" + strings.Repeat("4c", 32),
 	}
 	if err := identity.Validate(delegation); err != nil {
 		t.Fatalf("delegation: %v", err)
 	}
 	return delegation
+}
+
+// A set digest is computed from bundles that were already signed, because a
+// publisher signs each device before committing the set.
+func signedBundle(t *testing.T, delegation identity.Delegation, device string, key ed25519.PrivateKey) Bundle {
+	t.Helper()
+	signed, err := SignBundle(testBundle(t, delegation, device), key)
+	if err != nil {
+		t.Fatalf("sign bundle: %v", err)
+	}
+	return signed
 }
 
 func testBundle(t *testing.T, delegation identity.Delegation, device string) Bundle {
@@ -301,8 +312,8 @@ func TestBundleValidationRejectsMalformedShapes(t *testing.T) {
 func TestSetDigestCoversEveryDevice(t *testing.T) {
 	key := endpointKey(t, 0x11)
 	delegation := testDelegation(t, key)
-	first := testBundle(t, delegation, deviceOne)
-	second := testBundle(t, delegation, deviceTwo)
+	first := signedBundle(t, delegation, deviceOne, key)
+	second := signedBundle(t, delegation, deviceTwo, key)
 
 	digest, err := SetDigest([]Bundle{first, second})
 	if err != nil {
@@ -322,8 +333,14 @@ func TestSetDigestCoversEveryDevice(t *testing.T) {
 	if single == digest {
 		t.Fatal("removing a device did not change the published set")
 	}
-	rotated := second
-	rotated.Material = bytes.Repeat([]byte{0x33}, 32)
+	rotated, err := SignBundle(func() Bundle {
+		bundle := testBundle(t, delegation, deviceTwo)
+		bundle.Material = bytes.Repeat([]byte{0x33}, 32)
+		return bundle
+	}(), key)
+	if err != nil {
+		t.Fatalf("sign rotated: %v", err)
+	}
 	changed, err := SetDigest([]Bundle{first, rotated})
 	if err != nil {
 		t.Fatalf("set digest: %v", err)
@@ -336,7 +353,7 @@ func TestSetDigestCoversEveryDevice(t *testing.T) {
 func TestSetDigestRejectsIncoherentSets(t *testing.T) {
 	key := endpointKey(t, 0x11)
 	delegation := testDelegation(t, key)
-	first := testBundle(t, delegation, deviceOne)
+	first := signedBundle(t, delegation, deviceOne, key)
 
 	if _, err := SetDigest(nil); err == nil {
 		t.Fatal("an empty set was accepted")
@@ -344,15 +361,14 @@ func TestSetDigestRejectsIncoherentSets(t *testing.T) {
 	if _, err := SetDigest([]Bundle{first, first}); err == nil {
 		t.Fatal("a duplicated device was accepted")
 	}
-	foreign := testBundle(t, delegation, deviceTwo)
+	foreign := signedBundle(t, delegation, deviceTwo, key)
 	foreign.EndpointID = "mep_" + strings.Repeat("9", 64)
 	if _, err := SetDigest([]Bundle{first, foreign}); err == nil {
 		t.Fatal("a set spanning two endpoints was accepted")
 	}
 	oversized := make([]Bundle, 0, MaxDevicesPerSet+1)
 	for index := 0; index <= MaxDevicesPerSet; index++ {
-		bundle := testBundle(t, delegation, deviceOne)
-		oversized = append(oversized, bundle)
+		oversized = append(oversized, first)
 	}
 	if _, err := SetDigest(oversized); err == nil {
 		t.Fatal("an oversized set was accepted")
@@ -409,7 +425,7 @@ func TestAlgorithmIdentifiers(t *testing.T) {
 func TestDescriptorCommitmentIsChecked(t *testing.T) {
 	key := endpointKey(t, 0x11)
 	delegation := testDelegation(t, key)
-	published := []Bundle{testBundle(t, delegation, deviceOne), testBundle(t, delegation, deviceTwo)}
+	published := []Bundle{signedBundle(t, delegation, deviceOne, key), signedBundle(t, delegation, deviceTwo, key)}
 
 	committed, err := SetDigest(published)
 	if err != nil {
@@ -433,5 +449,82 @@ func TestDescriptorCommitmentIsChecked(t *testing.T) {
 	}
 	if err := MatchesDescriptorDigest("not-a-digest", published); err == nil {
 		t.Fatal("a malformed commitment was accepted")
+	}
+}
+
+// A protocol core cannot rely on every caller remembering to check each bundle
+// afterwards, so a mixed set has no digest at all.
+func TestSetDigestRefusesMixedSets(t *testing.T) {
+	key := endpointKey(t, 0x11)
+	delegation := testDelegation(t, key)
+	first := signedBundle(t, delegation, deviceOne, key)
+
+	cases := map[string]func(Bundle) Bundle{
+		"another Agent": func(b Bundle) Bundle {
+			b.AgentID = "agent_" + strings.Repeat("9", 64)
+			return b
+		},
+		"another network": func(b Bundle) Bundle {
+			b.Network = &nativev1.NetworkDomain{NetworkId: "tos-other",
+				GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)}
+			return b
+		},
+		"another suite": func(b Bundle) Bundle {
+			b.AlgorithmID = "tos.messaging.e2ee.other-suite.v1"
+			return b
+		},
+		"another endpoint": func(b Bundle) Bundle {
+			b.EndpointID = "mep_" + strings.Repeat("9", 64)
+			return b
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			other := mutate(signedBundle(t, delegation, deviceTwo, key))
+			if _, err := SetDigest([]Bundle{first, other}); err == nil {
+				t.Fatalf("a set mixing %q produced a digest", name)
+			}
+		})
+	}
+}
+
+func TestBindBundleSetChecksEveryDevice(t *testing.T) {
+	key := endpointKey(t, 0x11)
+	other := endpointKey(t, 0x22)
+	delegation := testDelegation(t, key)
+	now := time.Unix(int64(baseUnix)+60, 0)
+
+	signOne := func(t *testing.T, device string, signing ed25519.PrivateKey) Bundle {
+		t.Helper()
+		signed, err := SignBundle(testBundle(t, delegation, device), signing)
+		if err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		return signed
+	}
+
+	good := []Bundle{signOne(t, deviceOne, key), signOne(t, deviceTwo, key)}
+	committed, err := SetDigest(good)
+	if err != nil {
+		t.Fatalf("set digest: %v", err)
+	}
+	if err := BindBundleSet(delegation, good, committed, now); err != nil {
+		t.Fatalf("a delegated set was refused: %v", err)
+	}
+
+	// One device signed by a key the delegation does not authorize fails the
+	// whole set, rather than being noticed only if somebody checks that device.
+	mixed := []Bundle{signOne(t, deviceOne, key), signOne(t, deviceTwo, other)}
+	digest, err := SetDigest(mixed)
+	if err != nil {
+		t.Fatalf("set digest: %v", err)
+	}
+	if err := BindBundleSet(delegation, mixed, digest, now); err == nil {
+		t.Fatal("a set containing a foreign signature was accepted")
+	}
+
+	// The set must also be the one the descriptor committed.
+	if err := BindBundleSet(delegation, good[:1], committed, now); err == nil {
+		t.Fatal("a truncated set matched the descriptor commitment")
 	}
 }

@@ -15,6 +15,11 @@ const (
 	DomainEndpointDelegation = "tos.messaging.endpoint-delegation.v1\x00"
 	// DomainEndpointID namespaces the endpoint identifier derivation.
 	DomainEndpointID = "tos.messaging.endpoint-id.v1\x00"
+	// DomainDescriptorPolicy namespaces what an Agent commits its endpoint may
+	// advertise.
+	DomainDescriptorPolicy = "tos.messaging.descriptor-policy.v1\x00"
+	// DomainRelaySet namespaces a published Mailbox Relay set.
+	DomainRelaySet = "tos.messaging.relay-set.v1\x00"
 	// DomainContactDescriptor namespaces a Messaging Contact Descriptor.
 	DomainContactDescriptor = "tos.messaging.contact-descriptor.v1\x00"
 	// DomainDHTLocator namespaces a published DHT locator.
@@ -48,6 +53,8 @@ const (
 var Domains = []string{
 	DomainEndpointDelegation,
 	DomainEndpointID,
+	DomainDescriptorPolicy,
+	DomainRelaySet,
 	DomainContactDescriptor,
 	DomainDHTLocator,
 	DomainEventID,

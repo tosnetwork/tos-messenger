@@ -83,7 +83,7 @@ type Delegation struct {
 	ExpiresAtUnix                 uint64
 	MaximumSessionLifetimeSeconds uint64
 	ContactDescriptorPolicyDigest string
-	MailboxPolicyDigest           string
+	InboxAdmissionPolicyDigest    string
 }
 
 type wireDelegation struct {
@@ -101,7 +101,7 @@ type wireDelegation struct {
 	ExpiresAtUnix                 uint64   `json:"expires_at_unix"`
 	MaximumSessionLifetimeSeconds uint64   `json:"maximum_session_lifetime_seconds"`
 	ContactDescriptorPolicyDigest string   `json:"contact_descriptor_policy_digest"`
-	MailboxPolicyDigest           string   `json:"mailbox_policy_digest"`
+	InboxAdmissionPolicyDigest    string   `json:"inbox_admission_policy_digest"`
 }
 
 // DeriveEndpointID binds the endpoint identifier to the network tuple, the
@@ -157,7 +157,7 @@ func CanonicalBytes(delegation Delegation) ([]byte, error) {
 	canon.Uint64(buffer, delegation.ExpiresAtUnix)
 	canon.Uint64(buffer, delegation.MaximumSessionLifetimeSeconds)
 	canon.Text(buffer, delegation.ContactDescriptorPolicyDigest)
-	canon.Text(buffer, delegation.MailboxPolicyDigest)
+	canon.Text(buffer, delegation.InboxAdmissionPolicyDigest)
 	return buffer.Bytes(), nil
 }
 
@@ -190,7 +190,7 @@ func EncodeJSON(delegation Delegation) ([]byte, error) {
 		ExpiresAtUnix:                 delegation.ExpiresAtUnix,
 		MaximumSessionLifetimeSeconds: delegation.MaximumSessionLifetimeSeconds,
 		ContactDescriptorPolicyDigest: delegation.ContactDescriptorPolicyDigest,
-		MailboxPolicyDigest:           delegation.MailboxPolicyDigest,
+		InboxAdmissionPolicyDigest:    delegation.InboxAdmissionPolicyDigest,
 	}
 	return json.Marshal(value)
 }
@@ -231,7 +231,7 @@ func DecodeJSON(raw []byte) (Delegation, error) {
 		ExpiresAtUnix:                 value.ExpiresAtUnix,
 		MaximumSessionLifetimeSeconds: value.MaximumSessionLifetimeSeconds,
 		ContactDescriptorPolicyDigest: value.ContactDescriptorPolicyDigest,
-		MailboxPolicyDigest:           value.MailboxPolicyDigest,
+		InboxAdmissionPolicyDigest:    value.InboxAdmissionPolicyDigest,
 	}
 	if err := Validate(delegation); err != nil {
 		return Delegation{}, err
@@ -384,7 +384,7 @@ func Validate(delegation Delegation) error {
 		return err
 	}
 	if !canon.ValidDigest(delegation.ContactDescriptorPolicyDigest) ||
-		!canon.ValidDigest(delegation.MailboxPolicyDigest) {
+		!canon.ValidDigest(delegation.InboxAdmissionPolicyDigest) {
 		return errors.New("invalid delegation policy digest")
 	}
 	return nil

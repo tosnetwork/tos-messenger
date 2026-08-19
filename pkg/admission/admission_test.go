@@ -62,7 +62,7 @@ func testDelegation(t *testing.T) (identity.Delegation, []byte) {
 		ExpiresAtUnix:                 baseUnix + 86_400,
 		MaximumSessionLifetimeSeconds: 3600,
 		ContactDescriptorPolicyDigest: "sha256:" + strings.Repeat("3d", 32),
-		MailboxPolicyDigest:           "sha256:" + strings.Repeat("4c", 32),
+		InboxAdmissionPolicyDigest:    "sha256:" + strings.Repeat("4c", 32),
 	}
 	encoded, err := identity.EncodeJSON(delegation)
 	if err != nil {
@@ -282,7 +282,10 @@ func TestRejectionsAreClassified(t *testing.T) {
 		},
 		"undelegated class": {
 			event: func(t *testing.T) envelope.Event {
-				return testEvent(t, delegation, func(e *envelope.Event) { e.Kind = "approval.grant" })
+				return testEvent(t, delegation, func(e *envelope.Event) {
+					e.Kind = "counterparty.approval.granted"
+					e.PayloadSchema = ""
+				})
 			},
 			received: baseUnix + 60,
 			expected: fault.CodeClassNotDelegated,
@@ -535,7 +538,10 @@ func TestAdmitRejectsUnusableInput(t *testing.T) {
 
 func TestUnknownEventKindIsRefused(t *testing.T) {
 	gate, _, delegation, encoded := testGate(t, OpenInbox{})
-	event := testEvent(t, delegation, func(e *envelope.Event) { e.Kind = "vendor.custom" })
+	event := testEvent(t, delegation, func(e *envelope.Event) {
+		e.Kind = "vendor.custom"
+		e.PayloadSchema = "tos.messaging.payload.vendor-custom.v1"
+	})
 	decision, err := gate.Admit(inbound(event, encoded))
 	if err != nil {
 		t.Fatalf("admit: %v", err)
@@ -595,3 +601,29 @@ func TestAcceptedEventIsRecoverableWithoutTheDecision(t *testing.T) {
 }
 
 func timeAt(seconds uint64) time.Time { return time.Unix(int64(seconds), 0) }
+
+// An owner approval is this owner authorising something here. It is not a
+// message a remote party may send, over any route, however well signed.
+func TestOwnerApprovalFromTheNetworkIsRefused(t *testing.T) {
+	gate, journal, delegation, encoded := testGate(t, OpenInbox{})
+	for _, route := range []Route{RouteDirect, RouteTunnel, RouteRelay, RouteHTTPS} {
+		t.Run(string(route), func(t *testing.T) {
+			event := testEvent(t, delegation, func(e *envelope.Event) {
+				e.Kind = "owner.approval.grant"
+				e.PayloadSchema = ""
+			})
+			request := inbound(event, encoded)
+			request.Route = route
+			decision, err := gate.Admit(request)
+			if err != nil {
+				t.Fatalf("admit: %v", err)
+			}
+			if decision.Outcome != Rejected {
+				t.Fatalf("a remote owner approval was admitted over %s", route)
+			}
+			if _, found, err := journal.Lookup(event.EventID); err != nil || found {
+				t.Fatal("a remote owner approval was written down")
+			}
+		})
+	}
+}

@@ -187,7 +187,7 @@ func testDelegation(t *testing.T) identity.Delegation {
 		ExpiresAtUnix:                 baseUnix + 86_400,
 		MaximumSessionLifetimeSeconds: 3600,
 		ContactDescriptorPolicyDigest: "sha256:" + strings.Repeat("3d", 32),
-		MailboxPolicyDigest:           "sha256:" + strings.Repeat("4c", 32),
+		InboxAdmissionPolicyDigest:    "sha256:" + strings.Repeat("4c", 32),
 	}
 }
 
@@ -233,8 +233,12 @@ func TestEventIDIsContentAddressed(t *testing.T) {
 	}
 
 	mutations := map[string]func(*Event){
-		"content":        func(e *Event) { e.Content = []byte("goodbye") },
-		"kind":           func(e *Event) { e.Kind = "agent.task.request" },
+		"content": func(e *Event) { e.Content = []byte("goodbye") },
+		"kind": func(e *Event) {
+			e.Kind = "agent.task.request"
+			e.PayloadSchema = ""
+		},
+		"rendering":      func(e *Event) { e.Rendering = "a human sentence" },
 		"conversation":   func(e *Event) { e.ConversationID = "conv_" + strings.Repeat("1", 64) },
 		"device":         func(e *Event) { e.SenderDeviceID = "dev_" + strings.Repeat("1", 64) },
 		"created at":     func(e *Event) { e.CreatedAtUnix = baseUnix + 11 },
@@ -304,7 +308,8 @@ func TestAdmittedByEnforcesDelegatedScope(t *testing.T) {
 	}
 
 	undelegated := testEvent(t)
-	undelegated.Kind = "approval.grant"
+	undelegated.Kind = "counterparty.approval.granted"
+	undelegated.PayloadSchema = ""
 	undelegated, err := NewEvent(undelegated)
 	if err != nil {
 		t.Fatalf("new event: %v", err)
@@ -424,6 +429,10 @@ func TestKnownKindsAllHaveClasses(t *testing.T) {
 		if !eventKindPattern.MatchString(kind) {
 			t.Fatalf("kind %q is not a valid identifier", kind)
 		}
+		schema, known := PayloadSchemaOf(kind)
+		if !known || !payloadSchemaPattern.MatchString(schema) {
+			t.Fatalf("kind %q carries no payload schema", kind)
+		}
 	}
 }
 
@@ -448,4 +457,111 @@ func pad(value int) string {
 	return string([]byte{
 		digits[(value>>12)&0xf], digits[(value>>8)&0xf], digits[(value>>4)&0xf], digits[value&0xf],
 	})
+}
+
+// Approval is two different things and only one of them may travel.
+func TestOwnerApprovalIsNotExpressibleOnTheWire(t *testing.T) {
+	for _, kind := range []string{"owner.approval.grant", "owner.approval.deny"} {
+		if !LocalOnly(kind) {
+			t.Fatalf("%q is accepted from the network", kind)
+		}
+	}
+	for _, kind := range []string{
+		"counterparty.approval.request", "counterparty.approval.granted",
+		"counterparty.approval.denied",
+	} {
+		if LocalOnly(kind) {
+			t.Fatalf("%q is a remote attestation and should travel", kind)
+		}
+	}
+	// The kind a remote party could once have sent to approve something here
+	// no longer exists.
+	if _, known := ClassOf("approval.grant"); known {
+		t.Fatal("the ambiguous approval kind is still recognised")
+	}
+	if class, _ := ClassOf("owner.approval.grant"); class == "counterparty.approval" {
+		t.Fatal("owner approval shares a delegated class with counterparty attestations")
+	}
+}
+
+// Negotiation is conversation. None of its kinds create or accept anything.
+func TestNegotiationKindsExistAndCommitNothing(t *testing.T) {
+	for _, kind := range []string{
+		"negotiation.proposal", "negotiation.counterproposal", "negotiation.withdraw",
+		"negotiation.intent.accept", "negotiation.intent.reject",
+	} {
+		class, known := ClassOf(kind)
+		if !known {
+			t.Fatalf("%q is not a recognised kind", kind)
+		}
+		if class != "negotiation" {
+			t.Fatalf("%q has class %q", kind, class)
+		}
+		if LocalOnly(kind) {
+			t.Fatalf("%q cannot travel", kind)
+		}
+	}
+	// Accepting an intent is not accepting a Quote, and the vocabulary must not
+	// let the two be confused.
+	if _, known := ClassOf("service.quote.accept"); known {
+		t.Fatal("the event vocabulary can accept a Quote")
+	}
+}
+
+// The schema is fixed by the kind, so a payload cannot claim to be something
+// its kind does not carry.
+func TestPayloadSchemaFollowsTheKind(t *testing.T) {
+	event := testEvent(t)
+	schema, known := PayloadSchemaOf("text")
+	if !known {
+		t.Fatal("text has no schema")
+	}
+	if event.PayloadSchema != schema {
+		t.Fatalf("expected %q, got %q", schema, event.PayloadSchema)
+	}
+	forged := event
+	forged.PayloadSchema = "tos.messaging.payload.quote-reference.v1"
+	if err := ValidateEvent(forged); err == nil {
+		t.Fatal("a payload claimed a schema its kind does not carry")
+	}
+	// A forward-compatible kind may declare its own schema, which is what
+	// makes it storable without making it interpretable.
+	unknown := testEvent(t)
+	unknown.Kind = "vendor.custom"
+	unknown.PayloadSchema = "tos.messaging.payload.vendor-custom.v1"
+	if _, err := NewEvent(unknown); err != nil {
+		t.Fatalf("a forward-compatible event was refused: %v", err)
+	}
+	unknown.PayloadSchema = "whatever"
+	if _, err := NewEvent(unknown); err == nil {
+		t.Fatal("an unschema'd forward-compatible event was accepted")
+	}
+}
+
+// The rendering is presentation. It is covered by the identifier like every
+// other field, so it cannot be edited in flight, and it is never what
+// automation reads.
+func TestRenderingIsCarriedButNotAuthoritative(t *testing.T) {
+	event := testEvent(t)
+	event.Rendering = "the task is 82% complete"
+	completed, err := NewEvent(event)
+	if err != nil {
+		t.Fatalf("new event: %v", err)
+	}
+	encoded, err := EncodeEventJSON(completed)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := DecodeEventJSON(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.Rendering != completed.Rendering {
+		t.Fatal("the rendering did not survive transport")
+	}
+	tampered := decoded
+	tampered.Rendering = "the task is complete"
+	if err := ValidateEvent(tampered); err == nil {
+		t.Fatal("the rendering was editable without changing the event identifier")
+	}
 }

@@ -100,20 +100,11 @@ func BundleDigest(bundle Bundle) (string, error) {
 // changes the descriptor rather than happening silently underneath it. The
 // order devices are listed in does not change the result.
 func SetDigest(bundles []Bundle) (string, error) {
-	if len(bundles) == 0 || len(bundles) > MaxDevicesPerSet {
-		return "", errors.New("invalid prekey bundle set size")
+	if err := ValidateSet(bundles); err != nil {
+		return "", err
 	}
 	digests := make([]string, 0, len(bundles))
-	devices := make(map[string]struct{}, len(bundles))
-	endpoint := bundles[0].EndpointID
 	for _, bundle := range bundles {
-		if bundle.EndpointID != endpoint {
-			return "", errors.New("a prekey bundle set belongs to one endpoint")
-		}
-		if _, duplicate := devices[bundle.DeviceID]; duplicate {
-			return "", errors.New("a prekey bundle set cannot list one device twice")
-		}
-		devices[bundle.DeviceID] = struct{}{}
 		digest, err := BundleDigest(bundle)
 		if err != nil {
 			return "", err
@@ -127,6 +118,65 @@ func SetDigest(bundles []Bundle) (string, error) {
 		canon.Text(buffer, digest)
 	}
 	return canon.Digest(buffer.Bytes()), nil
+}
+
+// ValidateSet enforces that a published set is one endpoint's devices and
+// nothing else.
+//
+// A protocol core cannot rely on every caller remembering to check each bundle
+// afterwards. A set that mixes Agents, networks, or suites would produce a
+// digest a descriptor could commit, and the mixing would only be noticed by
+// whoever happened to verify the bundles individually.
+func ValidateSet(bundles []Bundle) error {
+	if len(bundles) == 0 || len(bundles) > MaxDevicesPerSet {
+		return errors.New("invalid prekey bundle set size")
+	}
+	first := bundles[0]
+	devices := make(map[string]struct{}, len(bundles))
+	for _, bundle := range bundles {
+		if err := ValidateBundle(bundle, true); err != nil {
+			return err
+		}
+		if bundle.EndpointID != first.EndpointID {
+			return errors.New("a prekey bundle set belongs to one endpoint")
+		}
+		if bundle.AgentID != first.AgentID {
+			return errors.New("a prekey bundle set belongs to one Agent")
+		}
+		if bundle.Network.NetworkId != first.Network.NetworkId ||
+			bundle.Network.GenesisRootHash != first.Network.GenesisRootHash ||
+			bundle.Network.GenesisFileHash != first.Network.GenesisFileHash {
+			return errors.New("a prekey bundle set belongs to one network")
+		}
+		if bundle.AlgorithmID != first.AlgorithmID {
+			// A sender picks one suite for the conversation, not one per
+			// device, so a set spanning suites has no single answer.
+			return errors.New("a prekey bundle set uses one suite")
+		}
+		if _, duplicate := devices[bundle.DeviceID]; duplicate {
+			return errors.New("a prekey bundle set cannot list one device twice")
+		}
+		devices[bundle.DeviceID] = struct{}{}
+	}
+	return nil
+}
+
+// BindBundleSet admits a published device set under one delegation.
+//
+// It does in one call what a caller would otherwise have to remember to do for
+// each device: the set is coherent, every bundle is signed by the delegated
+// key, none outlives the delegation, and the whole set reproduces the digest
+// the descriptor committed.
+func BindBundleSet(delegation identity.Delegation, bundles []Bundle, committed string, now time.Time) error {
+	if err := ValidateSet(bundles); err != nil {
+		return err
+	}
+	for _, bundle := range bundles {
+		if err := BindBundle(delegation, bundle, now); err != nil {
+			return err
+		}
+	}
+	return MatchesDescriptorDigest(committed, bundles)
 }
 
 // MatchesDescriptorDigest checks a published device set against the prekey

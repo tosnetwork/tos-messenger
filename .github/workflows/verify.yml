@@ -1,0 +1,101 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # Formatting is checked rather than applied, so a difference is a failure
+      # and not a commit made by the pipeline.
+      - name: format
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      # The race detector is the point of running tests here. Most of what this
+      # repository gets wrong under concurrency is invisible without it.
+      - name: test
+        run: go test -race -count=1 ./...
+
+  # A single-writer journal, a UDP probe, and a binary DHT value all have
+  # assumptions about word size and endianness that only another architecture
+  # can disprove.
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { os: linux, arch: amd64 }
+          - { os: linux, arch: arm64 }
+          - { os: linux, arch: arm }
+          - { os: linux, arch: riscv64 }
+          - { os: darwin, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: build ${{ matrix.target.os }}/${{ matrix.target.arch }}
+        env:
+          GOOS: ${{ matrix.target.os }}
+          GOARCH: ${{ matrix.target.arch }}
+        run: go build ./...
+
+  # Seed corpora run on every change; a longer campaign is a separate concern.
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - ./pkg/identity
+          - ./pkg/directory
+          - ./pkg/envelope
+          - ./pkg/probe
+          - ./pkg/fault
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: fuzz ${{ matrix.package }}
+        run: |
+          for target in $(go test ${{ matrix.package }} -list 'Fuzz.*' | grep '^Fuzz' || true); do
+            echo "== $target"
+            go test ${{ matrix.package }} -run "$target" -fuzz "$target" -fuzztime 60s
+          done
+
+  # Vectors are what a second implementation checks itself against, so a change
+  # to one has to be deliberate rather than incidental.
+  vectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: vectors are unchanged
+        run: |
+          go test ./internal/vectors -count=1
+          git diff --exit-code internal/vectors/testdata

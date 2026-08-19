@@ -180,6 +180,13 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 	if !known {
 		return g.refuse(inbound, fault.CodeUnknownEventKind, ""), nil
 	}
+	// A local-only kind carries authority rather than information: it is this
+	// owner authorising something here. Arriving from the network it is not a
+	// request to evaluate, it is a kind that has no business being expressible
+	// on the wire, and it is refused before anything else looks at it.
+	if envelope.LocalOnly(inbound.Event.Kind) {
+		return g.refuse(inbound, fault.CodeUnknownEventKind, class), nil
+	}
 	if !sameNetwork(inbound.Event.Network, g.config.Network) {
 		return g.refuse(inbound, fault.CodeNetworkMismatch, class), nil
 	}
