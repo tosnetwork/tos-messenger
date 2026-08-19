@@ -96,6 +96,8 @@ than silently forking two implementations.
 | Adversarial corpus scope | the corpus targets decoders and holds only refusals a decoder actually makes; a semantic refusal (local-only kind, tampered signature) belongs to the gate or the verifier, and putting it under a decoder would let a second implementation pass by refusing for the wrong reason | `internal/vectors` corpus |
 | Device revocation enforcement | the admission gate refuses only a revoked device, not an unknown one: the ledger is a revocation overlay on top of the delegation, and refusing an unseen device would cut off every device a peer added since the last descriptor fetch | `admission.Gate.Admit`, `eventlog.DeviceLedger.Judge` |
 | Multi-device fan-out | one logical event, one content-addressed identity, one sealed copy to every live device of the recipient and of the sender; an expired bundle bootstraps nothing but does not close an established session | `e2ee.FanOut` |
+| Room membership epoch | membership is a sorted Agent set; every add or remove advances a monotonic epoch by exactly one and commits a domain-separated digest over the room, epoch, count, and members. The epoch inside the preimage is what stops an old membership being replayed as a current one. A removed member is absent, not revoked — an Agent legitimately returns, unlike a device key, so re-adding is an ordinary add at a fresh epoch | `pkg/room`, `eventlog.RoomLedger` |
+| Room succession scope | the ledger accepts only strict single-step succession (epoch *n*+1 derived from the members of epoch *n*), because it holds only the current member set and each successor is derived from it; a gapped or peer-observed commit carries no member set to verify. Reconciling membership a peer drove independently is deferred to the room-authority decision below | `eventlog.RoomLedger.Advance` |
 | Account binding | the account a finalized Agent record came from is recomputed from the network, object identifier, registry code and workchain, and compared; a chain policy without a locator cannot validate | `identity.ChainPolicy.Locator`, `tosaddr.Locator` |
 | Addressing rules | called through the protocol SDK rather than reimplemented, because a second implementation of an addressing rule can drift and a drifted check refuses correct state | `tosaddr` |
 | Pending queue bounds | what may wait on an owner is bounded in count, per sender, in bytes and in age; a full queue refuses the sender rather than dropping the event, and expired questions are recorded as refused rather than deleted | `eventlog.Quota`, `eventlog.ExpirePendingAdmissions` |
@@ -153,7 +155,14 @@ implementation of them:
   provide and how it is refuted; it selects nothing and implements no
   cryptography;
 - the group key-management protocol, where MLS (RFC 9420) is the recorded
-  default candidate that an alternative must be justified against;
+  default candidate that an alternative must be justified against. `pkg/room`
+  now commits room *membership* per epoch, but no per-epoch group secret is
+  derived and no mechanism delivers one, so group encryption is still absent;
+- the room-authority model — whether a room's membership is driven by a single
+  owner or by member consensus — which decides how a participant reconciles a
+  membership epoch another party advanced while it was offline. Until it is
+  settled, `eventlog.RoomLedger` accepts only strict single-step succession it
+  can verify from the member set it holds;
 - private-room transport, beyond the per-device fan-out default;
 - first-contact admission parameters, including whether an economic bond is
   used, which the current fixed-price software-work escrow cannot express.

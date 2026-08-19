@@ -77,6 +77,11 @@ const (
 	DomainReachabilityCoordinator = "tos.messaging.reachability-coordinator.v1\x00"
 	// DomainReachabilityObservation namespaces a coordinator attestation.
 	DomainReachabilityObservation = "tos.messaging.reachability-observation.v1\x00"
+	// DomainRoomMembership namespaces the digest a room commits over the members
+	// of one epoch. The epoch is inside the preimage, so two epochs with the
+	// same member set commit different digests and cannot be mistaken for each
+	// other.
+	DomainRoomMembership = "tos.messaging.room-membership.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -101,6 +106,7 @@ var Domains = []string{
 	DomainReachabilityPairResult,
 	DomainReachabilityCoordinator,
 	DomainReachabilityObservation,
+	DomainRoomMembership,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainNegotiationRecord,

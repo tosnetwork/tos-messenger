@@ -24,7 +24,7 @@ gate status: this repository carries none and consumes no gate capacity.
 | M2-T technical offline Mailbox and multi-Relay failover | ⬜ | No Relay implementation. A descriptor can publish a relay set, which is a declaration, not a service |
 | M2-C commercial Relay lease | 🔒 | Expansion Gate locked |
 | M3 OpenFox and conversation-to-commerce integration | 🟡 | Foundations only: typed commerce, mandates, budgets, durable negotiations and the verification contract exist. No transport, no concrete finalized-state resolver wired, no wallet, no execution integration |
-| M4 multi-device and private rooms | 🟡 | Foundations only: prekey publication and room event shapes exist. No session fan-out, no rotation model, no membership epochs, no group encryption |
+| M4 multi-device and private rooms | 🟡 | Device set succession, session fan-out, and room membership epochs exist (`pkg/e2ee`, `pkg/room`, `pkg/eventlog`). Still missing: group key agreement (per-epoch group encryption), and a room-authority model for peer-observed membership beyond single-step local succession |
 
 ## Components
 
@@ -41,7 +41,7 @@ gate status: this repository carries none and consumes no gate capacity.
 | Optional ReadAck wire profile | ⬜ | — | Local `ReadAtUnix` is UI state, not a cross-Agent wire profile |
 | Encrypted offline Mailbox Relay | ⬜ | — | Nothing. It is a transport path, ordered after M0-R |
 | Multi-Relay redundancy and failover | ⬜ | — | Nothing |
-| Private group encryption and membership epochs | ⬜ | `room.*` payload shapes | No membership state machine, no group key agreement |
+| Private group encryption and membership epochs | 🟡 | `pkg/room` (membership state machine), `pkg/eventlog` (durable room ledger), `room.*` payload shapes | Membership epochs are closed and end-to-end tested: the state machine advances one epoch per change, commits a domain-separated digest over the sorted member set, and the ledger enforces monotonic epoch progression (rollback and gap refused) across restart. **Named gap:** no group key agreement — each epoch has no per-epoch group secret and no mechanism to deliver one, so group *encryption* is absent; and the ledger accepts only strict single-step succession (peer-observed gapped commits carry no member set to verify and are out of scope until a room authority model exists) |
 | Public Agent channels over Overlay with history synchronization | ⬜ | — | Nothing |
 | Messenger-specific encrypted attachment protocol | ⬜ | `artifact.*` payload shapes | References by digest only |
 | OpenFox `tos-messenger` channel adapter | ⬜ | — | Nothing; needs a transport first |
@@ -81,9 +81,22 @@ repository, and one ✅ or one 🟡 would misstate both halves.
    operators, ≥3 sites per required scenario, real networks. The report tool
    refuses to bless anything less as a route decision. A single-operator dry
    run of the whole chain is scripted in
-   [`M0R_PILOT_RUNBOOK.md`](M0R_PILOT_RUNBOOK.md).
-2. **The adversarial corpus.**
-3. **Membership epochs for rooms.**
+   [`M0R_PILOT_RUNBOOK.md`](M0R_PILOT_RUNBOOK.md). *(Blocked: needs external
+   operators.)*
+2. **The adversarial corpus.** *(Done at the decode layer; the verify-layer
+   extension below is what remains.)*
+3. **Membership epochs for rooms.** *(Done: `pkg/room` state machine +
+   durable epoch ledger. Group key agreement is the remaining half of the
+   rooms row and is the next codeable rooms work.)*
+4. **Extend the adversarial corpus to the verify layer** — a tampered
+   signature, a local-only kind arriving from the network, the reachability
+   trial/policy refusals. Needs a delegation and a coordinator key in the
+   generator.
+5. **A room authority / group key agreement design.** Membership epochs commit
+   *who* is in a room; group encryption needs a per-epoch secret and a way to
+   deliver it to exactly the current members. This depends on a design decision
+   (single-authority vs. member-consensus room ownership) recorded in
+   [`OPEN_DECISIONS.md`](OPEN_DECISIONS.md).
 
-These do not require the study; none of them settles the genesis-hash
+Items 1 does require the study; none of these settle the genesis-hash
 representation, which blocks the freeze itself.
