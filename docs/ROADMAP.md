@@ -11,7 +11,7 @@ because a table that rounds partial work up is a table that hides exactly the pa
 somebody would need to finish. Nothing in this file changes gate status: this repository
 carries none and consumes no gate capacity.
 
-**Last checked: 2026-08-19, at `550ab37`.**
+**Last checked: 2026-08-19, at `95f6a61`.**
 
 ## Milestone gates
 

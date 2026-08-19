@@ -99,6 +99,9 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 	}
 	if n.agreed == nil || !n.agreed.Equal(quote.Terms) {
 		n.end(StateRejected, "the finalized quote does not match what was agreed")
+		if err := n.persist(); err != nil {
+			return err
+		}
 		return errors.New("the finalized quote does not match what was agreed")
 	}
 	// The owner's decision has to still describe this, and the terms have to
@@ -121,7 +124,7 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 	n.commitment = commitment
 	n.quote = &quote
 	n.state = StateFinalized
-	return nil
+	return n.persist()
 }
 
 // Quote returns the finalized Accepted Quote behind a commitment.

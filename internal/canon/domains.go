@@ -15,6 +15,9 @@ const (
 	DomainEndpointDelegation = "tos.messaging.endpoint-delegation.v1\x00"
 	// DomainEndpointID namespaces the endpoint identifier derivation.
 	DomainEndpointID = "tos.messaging.endpoint-id.v1\x00"
+	// DomainNegotiationRecord namespaces the on-disk name of one negotiation,
+	// so an identifier a caller chose cannot name a path.
+	DomainNegotiationRecord = "tos.messaging.negotiation-record.v1\x00"
 	// DomainBudget namespaces the identifier of one asset's budget.
 	DomainBudget = "tos.messaging.budget.v1\x00"
 	// DomainNegotiationTerms namespaces one set of agreed terms.
@@ -96,6 +99,7 @@ var Domains = []string{
 	DomainReachabilityObservation,
 	DomainPayload,
 	DomainInboxPolicy,
+	DomainNegotiationRecord,
 	DomainBudget,
 	DomainNegotiationTerms,
 	DomainOwnerDecision,

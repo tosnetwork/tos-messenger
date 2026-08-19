@@ -37,7 +37,7 @@ decision:
 | `pkg/payload` | A typed body for every event kind, in canonical binary |
 | `pkg/daemon` | Assembly: one state directory, one socket, one schedule |
 | `pkg/negotiation` | The layer between what an Agent says and what the system may do: mandates, exact amounts, the intent boundary, and the negotiation state machine |
-| `pkg/eventlog` (mandates) | The owner's standing authorisations, placed and withdrawn on the owner's socket and resolved from the store when a spend is judged |
+| `pkg/eventlog` (mandates, budgets, negotiations) | The owner's standing authorisations, placed and withdrawn on the owner's socket and resolved from the store when a spend is judged |
 | `pkg/e2ee` | The contract a candidate encryption suite must satisfy as a pure state transition, message bindings, and published prekey bundles |
 | `pkg/e2ee/conformance` | Refutes a candidate suite: ten properties a black-box run can disprove |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |

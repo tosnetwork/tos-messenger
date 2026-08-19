@@ -89,6 +89,19 @@ func testBudget(t *testing.T, total string) *Budget {
 	return budget
 }
 
+// memoryStore is a negotiation store for tests. A negotiation with nowhere to
+// survive a restart is one the code refuses to start.
+type memoryStore struct {
+	saved Snapshot
+	held  bool
+}
+
+func (m *memoryStore) Save(snapshot Snapshot) error {
+	m.saved = snapshot
+	m.held = true
+	return nil
+}
+
 // stubResolver stands in for reading a finalized Accepted Quote off the chain.
 type stubResolver struct {
 	quote VerifiedAcceptedQuote
@@ -176,7 +189,7 @@ func at(offset uint64) time.Time { return time.Unix(int64(baseUnix+offset), 0) }
 
 func start(t *testing.T, budget *Budget) *Negotiation {
 	t.Helper()
-	instance, err := New("neg-1", conversation, counterparty, testMandate(), budget, at(0))
+	instance, err := New("neg-1", conversation, counterparty, testMandate(), budget, &memoryStore{}, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -491,7 +504,11 @@ func TestExpiryEndsTheExchange(t *testing.T) {
 	if err := second.AcceptIntent(at(2)); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	if !second.Expire(time.Unix(int64(baseUnix+3600), 0)) {
+	ended, err := second.Expire(time.Unix(int64(baseUnix+3600), 0))
+	if err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if !ended {
 		t.Fatal("expired terms did not end the negotiation")
 	}
 	if second.State() != StateExpired {
@@ -506,11 +523,11 @@ func TestConcurrentNegotiationsShareOneBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("budget: %v", err)
 	}
-	first, err := New("neg-1", conversation, counterparty, testMandate(), budget, at(0))
+	first, err := New("neg-1", conversation, counterparty, testMandate(), budget, &memoryStore{}, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	second, err := New("neg-2", conversation, counterparty, testMandate(), budget, at(0))
+	second, err := New("neg-2", conversation, counterparty, testMandate(), budget, &memoryStore{}, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -548,7 +565,7 @@ func TestBudgetCommitsOnlyWhatWasHeld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("budget: %v", err)
 	}
-	instance, err := New("neg-1", conversation, counterparty, testMandate(), budget, at(0))
+	instance, err := New("neg-1", conversation, counterparty, testMandate(), budget, &memoryStore{}, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -715,18 +732,18 @@ func TestAssetsAreIdentifiedByContract(t *testing.T) {
 
 func TestNegotiationRefusesUnusableInput(t *testing.T) {
 	mandate := testMandate()
-	if _, err := New("", conversation, counterparty, mandate, nil, at(0)); err == nil {
+	if _, err := New("", conversation, counterparty, mandate, nil, &memoryStore{}, at(0)); err == nil {
 		t.Fatal("a negotiation without an identifier was started")
 	}
-	if _, err := New("neg-1", "conv_bad", counterparty, mandate, nil, at(0)); err == nil {
+	if _, err := New("neg-1", "conv_bad", counterparty, mandate, nil, &memoryStore{}, at(0)); err == nil {
 		t.Fatal("an invalid conversation was accepted")
 	}
-	if _, err := New("neg-1", conversation, "agent_bad", mandate, nil, at(0)); err == nil {
+	if _, err := New("neg-1", conversation, "agent_bad", mandate, nil, &memoryStore{}, at(0)); err == nil {
 		t.Fatal("an invalid counterparty was accepted")
 	}
 	expired := mandate
 	expired.ExpiresAtUnix = baseUnix
-	if _, err := New("neg-1", conversation, counterparty, expired, nil, at(0)); err == nil {
+	if _, err := New("neg-1", conversation, counterparty, expired, nil, &memoryStore{}, at(0)); err == nil {
 		t.Fatal("a negotiation started under an expired mandate")
 	}
 }
@@ -855,12 +872,12 @@ func TestFinalizeNeedsAQuoteThatExists(t *testing.T) {
 
 // A mandate that may commit needs somewhere to commit against.
 func TestCommitAuthorityNeedsABudget(t *testing.T) {
-	if _, err := New("neg-1", conversation, counterparty, testMandate(), nil, at(0)); err == nil {
+	if _, err := New("neg-1", conversation, counterparty, testMandate(), nil, &memoryStore{}, at(0)); err == nil {
 		t.Fatal("a commit mandate was started with no budget")
 	}
 	converse := testMandate()
 	converse.Authority = AuthorityConverse
-	if _, err := New("neg-1", conversation, counterparty, converse, nil, at(0)); err != nil {
+	if _, err := New("neg-1", conversation, counterparty, converse, nil, &memoryStore{}, at(0)); err != nil {
 		t.Fatalf("a conversation mandate needed a budget: %v", err)
 	}
 }
@@ -910,5 +927,132 @@ func TestBudgetSurvivesARestart(t *testing.T) {
 	}
 	if _, err := OpenBudget(usdt("150000000"), nil); err == nil {
 		t.Fatal("a budget was opened with nowhere to survive")
+	}
+}
+
+// A negotiation that lived only in memory would lose its state when a process
+// ended while its budget hold stayed on the books: the money would be spoken
+// for by an exchange nobody could find, and the approval that took a person
+// would have to be asked for again.
+func TestNegotiationSurvivesARestart(t *testing.T) {
+	ledger := &memoryLedger{}
+	budget, err := OpenBudget(usdt("1000000000"), ledger)
+	if err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	store := &memoryStore{}
+	instance, err := New("neg-1", conversation, counterparty, testMandate(), budget, store, at(0))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if err := instance.ReceiveProposal(terms("110000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if err := instance.AcceptIntent(at(2)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := instance.ApproveByOwner(approvedDigest(t, instance), at(3)); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// The process ends here.
+	if !store.held {
+		t.Fatal("nothing was written down")
+	}
+	restoredBudget, err := OpenBudget(usdt("1000000000"), ledger)
+	if err != nil {
+		t.Fatalf("reopen budget: %v", err)
+	}
+	restored, err := Restore(store.saved, testMandate(), restoredBudget, store)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if restored.State() != StateIntentAgreed {
+		t.Fatalf("unexpected restored state: %q", restored.State())
+	}
+	agreed, ok := restored.Agreed()
+	if !ok || agreed.Price.Atomic != "110000000" {
+		t.Fatalf("the agreed terms did not survive: %+v", agreed)
+	}
+	// The owner's decision survived, and it still describes these terms.
+	if _, held := restored.Approval(); !held {
+		t.Fatal("the owner's approval did not survive")
+	}
+	if err := restored.BeginCanonicalization(at(4)); err != nil {
+		t.Fatalf("the restored approval was not honoured: %v", err)
+	}
+	// And the hold it took is still on the books.
+	if held, found := restoredBudget.Reserved("neg-1"); !found || held.Atomic != "110000000" {
+		t.Fatalf("the budget hold did not survive: %v %v", held, found)
+	}
+}
+
+// The mandate is referenced rather than copied, so an exchange does not resume
+// under an authority that was withdrawn or replaced.
+func TestRestoreRefusesAMandateThatMoved(t *testing.T) {
+	store := &memoryStore{}
+	instance, err := New("neg-1", conversation, counterparty, testMandate(),
+		testBudget(t, "1000000000"), store, at(0))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+
+	raised := testMandate()
+	raised.MaxTotal = usdt("900000000")
+	if _, err := Restore(store.saved, raised, testBudget(t, "1000000000"), store); err == nil {
+		t.Fatal("an exchange resumed under a mandate that had changed")
+	}
+	if _, err := Restore(store.saved, testMandate(), testBudget(t, "1000000000"), nil); err == nil {
+		t.Fatal("a restored negotiation was given nowhere to survive")
+	}
+	if _, err := Restore(store.saved, testMandate(), nil, store); err == nil {
+		t.Fatal("a commit mandate was restored with no budget")
+	}
+}
+
+// A snapshot that does not describe a negotiation this build knows is refused
+// rather than half-understood.
+func TestSnapshotsAreStrict(t *testing.T) {
+	store := &memoryStore{}
+	if _, err := New("neg-1", conversation, counterparty, testMandate(),
+		testBudget(t, "1000000000"), store, at(0)); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	encoded, err := EncodeSnapshotJSON(store.saved)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if _, err := DecodeSnapshotJSON(encoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, err := DecodeSnapshotJSON(append(encoded, '{')); err == nil {
+		t.Fatal("a snapshot with trailing JSON was accepted")
+	}
+	if _, err := DecodeSnapshotJSON([]byte(`{"schema":"other"}`)); err == nil {
+		t.Fatal("a snapshot of another schema was accepted")
+	}
+
+	for name, mutate := range map[string]func(*Snapshot){
+		"unknown state":  func(s *Snapshot) { s.State = "haggling" },
+		"no negotiation": func(s *Snapshot) { s.ID = "" },
+		"no mandate":     func(s *Snapshot) { s.MandateDigest = "" },
+		"finalized with no commitment": func(s *Snapshot) {
+			s.State = string(StateFinalized)
+			s.Commitment = ""
+		},
+		"approval from the future": func(s *Snapshot) {
+			s.Approval = &Approval{TermsDigest: "x", Generation: s.Generation + 1}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			snapshot := store.saved
+			mutate(&snapshot)
+			if err := snapshot.Validate(); err == nil {
+				t.Fatalf("expected %q to be refused", name)
+			}
+		})
 	}
 }

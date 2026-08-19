@@ -61,6 +61,7 @@ type Negotiation struct {
 	quote      *VerifiedAcceptedQuote
 	failure    string
 	budget     *Budget
+	store      Store
 }
 
 // Approval is an owner decision bound to what it was a decision about.
@@ -80,7 +81,8 @@ type Approval struct {
 // A mandate that may commit needs a budget. Without one, several conversations
 // each inside their own ceiling can agree to more than the owner has, and the
 // shortfall only appears once every yes already exists.
-func New(id, conversationID, counterpartyAgentID string, mandate Mandate, budget *Budget, now time.Time) (*Negotiation, error) {
+func New(id, conversationID, counterpartyAgentID string, mandate Mandate,
+	budget *Budget, store Store, now time.Time) (*Negotiation, error) {
 	if !ids.Conversation.MatchString(conversationID) {
 		return nil, errors.New("invalid conversation identifier")
 	}
@@ -96,10 +98,31 @@ func New(id, conversationID, counterpartyAgentID string, mandate Mandate, budget
 	if mandate.Authority == AuthorityCommit && budget == nil {
 		return nil, errors.New("a mandate that may commit needs a budget to commit against")
 	}
-	return &Negotiation{
+	if store == nil {
+		return nil, errors.New("a negotiation needs somewhere to survive a restart")
+	}
+	instance := &Negotiation{
 		ID: id, ConversationID: conversationID, CounterpartyAgentID: counterpartyAgentID,
-		Mandate: mandate, state: StateDiscussing, budget: budget,
-	}, nil
+		Mandate: mandate, state: StateDiscussing, budget: budget, store: store,
+	}
+	// The first state is written before it is returned. A negotiation that
+	// existed only after its first transition would leave a budget hold behind
+	// with nothing to account for it.
+	if err := instance.persist(); err != nil {
+		return nil, err
+	}
+	return instance, nil
+}
+
+// persist writes the current state down. Every transition calls it, and a
+// transition that could not be written is not a transition: the caller is told
+// it failed rather than holding a negotiation the disk has never heard of.
+func (n *Negotiation) persist() error {
+	snapshot, err := n.Snapshot()
+	if err != nil {
+		return err
+	}
+	return n.store.Save(snapshot)
 }
 
 // State returns where the negotiation stands.
@@ -168,6 +191,9 @@ func (n *Negotiation) Counter(terms Terms, now time.Time) error {
 	}
 	if n.counteroffers >= n.Mandate.MaxCounteroffers {
 		n.end(StateWithdrawn, "counteroffer budget exhausted")
+		if err := n.persist(); err != nil {
+			return err
+		}
 		return errors.New("the mandate's counteroffer budget is exhausted")
 	}
 	if _, err := n.Mandate.Permits(terms, now); err != nil {
@@ -177,7 +203,7 @@ func (n *Negotiation) Counter(terms Terms, now time.Time) error {
 	n.onTable = &offer
 	n.counteroffers++
 	n.state = StateCounterproposalPending
-	return nil
+	return n.persist()
 }
 
 // AcceptIntent agrees, in conversation, to the terms on the table.
@@ -208,7 +234,7 @@ func (n *Negotiation) AcceptIntent(now time.Time) error {
 	n.agreed = &agreed
 	n.needsApproval = needsApproval
 	n.state = StateIntentAgreed
-	return nil
+	return n.persist()
 }
 
 // Reopen returns an agreed negotiation to discussion.
@@ -238,7 +264,7 @@ func (n *Negotiation) Reopen(reason string, now time.Time) error {
 	n.approval = nil
 	n.generation++
 	n.state = StateDiscussing
-	return nil
+	return n.persist()
 }
 
 // Generation is how many times this negotiation has been reopened. It is what
@@ -259,7 +285,7 @@ func (n *Negotiation) RejectIntent(reason string) error {
 		return errors.New("this negotiation has already ended")
 	}
 	n.end(StateRejected, reason)
-	return nil
+	return n.persist()
 }
 
 // Withdraw ends the exchange from our side.
@@ -268,7 +294,7 @@ func (n *Negotiation) Withdraw(reason string) error {
 		return errors.New("this negotiation has already ended")
 	}
 	n.end(StateWithdrawn, reason)
-	return nil
+	return n.persist()
 }
 
 // ApproveByOwner records the owner's decision.
@@ -310,7 +336,7 @@ func (n *Negotiation) ApproveByOwner(termsDigest string, now time.Time) error {
 		TermsDigest: current, Generation: n.generation,
 		MandateDigest: mandateDigest, AtUnix: uint64(now.Unix()),
 	}
-	return nil
+	return n.persist()
 }
 
 // DenyByOwner records the owner refusing.
@@ -319,7 +345,7 @@ func (n *Negotiation) DenyByOwner(reason string) error {
 		return errors.New("there is no agreed intent to refuse")
 	}
 	n.end(StateRejected, reason)
-	return nil
+	return n.persist()
 }
 
 // BeginCanonicalization moves from conversation towards a commitment.
@@ -336,7 +362,7 @@ func (n *Negotiation) BeginCanonicalization(now time.Time) error {
 		}
 	}
 	n.state = StateCanonicalizationPending
-	return nil
+	return n.persist()
 }
 
 // approvalStands checks that the owner's decision still describes this
@@ -369,19 +395,21 @@ func (n *Negotiation) approvalStands() error {
 }
 
 // Expire ends a negotiation whose mandate or terms ran out.
-func (n *Negotiation) Expire(now time.Time) bool {
+func (n *Negotiation) Expire(now time.Time) (bool, error) {
 	if n.settled() {
-		return false
+		return false, nil
 	}
+	reason := ""
 	if err := n.Mandate.Live(now); err != nil {
-		n.end(StateExpired, "the mandate expired")
-		return true
+		reason = "the mandate expired"
+	} else if n.agreed != nil && uint64(now.Unix()) >= n.agreed.NotAfterUnix {
+		reason = "the agreed terms expired"
 	}
-	if n.agreed != nil && uint64(now.Unix()) >= n.agreed.NotAfterUnix {
-		n.end(StateExpired, "the agreed terms expired")
-		return true
+	if reason == "" {
+		return false, nil
 	}
-	return false
+	n.end(StateExpired, reason)
+	return true, n.persist()
 }
 
 // ActiveAgreement reports whether there is a commercial agreement in force.
