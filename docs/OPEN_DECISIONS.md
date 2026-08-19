@@ -15,9 +15,13 @@ than silently forking two implementations.
 | Delegation authenticity | No separate signature. A delegation is authentic when its canonical digest appears in the finalized Agent's committed delegation digests | `identity.Verify` |
 | Delegation lifetime bound | at most 365 days; session lifetime within 60 seconds to 30 days and never longer than the delegation | `identity.validateWindowFields` |
 | Descriptor lifetime bound | at most 7 days, and never beyond the delegation expiry | `directory.ValidateDescriptor`, `directory.Bind` |
-| DHT key derivation | SHA-256 over a domain-separated preimage of the network-bound Agent digest and endpoint identifier | `directory.LookupKey` |
-| DHT value size bound | 1024 bytes encoded; retrieval reference at most 512 bytes | `directory.MaxLocatorBytes` |
-| Locator retrieval schemes | `https`, `adnl`, `rldp`, and `http` on loopback only | `directory.validateDescriptorLocator` |
+| DHT key | not ours to choose: TOS Core refuses a key description whose identifier is not the short identifier of the publishing key, so it is `sha256` over the boxed `pub.ed25519`, with the protocol name `tos.messaging.locator` and index 0 | `directory.LocatorKey` |
+| DHT update rule | `dht.updateRule.signature`, so the network itself refuses an unauthorized overwrite rather than leaving it for the application to detect | `directory.UpdateRule` |
+| Republish rule | a replacement must strictly extend the stored expiry, because the signature rule keeps whichever value has the greater time to live | `directory.Republish` |
+| DHT value size bound | 640 bytes encoded against a 768-byte network limit; retrieval reference at most 256 bytes | `directory.MaxLocatorBytes`, `directory.MaxDHTValueBytes` |
+| DHT wire format | compact canonical binary; JSON is for debugging and file exchange and is never published or signed | `directory.EncodeLocator` |
+| Locator lifetime | at most 24 hours from `issued_at`, now enforced rather than only declared | `directory.MaxLocatorLifetimeSeconds` |
+| Locator retrieval schemes | `https`, `adnl`, `rldp`, and `http` on loopback only, with user info, query strings, and fragments refused so no credential is published | `directory.validateDescriptorLocator` |
 | Envelope size bounds | advertised maximum between 4 KiB and 1 MiB; stored ciphertext at most 1 MiB | `directory.MinEnvelopeBytes`, `envelope.MaxCiphertextBytes` |
 | Relay retention bound | at most 30 days, and never beyond the operator's own bound | `envelope.AcceptedForStorage` |
 | Event ID derivation | content addressed: `evt_` + SHA-256 over the canonical event preimage excluding the identifier itself | `envelope.DeriveEventID` |

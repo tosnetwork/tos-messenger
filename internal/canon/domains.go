@@ -19,12 +19,6 @@ const (
 	DomainContactDescriptor = "tos.messaging.contact-descriptor.v1\x00"
 	// DomainDHTLocator namespaces a published DHT locator.
 	DomainDHTLocator = "tos.messaging.dht-locator.v1\x00"
-	// DomainDHTKey namespaces the DHT lookup key derivation.
-	DomainDHTKey = "tos.messaging.dht-key.v1\x00"
-	// DomainNetworkDomain namespaces the network tuple digest.
-	DomainNetworkDomain = "tos.messaging.network-domain.v1\x00"
-	// DomainAgentLocator namespaces the network-bound Agent digest.
-	DomainAgentLocator = "tos.messaging.agent-locator.v1\x00"
 	// DomainEventID namespaces the content-addressed Event identifier.
 	DomainEventID = "tos.messaging.event-id.v1\x00"
 	// DomainPrekeyBundle namespaces one published prekey bundle.
@@ -48,9 +42,6 @@ var Domains = []string{
 	DomainEndpointID,
 	DomainContactDescriptor,
 	DomainDHTLocator,
-	DomainDHTKey,
-	DomainNetworkDomain,
-	DomainAgentLocator,
 	DomainEventID,
 	DomainPrekeyBundle,
 	DomainPrekeyBundleSet,

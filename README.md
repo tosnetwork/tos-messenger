@@ -25,7 +25,7 @@ decision:
 | Package | Responsibility |
 |---|---|
 | `pkg/identity` | Messaging Endpoint delegation: canonical bytes, digest, strict codec, and the verifier that resolves it against finalized Agent state |
-| `pkg/directory` | Signed Messaging Contact Descriptor, bounded DHT locator, and the discovery half of the resolution algorithm |
+| `pkg/directory` | Signed Messaging Contact Descriptor, the DHT locator and its TOS DHT key mapping, and the discovery half of the resolution algorithm |
 | `pkg/envelope` | Outer Relay Envelope and inner typed Messaging Event, including content-addressed Event IDs |
 | `pkg/eventlog` | Single-writer durable journal: stored inbound events with pending recovery and application leases, outbound delivery state, retry schedule, and pruning |
 | `pkg/fault` | Typed failures, retry dispositions, and what a peer may be told |

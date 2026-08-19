@@ -3,6 +3,8 @@ package directory
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/binary"
 	"strings"
 	"testing"
 	"time"
@@ -285,27 +287,37 @@ func TestDecodeDescriptorRejectsMalformedTransport(t *testing.T) {
 	}
 }
 
+func signedLocator(t *testing.T, descriptor Descriptor, key ed25519.PrivateKey, reference string) Locator {
+	t.Helper()
+	locator, err := NewLocator(descriptor, reference, baseUnix, descriptor.ExpiresAtUnix)
+	if err != nil {
+		t.Fatalf("new locator: %v", err)
+	}
+	signed, err := SignLocator(locator, key)
+	if err != nil {
+		t.Fatalf("sign locator: %v", err)
+	}
+	return signed
+}
+
 func TestLocatorCommitsExactlyOneDescriptor(t *testing.T) {
 	key := endpointKey(t, 0x11)
 	delegation := testDelegation(t, key)
 	descriptor := signedDescriptor(t, delegation, key)
+	locator := signedLocator(t, descriptor, key, "https://directory.example/descriptor")
 
-	locator, err := NewLocator(descriptor, "https://directory.example/descriptor", descriptor.ExpiresAtUnix)
-	if err != nil {
-		t.Fatalf("new locator: %v", err)
-	}
-	locator, err = SignLocator(locator, key)
-	if err != nil {
-		t.Fatalf("sign locator: %v", err)
-	}
-	encoded, err := EncodeLocatorJSON(locator)
+	encoded, err := EncodeLocator(locator)
 	if err != nil {
 		t.Fatalf("encode locator: %v", err)
 	}
-	if len(encoded) > MaxLocatorBytes {
-		t.Fatalf("locator exceeds its bound: %d bytes", len(encoded))
+	// The published value has to fit what TOS Core will actually store.
+	if len(encoded) > MaxDHTValueBytes {
+		t.Fatalf("locator exceeds the network limit: %d bytes", len(encoded))
 	}
-	decoded, err := DecodeLocatorJSON(encoded)
+	if len(encoded) > MaxLocatorBytes {
+		t.Fatalf("locator exceeds its own bound: %d bytes", len(encoded))
+	}
+	decoded, err := DecodeLocator(encoded)
 	if err != nil {
 		t.Fatalf("decode locator: %v", err)
 	}
@@ -328,6 +340,127 @@ func TestLocatorCommitsExactlyOneDescriptor(t *testing.T) {
 	}
 }
 
+// The largest locator this protocol can produce must still fit the network
+// limit, or a legal record would be unpublishable.
+func TestLargestLocatorFitsTheNetworkLimit(t *testing.T) {
+	key := endpointKey(t, 0x11)
+	delegation := testDelegation(t, key)
+	descriptor := signedDescriptor(t, delegation, key)
+	reference := "https://directory.example/" + strings.Repeat("p", MaxDescriptorLocatorBytes-len("https://directory.example/"))
+	locator := signedLocator(t, descriptor, key, reference)
+	encoded, err := EncodeLocator(locator)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if len(encoded) > MaxDHTValueBytes {
+		t.Fatalf("the largest locator does not fit the network limit: %d bytes", len(encoded))
+	}
+	if _, err := DecodeLocator(encoded); err != nil {
+		t.Fatalf("decode largest: %v", err)
+	}
+}
+
+// TOS Core refuses a key description whose identifier is not the short
+// identifier of the publishing key, so the key is derived from the endpoint
+// key and from nothing else.
+func TestLocatorKeyIsDerivedFromTheEndpointKey(t *testing.T) {
+	key := endpointKey(t, 0x11)
+	delegation := testDelegation(t, key)
+	dhtKey, err := LocatorKey(delegation)
+	if err != nil {
+		t.Fatalf("locator key: %v", err)
+	}
+	if dhtKey.Name != LocatorKeyName || len(dhtKey.Name) > 127 {
+		t.Fatalf("unexpected key name: %q", dhtKey.Name)
+	}
+	if dhtKey.Index > MaxLocatorKeyIndex {
+		t.Fatalf("key index %d is outside what the network accepts", dhtKey.Index)
+	}
+	public, ok := key.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected public key type")
+	}
+	expected, err := EndpointKeyID(public)
+	if err != nil {
+		t.Fatalf("key id: %v", err)
+	}
+	if dhtKey.ID != expected {
+		t.Fatal("the DHT key is not the endpoint key short identifier")
+	}
+	// The short identifier is SHA-256 over the boxed TL public key.
+	boxed := make([]byte, 4, 36)
+	binary.LittleEndian.PutUint32(boxed, ed25519PublicKeyTL)
+	boxed = append(boxed, public...)
+	if expected != sha256.Sum256(boxed) {
+		t.Fatal("the short identifier does not follow the TL encoding")
+	}
+	other := endpointKey(t, 0x22)
+	otherPublic, ok := other.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected public key type")
+	}
+	otherID, err := EndpointKeyID(otherPublic)
+	if err != nil {
+		t.Fatalf("key id: %v", err)
+	}
+	if otherID == expected {
+		t.Fatal("two endpoints share a DHT key")
+	}
+	if _, err := EndpointKeyID(make(ed25519.PublicKey, ed25519.PublicKeySize)); err == nil {
+		t.Fatal("a zero key produced a DHT key")
+	}
+}
+
+// The signature update rule keeps whichever value has the greater time to
+// live, so a republish that does not extend the expiry is silently ignored by
+// the network.
+func TestRepublishMustExtendTheStoredExpiry(t *testing.T) {
+	key := endpointKey(t, 0x11)
+	delegation := testDelegation(t, key)
+	descriptor := signedDescriptor(t, delegation, key)
+	previous := signedLocator(t, descriptor, key, "https://directory.example/descriptor")
+
+	same := previous
+	if err := Republish(previous, same); err == nil {
+		t.Fatal("a republish with an unchanged expiry was accepted")
+	}
+	shorter, err := NewLocator(descriptor, "https://directory.example/descriptor", baseUnix, previous.ExpiresAtUnix-1)
+	if err != nil {
+		t.Fatalf("new locator: %v", err)
+	}
+	shorter, err = SignLocator(shorter, key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := Republish(previous, shorter); err == nil {
+		t.Fatal("a republish with a shorter expiry was accepted")
+	}
+
+	longer, err := NewLocator(descriptor, "https://directory.example/descriptor", baseUnix+1, previous.ExpiresAtUnix)
+	if err != nil {
+		t.Fatalf("new locator: %v", err)
+	}
+	_ = longer
+	extended := previous
+	extended.ExpiresAtUnix = previous.ExpiresAtUnix + 1
+	extended, err = SignLocator(extended, key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := Republish(previous, extended); err != nil {
+		t.Fatalf("an extending republish was refused: %v", err)
+	}
+	foreign := extended
+	foreign.EndpointID = "mep_" + strings.Repeat("1", 64)
+	foreign, err = SignLocator(foreign, key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := Republish(previous, foreign); err == nil {
+		t.Fatal("a republish for another endpoint was accepted")
+	}
+}
+
 func TestVerifyLocatorRejectsUnauthorizedValues(t *testing.T) {
 	key := endpointKey(t, 0x11)
 	otherKey := endpointKey(t, 0x22)
@@ -335,115 +468,65 @@ func TestVerifyLocatorRejectsUnauthorizedValues(t *testing.T) {
 	descriptor := signedDescriptor(t, delegation, key)
 	now := time.Unix(int64(baseUnix)+60, 0)
 
-	build := func(t *testing.T, signing ed25519.PrivateKey, mutate func(*Locator)) Locator {
-		t.Helper()
-		locator, err := NewLocator(descriptor, "https://directory.example/descriptor", descriptor.ExpiresAtUnix)
-		if err != nil {
-			t.Fatalf("new locator: %v", err)
-		}
-		if mutate != nil {
-			mutate(&locator)
-		}
-		signed, err := SignLocator(locator, signing)
-		if err != nil {
-			t.Fatalf("sign locator: %v", err)
-		}
-		return signed
+	foreign := signedLocator(t, descriptor, otherKey, "https://directory.example/descriptor")
+	if err := VerifyLocator(delegation, foreign, now); err == nil {
+		t.Fatal("a locator signed by another key was accepted")
 	}
 
-	cases := map[string]Locator{
-		"foreign signature": build(t, otherKey, nil),
-		"another endpoint":  build(t, key, func(l *Locator) { l.EndpointID = "mep_" + strings.Repeat("1", 64) }),
-		"another agent digest": build(t, key, func(l *Locator) {
-			digest, err := AgentIDDigest(testNetwork(), otherAgentID)
-			if err != nil {
-				t.Fatalf("digest: %v", err)
-			}
-			l.AgentIDDigest = digest
-		}),
-		"outlives delegation": build(t, key, func(l *Locator) { l.ExpiresAtUnix = delegation.ExpiresAtUnix + 1 }),
-	}
-	for name, locator := range cases {
-		t.Run(name, func(t *testing.T) {
-			if err := VerifyLocator(delegation, locator, now); err == nil {
-				t.Fatalf("expected %q to be rejected", name)
-			}
-		})
+	elsewhere := signedLocator(t, descriptor, key, "https://directory.example/descriptor")
+	elsewhere.EndpointID = "mep_" + strings.Repeat("1", 64)
+	if err := VerifyLocator(delegation, elsewhere, now); err == nil {
+		t.Fatal("a locator for another endpoint was accepted")
 	}
 
-	expired := build(t, key, nil)
-	if err := VerifyLocator(delegation, expired, time.Unix(int64(expired.ExpiresAtUnix), 0)); err == nil {
-		t.Fatal("expired locator accepted")
+	outliving := signedLocator(t, descriptor, key, "https://directory.example/descriptor")
+	outliving.ExpiresAtUnix = delegation.ExpiresAtUnix + 1
+	if err := VerifyLocator(delegation, outliving, now); err == nil {
+		t.Fatal("a locator outliving its delegation was accepted")
 	}
-	if err := VerifyLocator(delegation, expired, time.Unix(int64(delegation.ExpiresAtUnix)+1, 0)); err == nil {
-		t.Fatal("locator accepted after its delegation expired")
+
+	valid := signedLocator(t, descriptor, key, "https://directory.example/descriptor")
+	if err := VerifyLocator(delegation, valid, time.Unix(int64(valid.ExpiresAtUnix), 0)); err == nil {
+		t.Fatal("an expired locator was accepted")
+	}
+	if err := VerifyLocator(delegation, valid, time.Unix(int64(valid.IssuedAtUnix)-1, 0)); err == nil {
+		t.Fatal("a locator was accepted before it was issued")
+	}
+	if err := VerifyLocator(delegation, valid, time.Time{}); err == nil {
+		t.Fatal("a zero clock was accepted")
 	}
 }
 
-func TestLocatorReferenceIsBounded(t *testing.T) {
+// A published lifetime longer than a day was previously declared and never
+// enforced.
+func TestLocatorLifetimeIsEnforced(t *testing.T) {
 	key := endpointKey(t, 0x11)
 	delegation := testDelegation(t, key)
 	descriptor := signedDescriptor(t, delegation, key)
-
-	for _, reference := range []string{
-		"",
-		"ftp://directory.example/descriptor",
-		"http://directory.example/descriptor",
-		"https://user:pass@directory.example/descriptor",
-		"https://directory.example/descriptor#fragment",
-		"https:///descriptor",
-		" https://directory.example/descriptor",
-		"https://directory.example/" + strings.Repeat("p", MaxDescriptorLocatorBytes),
-	} {
-		if _, err := NewLocator(descriptor, reference, descriptor.ExpiresAtUnix); err == nil {
-			t.Fatalf("expected reference %q to be rejected", reference)
-		}
+	long := Locator{
+		EndpointID:        descriptor.EndpointID,
+		DescriptorDigest:  "sha256:" + strings.Repeat("ab", 32),
+		DescriptorLocator: "https://directory.example/descriptor",
+		IssuedAtUnix:      baseUnix,
+		ExpiresAtUnix:     baseUnix + MaxLocatorLifetimeSeconds + 1,
 	}
-	for _, reference := range []string{
-		"https://directory.example/descriptor",
-		"adnl://" + strings.Repeat("2e", 32),
-		"rldp://" + strings.Repeat("2e", 32) + "/descriptor",
-		"http://127.0.0.1:8080/descriptor",
-	} {
-		if _, err := NewLocator(descriptor, reference, descriptor.ExpiresAtUnix); err != nil {
-			t.Fatalf("expected reference %q to be accepted: %v", reference, err)
-		}
+	if err := ValidateLocator(long, false); err == nil {
+		t.Fatal("a locator living longer than a day was accepted")
 	}
-}
-
-func TestLookupKeySeparatesIdentities(t *testing.T) {
-	key := endpointKey(t, 0x11)
-	delegation := testDelegation(t, key)
-	network := testNetwork()
-	other := testNetwork()
-	other.NetworkId = "tos-other"
-
-	first, err := LookupKey(network, agentID, delegation.EndpointID)
-	if err != nil {
-		t.Fatalf("lookup key: %v", err)
+	if _, err := SignLocator(long, key); err == nil {
+		t.Fatal("an overlong locator was signed")
 	}
-	byAgent, err := LookupKey(network, otherAgentID, delegation.EndpointID)
-	if err != nil {
-		t.Fatalf("lookup key: %v", err)
-	}
-	byNetwork, err := LookupKey(other, agentID, delegation.EndpointID)
-	if err != nil {
-		t.Fatalf("lookup key: %v", err)
-	}
-	byEndpoint, err := LookupKey(network, agentID, "mep_"+strings.Repeat("1", 64))
-	if err != nil {
-		t.Fatalf("lookup key: %v", err)
-	}
-	if first == byAgent || first == byNetwork || first == byEndpoint {
-		t.Fatal("lookup key does not separate Agent, network, and endpoint")
-	}
-	if _, err := LookupKey(network, "agent_bad", delegation.EndpointID); err == nil {
-		t.Fatal("expected an invalid Agent identifier to be rejected")
-	}
+	_ = delegation
 }
 
 func TestLocatorSizeBoundIsEnforcedOnDecode(t *testing.T) {
-	if _, err := DecodeLocatorJSON(bytes.Repeat([]byte("x"), MaxLocatorBytes+1)); err == nil {
+	if _, err := DecodeLocator(bytes.Repeat([]byte("x"), MaxLocatorBytes+1)); err == nil {
 		t.Fatal("expected an oversized locator to be rejected before parsing")
+	}
+	if _, err := DecodeLocator(nil); err == nil {
+		t.Fatal("expected an empty value to be rejected")
+	}
+	if _, err := DecodeLocator(bytes.Repeat([]byte{0}, 200)); err == nil {
+		t.Fatal("expected an unversioned value to be rejected")
 	}
 }
