@@ -24,6 +24,11 @@ than silently forking two implementations.
 | Event kind to delegated class mapping | explicit table; an unrecognised kind has no class | `envelope.eventClasses` |
 | Event body bounds | content at most 128 KiB, 16 causal parents, 16 attachment references | `envelope` constants |
 | Durable store format | one JSON record per event in a private directory owned by one process, forward-only state machine | `pkg/eventlog` |
+| Study acceptance policy | content-addressed, and required to cover NAT, consumer ISP, carrier-grade NAT, mobile, two address families, two UDP-policy environments, a low-cost class, and a mobile endpoint | `reachability.Policy.Validate` |
+| Route decision rule | every required stratum viable direct → direct-first; none viable but all lifted by a proxy → tunnel-first; some viable → hybrid; otherwise relay-first | `reachability.decide` |
+| Operator identity | opaque `op_` prefix over a digest of a local operator name, so diversity is counted without collecting identity | `reachability.OperatorID` |
+| Probe amplification floor | requests padded to 512 bytes; a response larger than its request is never sent | `probe.MinRequestBytes`, `probe.CheckNoAmplification` |
+| Coordinator limits | 5 minute pairing TTL, 4096 pairings, 600 requests per source address per minute | `probe.CoordinatorOptions` defaults |
 
 ## Not proposed here
 
@@ -40,4 +45,7 @@ implementation of them:
 - prekey publication, replenishment, and equivocation detection;
 - Mailbox Relay sender privacy, quota tokens, and anti-spam model;
 - mobile push privacy within the contentless wake-up constraint; and
-- public channel ordering and moderation policy.
+- public channel ordering and moderation policy; and
+- the sample sizes and viability rates a real study will predeclare, for which
+  `docs/reachability-policy.example.json` is an illustration and not a
+  commitment.

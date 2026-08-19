@@ -1,0 +1,89 @@
+{
+  "schema": "tos.messaging.reachability-policy.v1",
+  "min_samples_per_cell": 30,
+  "min_operators_per_cell": 3,
+  "direct_viable_rate": 0.8,
+  "tunnel_viable_rate": 0.95,
+  "required_strata": [
+    {
+      "address_family": "ipv4",
+      "public_reachability": "neither-public",
+      "nat_behavior": "endpoint-independent",
+      "carrier": "consumer-isp",
+      "udp_policy": "allowed",
+      "mobility": "stationary",
+      "endpoint_class": "desktop",
+      "mapping_assistance": "none"
+    },
+    {
+      "address_family": "ipv4",
+      "public_reachability": "neither-public",
+      "nat_behavior": "address-and-port-dependent",
+      "carrier": "consumer-isp",
+      "udp_policy": "allowed",
+      "mobility": "stationary",
+      "endpoint_class": "desktop",
+      "mapping_assistance": "none"
+    },
+    {
+      "address_family": "ipv4",
+      "public_reachability": "neither-public",
+      "nat_behavior": "symmetric",
+      "carrier": "carrier-grade-nat",
+      "udp_policy": "allowed",
+      "mobility": "stationary",
+      "endpoint_class": "edge-arm",
+      "mapping_assistance": "none"
+    },
+    {
+      "address_family": "ipv4",
+      "public_reachability": "neither-public",
+      "nat_behavior": "address-and-port-dependent",
+      "carrier": "carrier-grade-nat",
+      "udp_policy": "rate-limited",
+      "mobility": "stationary",
+      "endpoint_class": "edge-riscv",
+      "mapping_assistance": "none"
+    },
+    {
+      "address_family": "ipv4",
+      "public_reachability": "neither-public",
+      "nat_behavior": "symmetric",
+      "carrier": "mobile-carrier",
+      "udp_policy": "allowed",
+      "mobility": "wifi-to-mobile",
+      "endpoint_class": "mobile",
+      "mapping_assistance": "none"
+    },
+    {
+      "address_family": "ipv6",
+      "public_reachability": "one-public",
+      "nat_behavior": "undetermined",
+      "carrier": "mobile-carrier",
+      "udp_policy": "allowed",
+      "mobility": "stationary",
+      "endpoint_class": "mobile",
+      "mapping_assistance": "none"
+    },
+    {
+      "address_family": "ipv6",
+      "public_reachability": "neither-public",
+      "nat_behavior": "endpoint-independent",
+      "carrier": "consumer-isp",
+      "udp_policy": "allowed",
+      "mobility": "stationary",
+      "endpoint_class": "edge-arm",
+      "mapping_assistance": "none"
+    },
+    {
+      "address_family": "dual",
+      "public_reachability": "both-public",
+      "nat_behavior": "none",
+      "carrier": "datacenter",
+      "udp_policy": "allowed",
+      "mobility": "stationary",
+      "endpoint_class": "server",
+      "mapping_assistance": "none"
+    }
+  ]
+}

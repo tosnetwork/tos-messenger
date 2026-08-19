@@ -28,15 +28,31 @@ decision:
 | `pkg/directory` | Signed Messaging Contact Descriptor, bounded DHT locator, and the discovery half of the resolution algorithm |
 | `pkg/envelope` | Outer Relay Envelope and inner typed Messaging Event, including content-addressed Event IDs |
 | `pkg/eventlog` | Single-writer durable claim and delivery-state journal |
+| `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
+| `pkg/probe` | M0-R measurement transport: rendezvous coordinator and UDP establishment probe |
 | `internal/canon` | Domain-separated length-prefixed canonical encoding shared by every signed object |
 | `internal/dirlock` | Exclusive process ownership of one private state directory |
+
+The measurement side is deliberately separate from the protocol side. Nothing
+in `pkg/probe` is a Messenger transport: it signs nothing, encrypts nothing,
+and carries no application content. It exists to produce the evidence the
+one-to-one milestone is blocked on. See [`docs/M0R_STUDY.md`](docs/M0R_STUDY.md).
+
+Commands:
+
+| Command | Purpose |
+|---|---|
+| `cmd/tos-reachability-coordinator` | Rendezvous service for a measured pair |
+| `cmd/tos-reachability` | Runs one endpoint of one pair and appends a trial record |
+| `cmd/tos-reachability-report` | Aggregates a study log against a predeclared policy; exits non-zero when the study supports no decision |
 
 Deliberately absent, with the reason:
 
 - **application end-to-end encryption** — the cryptographic suite is an M0 freeze
   decision, and this repository must not invent one;
 - **any transport** — direct, tunnel, Relay, and HTTPS ordering is frozen only
-  after the reachability study;
+  after the reachability study, which is why the study tooling is here and the
+  transport is not;
 - **Mailbox Relay, rooms, channels, clients** — later milestones;
 - **Relay lease, inbox bond, and any other commercial profile** — locked behind
   the Expansion Gate in the governing roadmap.
@@ -54,6 +70,8 @@ Deliberately absent, with the reason:
 - Unknown event kinds have no delegated class and are never interpreted as tool
   calls, approvals, or payments.
 - The journal reports a claim as fresh only after it is durably on disk.
+- Evidence is judged against thresholds that were fixed before it was
+  collected, and a study that misses its own minimums produces no decision.
 
 ## Build and test
 
