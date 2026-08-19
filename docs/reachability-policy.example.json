@@ -6,6 +6,9 @@
   "max_trials_per_operator_per_cell": 20,
   "direct_viable_rate": 0.8,
   "tunnel_viable_rate": 0.95,
+  "coordinators": [
+    "srv_0a21b88b9a269533"
+  ],
   "required_strata": [
     {
       "address_family": "ipv4",

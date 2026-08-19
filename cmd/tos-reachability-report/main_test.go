@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,8 +57,22 @@ func TestBuildRefusesIncompleteInput(t *testing.T) {
 	}
 }
 
-// A study that covers nothing must still parse and must still refuse to decide.
+// A study that covers nothing must still parse and must still refuse to
+// conclude anything.
 func TestBuildReportsInsufficientEvidence(t *testing.T) {
+	coordinatorKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x11}, ed25519.SeedSize))
+	endpointKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x22}, ed25519.SeedSize))
+
+	observation, err := reachability.SignObservation(reachability.Observation{
+		SessionID:  "ses_0123456789abcdef0123456789abcdef",
+		Role:       "a",
+		Observed:   "203.0.113.7:41234",
+		PeerPublic: "no",
+		AtUnix:     1_800_000_000,
+	}, coordinatorKey)
+	if err != nil {
+		t.Fatalf("attest: %v", err)
+	}
 	trial := reachability.Trial{
 		Stratum: reachability.Stratum{
 			Family: reachability.FamilyIPv4, Reachability: reachability.NeitherPublic,
@@ -65,12 +81,18 @@ func TestBuildReportsInsufficientEvidence(t *testing.T) {
 			EndpointClass: reachability.ClassDesktop, Assistance: reachability.AssistanceNone,
 		},
 		PairID: "pair_" + strings.Repeat("1", 32), SiteID: "site_1111111111111111",
-		OperatorID: "op_1111111111111111", Probe: reachability.ProbeUDP,
+		OperatorID: "op_1111111111111111",
+		SessionID:  observation.SessionID, Role: reachability.RoleA, Observation: observation,
+		Probe:   reachability.ProbeUDP,
 		Outcome: reachability.OutcomeDirect, Failure: reachability.FailureNone,
 		EstablishMillis: 12, StartedAtUnix: 1_800_000_000,
 		LocalCommit: strings.Repeat("a", 40), PeerCommit: strings.Repeat("b", 40),
 	}
-	encoded, err := reachability.EncodeTrialJSON(trial)
+	signed, err := reachability.SignTrial(trial, endpointKey)
+	if err != nil {
+		t.Fatalf("sign trial: %v", err)
+	}
+	encoded, err := reachability.EncodeTrialJSON(signed)
 	if err != nil {
 		t.Fatalf("encode trial: %v", err)
 	}
@@ -80,12 +102,34 @@ func TestBuildReportsInsufficientEvidence(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 	if report.Finding != reachability.FindingInsufficient {
-		t.Fatalf("a single trial must not decide anything, got %q", report.Finding)
+		t.Fatalf("a single trial must not conclude anything, got %q", report.Finding)
 	}
 	if report.SupportsRouteDecision() {
 		t.Fatal("a single UDP trial was accepted as a route decision")
 	}
-	if report.PolicyDigest == "" {
-		t.Fatal("the report must name the policy it was judged against")
+	if report.UnverifiedTrials != 0 {
+		t.Fatalf("a correctly signed trial was rejected: %+v", report)
+	}
+
+	// The same trial attested by a coordinator the policy never predeclared is
+	// not weaker evidence; it is not evidence.
+	stranger, err := reachability.SignObservation(observation,
+		ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x33}, ed25519.SeedSize)))
+	if err != nil {
+		t.Fatalf("attest: %v", err)
+	}
+	unattested := trial
+	unattested.Observation = stranger
+	resigned, err := reachability.SignTrial(unattested, endpointKey)
+	if err != nil {
+		t.Fatalf("sign trial: %v", err)
+	}
+	encoded, err = reachability.EncodeTrialJSON(resigned)
+	if err != nil {
+		t.Fatalf("encode trial: %v", err)
+	}
+	if _, err := build(filepath.Join("..", "..", "docs", "reachability-policy.example.json"),
+		writeFile(t, "stranger.jsonl", string(encoded)+"\n"), "udp"); err == nil {
+		t.Fatal("a study of unpredeclared attestations produced a report")
 	}
 }

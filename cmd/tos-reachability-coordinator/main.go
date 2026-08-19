@@ -8,40 +8,51 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/probe"
+	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 )
 
 func main() {
 	listen := flag.String("listen", ":7691", "UDP address to serve on")
-	serverID := flag.String("server-id", "", "coordinator identifier, generated when empty")
+	keyPath := flag.String("key", "", "coordinator signing key file, created when absent")
 	sessionTTL := flag.Duration("session-ttl", probe.DefaultSessionTTL, "how long a pairing is remembered")
 	maxSessions := flag.Int("max-sessions", probe.DefaultMaxSessions, "concurrent pairings held")
 	perWindow := flag.Int("requests-per-window", probe.DefaultRequestsPerWindow, "requests admitted per source address per window")
 	window := flag.Duration("rate-window", probe.DefaultRateWindow, "rate-limit window")
 	flag.Parse()
 
-	if err := run(*listen, *serverID, *sessionTTL, *maxSessions, *perWindow, *window); err != nil {
+	if err := run(*listen, *keyPath, *sessionTTL, *maxSessions, *perWindow, *window); err != nil {
 		fmt.Fprintln(os.Stderr, "tos-reachability-coordinator:", err)
 		os.Exit(1)
 	}
 }
 
-func run(listen, serverID string, ttl time.Duration, maxSessions, perWindow int, window time.Duration) error {
-	if serverID == "" {
-		generated, err := probe.NewServerID()
-		if err != nil {
-			return err
-		}
-		serverID = generated
+func run(listen, keyPath string, ttl time.Duration, maxSessions, perWindow int, window time.Duration) error {
+	key, err := loadOrCreateKey(keyPath)
+	if err != nil {
+		return err
+	}
+	public, ok := key.Public().(ed25519.PublicKey)
+	if !ok {
+		return errors.New("invalid coordinator signing key")
+	}
+	serverID, err := reachability.CoordinatorID(public)
+	if err != nil {
+		return err
 	}
 	coordinator, err := probe.NewCoordinator(probe.CoordinatorOptions{
-		ServerID:          serverID,
+		PrivateKey:        key,
 		SessionTTL:        ttl,
 		MaxSessions:       maxSessions,
 		RequestsPerWindow: perWindow,
@@ -56,6 +67,38 @@ func run(listen, serverID string, ttl time.Duration, maxSessions, perWindow int,
 	}
 	defer connection.Close()
 
-	fmt.Printf("server_id=%s listening=%s\n", serverID, connection.LocalAddr())
+	// Operators put the identifier in their policy. A study only counts
+	// attestations from coordinators it predeclared, so this line is what has
+	// to travel out of band before any measurement is worth anything.
+	fmt.Printf("coordinator_id=%s public_key=%s listening=%s\n",
+		serverID, hex.EncodeToString(public), connection.LocalAddr())
 	return coordinator.Serve(connection)
+}
+
+// loadOrCreateKey keeps the coordinator's identity stable across restarts. A
+// coordinator that generated a fresh key on every start would fall out of
+// every policy that predeclared it.
+func loadOrCreateKey(path string) (ed25519.PrivateKey, error) {
+	if path == "" {
+		return nil, errors.New("a coordinator signing key file is required")
+	}
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		decoded, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+		if err != nil || len(decoded) != ed25519.PrivateKeySize {
+			return nil, errors.New("coordinator key file is not a signing key")
+		}
+		return ed25519.PrivateKey(decoded), nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, errors.New("read coordinator key")
+	}
+	_, generated, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, errors.New("generate coordinator key")
+	}
+	if err := os.WriteFile(path, []byte(hex.EncodeToString(generated)+"\n"), 0o600); err != nil {
+		return nil, errors.New("write coordinator key")
+	}
+	return generated, nil
 }

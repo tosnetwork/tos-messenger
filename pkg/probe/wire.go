@@ -29,8 +29,9 @@ const (
 	Schema = "tos.messaging.reachability-probe.v1"
 
 	// MinRequestBytes is the padded floor every client request must reach. It
-	// is what makes a response strictly smaller than its request.
-	MinRequestBytes = 512
+	// is what makes a response strictly smaller than its request, and it rose
+	// when responses began carrying a signed attestation.
+	MinRequestBytes = 768
 	// MaxMessageBytes bounds one datagram this package will parse.
 	MaxMessageBytes = 1400
 	// MaxCandidates bounds one advertised candidate set.
@@ -74,12 +75,14 @@ const (
 )
 
 var (
-	sessionPattern = regexp.MustCompile(`^ses_[0-9a-f]{32}$`)
-	noncePattern   = regexp.MustCompile(`^[0-9a-f]{32}$`)
-	serverPattern  = regexp.MustCompile(`^srv_[0-9a-f]{16}$`)
-	paddingPattern = regexp.MustCompile(`^p*$`)
-	commitPattern  = regexp.MustCompile(`^[0-9a-f]{40}$|^[0-9a-f]{64}$`)
-	kinds          = map[Kind]struct{}{
+	sessionPattern      = regexp.MustCompile(`^ses_[0-9a-f]{32}$`)
+	noncePattern        = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	serverPattern       = regexp.MustCompile(`^srv_[0-9a-f]{16}$`)
+	paddingPattern      = regexp.MustCompile(`^p*$`)
+	commitPattern       = regexp.MustCompile(`^[0-9a-f]{40}$|^[0-9a-f]{64}$`)
+	hexKeyPattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	hexSignaturePattern = regexp.MustCompile(`^[0-9a-f]{128}$`)
+	kinds               = map[Kind]struct{}{
 		KindBind: {}, KindBindOK: {}, KindPair: {}, KindPairOK: {},
 		KindPunch: {}, KindPunchAck: {}, KindError: {},
 	}
@@ -99,6 +102,9 @@ type Message struct {
 	Commit     string   `json:"commit,omitempty"`
 	PeerCommit string   `json:"peer_commit,omitempty"`
 	PeerPublic string   `json:"peer_public,omitempty"`
+	ObservedAt uint64   `json:"observed_at,omitempty"`
+	SignerKey  string   `json:"coordinator_public_key,omitempty"`
+	Signature  string   `json:"coordinator_signature,omitempty"`
 	Reason     string   `json:"reason,omitempty"`
 	Padding    string   `json:"padding,omitempty"`
 }
@@ -217,6 +223,12 @@ func Validate(message Message) error {
 	}
 	if message.Commit != "" && !commitPattern.MatchString(message.Commit) {
 		return errors.New("invalid probe commit")
+	}
+	if message.SignerKey != "" && !hexKeyPattern.MatchString(message.SignerKey) {
+		return errors.New("invalid coordinator public key")
+	}
+	if message.Signature != "" && !hexSignaturePattern.MatchString(message.Signature) {
+		return errors.New("invalid coordinator signature")
 	}
 	if message.PeerCommit != "" && !commitPattern.MatchString(message.PeerCommit) {
 		return errors.New("invalid probe peer commit")

@@ -51,8 +51,12 @@ type Result struct {
 	PeerAddress     netip.AddrPort
 	Failure         reachability.FailureClass
 	PeerCommit      string
-	TxBytes         uint64
-	RxBytes         uint64
+	// Observation is the coordinator's signed account of what it saw. A result
+	// without one cannot be filed under a stratum, because the two facts that
+	// place it there would be the endpoint's own claim.
+	Observation reachability.Observation
+	TxBytes     uint64
+	RxBytes     uint64
 }
 
 // NewSessionID returns a fresh session identifier for one measured pair.
@@ -237,6 +241,42 @@ func classifyFamily(observed []netip.AddrPort) reachability.AddressFamily {
 	}
 }
 
+// recordObservation keeps the coordinator's attestation, and only if it
+// verifies. An attestation that does not verify is worth no more than the
+// claim it was supposed to replace, so it is dropped rather than carried
+// forward to be discovered later.
+func (r *runner) recordObservation(reply Message) {
+	if reply.Signature == "" || reply.SignerKey == "" {
+		return
+	}
+	identifier, err := reachability.CoordinatorID(mustKey(reply.SignerKey))
+	if err != nil {
+		return
+	}
+	observation := reachability.Observation{
+		CoordinatorID: identifier,
+		SessionID:     reply.SessionID,
+		Role:          string(reply.Role),
+		Observed:      reply.Observed,
+		PeerPublic:    reply.PeerPublic,
+		AtUnix:        reply.ObservedAt,
+		PublicKeyHex:  reply.SignerKey,
+		SignatureHex:  reply.Signature,
+	}
+	if err := reachability.VerifyObservation(observation); err != nil {
+		return
+	}
+	r.result.Observation = observation
+}
+
+func mustKey(encoded string) []byte {
+	raw, err := hex.DecodeString(encoded)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
 // classifyPair combines what this endpoint measured with what the coordinator
 // reported about the peer.
 //
@@ -366,6 +406,7 @@ func (r *runner) exchange(ctx context.Context) ([]netip.AddrPort, error) {
 			if reply.Kind == KindPairOK && reply.Nonce == nonce && len(reply.Candidates) > 0 {
 				r.classifyPair(reply.PeerPublic)
 				r.result.PeerCommit = reply.PeerCommit
+				r.recordObservation(reply)
 				peers := make([]netip.AddrPort, 0, len(reply.Candidates)+len(r.learned))
 				for _, candidate := range reply.Candidates {
 					address, parseErr := netip.ParseAddrPort(candidate)

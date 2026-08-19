@@ -69,6 +69,16 @@ type FailureClass string
 // ProbeKind identifies the transport the trial exercised.
 type ProbeKind string
 
+// Role is which half of a measured pair produced a trial.
+type Role string
+
+const (
+	// RoleA is the endpoint that initiated the session.
+	RoleA Role = "a"
+	// RoleB is the endpoint that joined it.
+	RoleB Role = "b"
+)
+
 // Enumerated dimension values. Every value is closed: an unrecognised label
 // is rejected rather than silently aggregated into its own bucket, because a
 // typo would otherwise create a cell that always looks under-sampled.
@@ -216,8 +226,16 @@ type Trial struct {
 	PairID string `json:"pair_id"`
 	// SiteID identifies the network an operator ran from. One operator with
 	// twenty hosts on one uplink has measured one network, not twenty.
-	SiteID          string       `json:"site_id"`
-	OperatorID      string       `json:"operator_id"`
+	SiteID     string `json:"site_id"`
+	OperatorID string `json:"operator_id"`
+	// SessionID and Role tie this half of a measurement to the attestation the
+	// coordinator made about it.
+	SessionID            string      `json:"session_id"`
+	Role                 Role        `json:"role"`
+	Observation          Observation `json:"observation"`
+	EndpointPublicKeyHex string      `json:"endpoint_public_key_hex"`
+	EndpointSignatureHex string      `json:"endpoint_signature_hex,omitempty"`
+
 	Probe           ProbeKind    `json:"probe"`
 	Outcome         Outcome      `json:"outcome"`
 	Failure         FailureClass `json:"failure_class"`
@@ -255,6 +273,15 @@ func (t Trial) Validate() error {
 	}
 	if !sitePattern.MatchString(t.SiteID) {
 		return errors.New("invalid trial site identifier")
+	}
+	if t.SessionID == "" || len(t.SessionID) > 128 {
+		return errors.New("invalid trial session identifier")
+	}
+	if t.Role != RoleA && t.Role != RoleB {
+		return errors.New("invalid trial role")
+	}
+	if !keyPattern.MatchString(t.EndpointPublicKeyHex) {
+		return errors.New("invalid trial endpoint public key")
 	}
 	if !member(probes, t.Probe) || !member(outcomes, t.Outcome) || !member(failures, t.Failure) {
 		return errors.New("invalid trial vocabulary")
@@ -300,6 +327,13 @@ func (t Trial) CanonicalBytes() ([]byte, error) {
 	canon.Text(buffer, t.PairID)
 	canon.Text(buffer, t.SiteID)
 	canon.Text(buffer, t.OperatorID)
+	canon.Text(buffer, t.SessionID)
+	canon.Text(buffer, string(t.Role))
+	canon.Text(buffer, t.EndpointPublicKeyHex)
+	canon.Text(buffer, t.Observation.CoordinatorID)
+	canon.Text(buffer, t.Observation.Observed)
+	canon.Text(buffer, t.Observation.PeerPublic)
+	canon.Text(buffer, t.Observation.SignatureHex)
 	canon.Text(buffer, string(t.Probe))
 	canon.Text(buffer, string(t.Outcome))
 	canon.Text(buffer, string(t.Failure))

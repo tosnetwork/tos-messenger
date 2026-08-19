@@ -1,7 +1,9 @@
 package probe
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"net"
 	"net/netip"
 	"strings"
@@ -14,7 +16,23 @@ import (
 
 const testSession = "ses_" + "0123456789abcdef0123456789abcdef"
 const testNonce = "fedcba9876543210fedcba9876543210"
-const testServer = "srv_" + "0011223344556677"
+
+func testKey(seed byte) ed25519.PrivateKey {
+	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
+}
+
+func testServerID(t *testing.T) string {
+	t.Helper()
+	public, ok := testKey(0x33).Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected public key type")
+	}
+	identifier, err := reachability.CoordinatorID(public)
+	if err != nil {
+		t.Fatalf("coordinator id: %v", err)
+	}
+	return identifier
+}
 
 func TestRequestsReachThePaddingFloor(t *testing.T) {
 	encoded, err := EncodeRequest(Message{
@@ -102,7 +120,7 @@ func TestDecodeRejectsMalformedDatagrams(t *testing.T) {
 
 func testCoordinator(t *testing.T) *Coordinator {
 	t.Helper()
-	coordinator, err := NewCoordinator(CoordinatorOptions{ServerID: testServer})
+	coordinator, err := NewCoordinator(CoordinatorOptions{PrivateKey: testKey(0x33)})
 	if err != nil {
 		t.Fatalf("coordinator: %v", err)
 	}
@@ -135,7 +153,7 @@ func TestCoordinatorReportsObservedAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if message.Kind != KindBindOK || message.Observed != "203.0.113.7:41234" || message.ServerID != testServer {
+	if message.Kind != KindBindOK || message.Observed != "203.0.113.7:41234" || message.ServerID != testServerID(t) {
 		t.Fatalf("unexpected bind answer: %+v", message)
 	}
 }
@@ -212,7 +230,7 @@ func TestCoordinatorDropsWhatItCannotAnswerSafely(t *testing.T) {
 func TestCoordinatorRateLimitsAndExpires(t *testing.T) {
 	clock := time.Unix(1_800_000_000, 0)
 	coordinator, err := NewCoordinator(CoordinatorOptions{
-		ServerID:          testServer,
+		PrivateKey:        testKey(0x33),
 		RequestsPerWindow: 2,
 		RateWindow:        time.Minute,
 		SessionTTL:        time.Minute,
@@ -246,11 +264,11 @@ func TestCoordinatorRateLimitsAndExpires(t *testing.T) {
 
 func TestCoordinatorRejectsInvalidOptions(t *testing.T) {
 	for name, options := range map[string]CoordinatorOptions{
-		"no server id":  {},
-		"bad server id": {ServerID: "srv_bad"},
-		"negative ttl":  {ServerID: testServer, SessionTTL: -time.Second},
-		"zero capacity": {ServerID: testServer, MaxSessions: -1},
-		"bad window":    {ServerID: testServer, RateWindow: -time.Second},
+		"no key":        {},
+		"short key":     {PrivateKey: make(ed25519.PrivateKey, 8)},
+		"negative ttl":  {PrivateKey: testKey(0x33), SessionTTL: -time.Second},
+		"zero capacity": {PrivateKey: testKey(0x33), MaxSessions: -1},
+		"bad window":    {PrivateKey: testKey(0x33), RateWindow: -time.Second},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := NewCoordinator(options); err == nil {
@@ -418,6 +436,9 @@ func TestCoordinatorReportsWhetherThePeerIsPublic(t *testing.T) {
 	// nothing mapped it.
 	ask(RoleA, "203.0.113.7:41234", []string{"203.0.113.7:41234"})
 	fromB := ask(RoleB, "198.51.100.9:52000", []string{"10.0.0.3:52000"})
+	if fromB.Signature == "" || fromB.SignerKey == "" {
+		t.Fatal("the coordinator did not attest to what it saw")
+	}
 	if fromB.PeerPublic != PeerPublicYes {
 		t.Fatalf("expected the unmapped peer to be reported as public, got %q", fromB.PeerPublic)
 	}

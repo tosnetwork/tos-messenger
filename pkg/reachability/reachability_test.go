@@ -1,6 +1,9 @@
 package reachability
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"strings"
 	"testing"
 )
@@ -57,7 +60,76 @@ func publicStratum() Stratum {
 	}
 }
 
+// Every constructed trial is attested and signed the way a real one would be,
+// so the tests exercise the verification path rather than bypassing it.
+func testCoordinatorKey() ed25519.PrivateKey {
+	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x11}, ed25519.SeedSize))
+}
+
+func testCoordinatorID() string {
+	public, ok := testCoordinatorKey().Public().(ed25519.PublicKey)
+	if !ok {
+		panic("unexpected key type")
+	}
+	identifier, err := CoordinatorID(public)
+	if err != nil {
+		panic(err)
+	}
+	return identifier
+}
+
+// One key per operator by default: a shared key is the impersonation the
+// report is meant to catch, not the normal case.
+func endpointKeyFor(operator string) ed25519.PrivateKey {
+	seed := sha256.Sum256([]byte("endpoint/" + operator))
+	return ed25519.NewKeyFromSeed(seed[:])
+}
+
+func attest(session, peerPublic string) Observation {
+	observation, err := SignObservation(Observation{
+		SessionID:  session,
+		Role:       string(RoleA),
+		Observed:   "203.0.113.7:41234",
+		PeerPublic: peerPublic,
+		AtUnix:     1_800_000_000,
+	}, testCoordinatorKey())
+	if err != nil {
+		panic(err)
+	}
+	return observation
+}
+
+// resign re-signs a trial a test mutated. Mutating a signed trial invalidates
+// it, which is the signature doing its job.
+func resign(trial Trial) Trial {
+	signed, err := SignTrial(trial, endpointKeyFor(trial.OperatorID))
+	if err != nil {
+		panic(err)
+	}
+	return signed
+}
+
+func complete(trial Trial, operator string) Trial {
+	session := "ses_" + trial.PairID[len("pair_"):]
+	peerPublic := "no"
+	if trial.Stratum.Reachability == BothPublic || trial.Stratum.Reachability == OnePublic {
+		peerPublic = "yes"
+	}
+	trial.SessionID = session
+	trial.Role = RoleA
+	trial.Observation = attest(session, peerPublic)
+	signed, err := SignTrial(trial, endpointKeyFor(operator))
+	if err != nil {
+		panic(err)
+	}
+	return signed
+}
+
 func directTrial(s Stratum, operator string, millis uint64) Trial {
+	return complete(rawDirectTrial(s, operator, millis), operator)
+}
+
+func rawDirectTrial(s Stratum, operator string, millis uint64) Trial {
 	return Trial{
 		Stratum:         s,
 		PairID:          nextPair(),
@@ -74,6 +146,10 @@ func directTrial(s Stratum, operator string, millis uint64) Trial {
 }
 
 func fallbackTrial(s Stratum, operator string, outcome Outcome, failure FailureClass) Trial {
+	return complete(rawFallbackTrial(s, operator, outcome, failure), operator)
+}
+
+func rawFallbackTrial(s Stratum, operator string, outcome Outcome, failure FailureClass) Trial {
 	return Trial{
 		Stratum:       s,
 		PairID:        nextPair(),
@@ -96,6 +172,7 @@ func testPolicy() Policy {
 		MaxTrialsPerOperatorPerCell: 8,
 		DirectViableRate:            0.75,
 		TunnelViableRate:            0.9,
+		Coordinators:                []string{testCoordinatorID()},
 		RequiredStrata: []Stratum{
 			stratum(CarrierConsumerISP, ClassDesktop),
 			stratum(CarrierCarrierGrade, ClassEdgeARM),
@@ -191,9 +268,12 @@ func TestPolicyDigestIsOrderIndependentAndThresholdSensitive(t *testing.T) {
 		},
 		"sites":        func(p *Policy) { p.MinSitesPerCell = 3 },
 		"operator cap": func(p *Policy) { p.MaxTrialsPerOperatorPerCell = 4 },
-		"direct rate":  func(p *Policy) { p.DirectViableRate = 0.74 },
-		"tunnel rate":  func(p *Policy) { p.TunnelViableRate = 0.95 },
-		"strata":       func(p *Policy) { p.RequiredStrata = append(p.RequiredStrata, stratum(CarrierMobile, ClassEdgeRISC)) },
+		"coordinators": func(p *Policy) {
+			p.Coordinators = append(p.Coordinators, "srv_9999999999999999")
+		},
+		"direct rate": func(p *Policy) { p.DirectViableRate = 0.74 },
+		"tunnel rate": func(p *Policy) { p.TunnelViableRate = 0.95 },
+		"strata":      func(p *Policy) { p.RequiredStrata = append(p.RequiredStrata, stratum(CarrierMobile, ClassEdgeRISC)) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			mutated := testPolicy()
@@ -237,6 +317,7 @@ func TestUnderSampledStratumYieldsNoDecision(t *testing.T) {
 	for _, trial := range trials {
 		if trial.Stratum.Key() == single.Key() {
 			trial.OperatorID = opA
+			trial = resign(trial)
 		}
 		filtered = append(filtered, trial)
 	}
@@ -280,6 +361,7 @@ func TestDecisionFollowsMeasurement(t *testing.T) {
 			}
 			for index := range trials {
 				trials[index].Probe = ProbeADNL
+				trials[index] = resign(trials[index])
 			}
 			report, err := Aggregate(policy, trials, ProbeADNL)
 			if err != nil {
@@ -325,7 +407,7 @@ func TestProbeKindsAreNotMixed(t *testing.T) {
 	}
 	adnl := directTrial(policy.RequiredStrata[0], opA, 50)
 	adnl.Probe = ProbeADNL
-	trials = append(trials, adnl)
+	trials = append(trials, resign(adnl))
 
 	report, err := Aggregate(policy, trials, ProbeUDP)
 	if err != nil {
@@ -631,6 +713,7 @@ func TestConcentratedEvidenceIsUnderSampled(t *testing.T) {
 	// Every operator now reports from the same network.
 	for index := range trials {
 		trials[index].SiteID = "site_0000000000000000"
+		trials[index] = resign(trials[index])
 	}
 	report, err := Aggregate(policy, trials, ProbeUDP)
 	if err != nil {
@@ -679,5 +762,89 @@ func TestPairAndSiteIdentityAreRequired(t *testing.T) {
 	}
 	if _, err := PairID(" padded "); err == nil {
 		t.Fatal("an untrimmed pair session was accepted")
+	}
+}
+
+// A trial altered after it was signed is not evidence, whatever it now says.
+func TestAlteredTrialsAreNotCounted(t *testing.T) {
+	policy := testPolicy()
+	var trials []Trial
+	for _, required := range policy.RequiredStrata {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+	// Someone improves one result after the fact.
+	trials[0].Outcome = OutcomeDirect
+	trials[0].EstablishMillis = 5
+
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.UnverifiedTrials != 1 {
+		t.Fatalf("an altered trial was counted: %+v", report)
+	}
+}
+
+// An attestation from a coordinator nobody predeclared proves only that
+// somebody signed something.
+func TestUnpredeclaredCoordinatorIsNotEvidence(t *testing.T) {
+	policy := testPolicy()
+	stranger := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x99}, ed25519.SeedSize))
+
+	var trials []Trial
+	for _, required := range policy.RequiredStrata {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+	for index := range trials {
+		observation, err := SignObservation(trials[index].Observation, stranger)
+		if err != nil {
+			t.Fatalf("attest: %v", err)
+		}
+		trials[index].Observation = observation
+		trials[index] = resign(trials[index])
+	}
+	if _, err := Aggregate(policy, trials, ProbeUDP); err == nil {
+		t.Fatal("a study attested by nobody the policy named produced a report")
+	}
+}
+
+// One host answering to several operator names would satisfy the operator
+// minimum by itself. The signing key is what gives that away.
+func TestOneKeyUnderSeveralOperatorsIsExcluded(t *testing.T) {
+	policy := testPolicy()
+	target := policy.RequiredStrata[0]
+
+	var trials []Trial
+	for _, operator := range []string{opA, opB, opC} {
+		trial := rawDirectTrial(target, operator, 20)
+		session := "ses_" + trial.PairID[len("pair_"):]
+		trial.SessionID = session
+		trial.Role = RoleA
+		trial.Observation = attest(session, "no")
+		// Every "operator" signs with the same key.
+		signed, err := SignTrial(trial, endpointKeyFor("one-host"))
+		if err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		trials = append(trials, signed, signed)
+	}
+	for _, required := range policy.RequiredStrata[1:] {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if len(report.SharedEndpointKeys) != 1 {
+		t.Fatalf("the shared key was not reported: %+v", report.SharedEndpointKeys)
+	}
+	for _, cell := range report.Cells {
+		if cell.StratumKey == target.Key() {
+			t.Fatalf("a cell built from one host under three names survived: %+v", cell)
+		}
+	}
+	if report.Finding != FindingInsufficient {
+		t.Fatalf("expected the study to fall short, got %q", report.Finding)
 	}
 }

@@ -37,6 +37,10 @@ const (
 	DomainReachabilitySite = "tos.messaging.reachability-site.v1\x00"
 	// DomainReachabilityPair namespaces the paired-measurement derivation.
 	DomainReachabilityPair = "tos.messaging.reachability-pair.v1\x00"
+	// DomainReachabilityCoordinator namespaces the coordinator identifier.
+	DomainReachabilityCoordinator = "tos.messaging.reachability-coordinator.v1\x00"
+	// DomainReachabilityObservation namespaces a coordinator attestation.
+	DomainReachabilityObservation = "tos.messaging.reachability-observation.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -55,4 +59,6 @@ var Domains = []string{
 	DomainReachabilityOperator,
 	DomainReachabilitySite,
 	DomainReachabilityPair,
+	DomainReachabilityCoordinator,
+	DomainReachabilityObservation,
 }

@@ -75,10 +75,14 @@ type Policy struct {
 	// MaxTrialsPerOperatorPerCell caps how much of a cell one operator may
 	// contribute. Trials past the cap are dropped and reported, never counted
 	// silently.
-	MaxTrialsPerOperatorPerCell int       `json:"max_trials_per_operator_per_cell"`
-	DirectViableRate            float64   `json:"direct_viable_rate"`
-	TunnelViableRate            float64   `json:"tunnel_viable_rate"`
-	RequiredStrata              []Stratum `json:"required_strata"`
+	MaxTrialsPerOperatorPerCell int     `json:"max_trials_per_operator_per_cell"`
+	DirectViableRate            float64 `json:"direct_viable_rate"`
+	TunnelViableRate            float64 `json:"tunnel_viable_rate"`
+	// Coordinators predeclares whose attestations count. Without it a signed
+	// observation proves only that somebody signed something, since anyone can
+	// run a coordinator and attest to whatever an operator wants.
+	Coordinators   []string  `json:"coordinators"`
+	RequiredStrata []Stratum `json:"required_strata"`
 }
 
 type wirePolicy struct {
@@ -120,9 +124,17 @@ type Report struct {
 	Probe        ProbeKind    `json:"probe"`
 	Kind         Kind         `json:"kind"`
 	Cells        []CellReport `json:"cells"`
-	Missing      []string     `json:"missing_required_strata"`
-	Finding      Finding      `json:"finding"`
-	Reasons      []string     `json:"reasons"`
+	// UnverifiedTrials counts records dropped because their signatures did not
+	// hold or their attestation came from a coordinator the policy did not
+	// predeclare.
+	UnverifiedTrials int `json:"unverified_trials"`
+	// SharedEndpointKeys names endpoint keys that reported under more than one
+	// operator. Every trial from such a key is excluded: the operator diversity
+	// requirement means nothing if one host can answer to several names.
+	SharedEndpointKeys []string `json:"shared_endpoint_keys,omitempty"`
+	Missing            []string `json:"missing_required_strata"`
+	Finding            Finding  `json:"finding"`
+	Reasons            []string `json:"reasons"`
 }
 
 // SupportsRouteDecision reports whether this study may be used to freeze a
@@ -152,6 +164,19 @@ func (p Policy) Validate() error {
 	}
 	if p.MaxTrialsPerOperatorPerCell < 1 {
 		return errors.New("a policy must cap how much of a cell one operator contributes")
+	}
+	if len(p.Coordinators) == 0 || len(p.Coordinators) > MaxCoordinatorsPerPolicy {
+		return errors.New("a policy must predeclare whose attestations count")
+	}
+	seenCoordinators := make(map[string]struct{}, len(p.Coordinators))
+	for _, coordinator := range p.Coordinators {
+		if !serverPattern.MatchString(coordinator) {
+			return errors.New("invalid predeclared coordinator")
+		}
+		if _, duplicate := seenCoordinators[coordinator]; duplicate {
+			return errors.New("a policy cannot predeclare the same coordinator twice")
+		}
+		seenCoordinators[coordinator] = struct{}{}
 	}
 	if p.DirectViableRate <= 0 || p.DirectViableRate > 1 ||
 		p.TunnelViableRate <= 0 || p.TunnelViableRate > 1 {
@@ -239,6 +264,12 @@ func (p Policy) CanonicalBytes() ([]byte, error) {
 	canon.Uint64(buffer, uint64(p.MaxTrialsPerOperatorPerCell))
 	canon.Uint64(buffer, ratePoints(p.DirectViableRate))
 	canon.Uint64(buffer, ratePoints(p.TunnelViableRate))
+	coordinators := append([]string(nil), p.Coordinators...)
+	sort.Strings(coordinators)
+	canon.Uint32(buffer, uint32(len(coordinators)))
+	for _, coordinator := range coordinators {
+		canon.Text(buffer, coordinator)
+	}
 	canon.Uint32(buffer, uint32(len(keys)))
 	for _, key := range keys {
 		canon.Text(buffer, key)
@@ -311,8 +342,13 @@ func Aggregate(policy Policy, trials []Trial, probe ProbeKind) (Report, error) {
 		return Report{}, err
 	}
 
-	grouped := make(map[string][]Trial)
-	strata := make(map[string]Stratum)
+	// Nothing counts until it verifies. A trial whose signatures do not hold,
+	// or whose attestation comes from a coordinator nobody predeclared, is not
+	// weak evidence; it is somebody's unchecked assertion, and accepting it
+	// would make every threshold in the policy advisory.
+	verified := make([]Trial, 0, len(trials))
+	operatorsByKey := make(map[string]map[string]struct{})
+	unverified := 0
 	for _, trial := range trials {
 		if err := trial.Validate(); err != nil {
 			return Report{}, err
@@ -320,12 +356,38 @@ func Aggregate(policy Policy, trials []Trial, probe ProbeKind) (Report, error) {
 		if trial.Probe != probe {
 			continue
 		}
+		if err := VerifyTrial(policy, trial); err != nil {
+			unverified++
+			continue
+		}
+		if operatorsByKey[trial.EndpointPublicKeyHex] == nil {
+			operatorsByKey[trial.EndpointPublicKeyHex] = map[string]struct{}{}
+		}
+		operatorsByKey[trial.EndpointPublicKeyHex][trial.OperatorID] = struct{}{}
+		verified = append(verified, trial)
+	}
+
+	// One host answering to several operator names would satisfy the operator
+	// minimum by itself. The key it signs with is what gives that away.
+	shared := map[string]struct{}{}
+	for key, operators := range operatorsByKey {
+		if len(operators) > 1 {
+			shared[key] = struct{}{}
+		}
+	}
+
+	grouped := make(map[string][]Trial)
+	strata := make(map[string]Stratum)
+	for _, trial := range verified {
+		if _, impersonating := shared[trial.EndpointPublicKeyHex]; impersonating {
+			continue
+		}
 		key := trial.Stratum.Key()
 		grouped[key] = append(grouped[key], trial)
 		strata[key] = trial.Stratum
 	}
 	if len(grouped) == 0 {
-		return Report{}, errors.New("no trials for the requested probe")
+		return Report{}, errors.New("no verified trials for the requested probe")
 	}
 
 	cells := make([]CellReport, 0, len(grouped))
@@ -334,7 +396,16 @@ func Aggregate(policy Policy, trials []Trial, probe ProbeKind) (Report, error) {
 	}
 	sort.Slice(cells, func(i, j int) bool { return cells[i].StratumKey < cells[j].StratumKey })
 
-	report := Report{PolicyDigest: digest, Probe: probe, Kind: kindFor(probe), Cells: cells}
+	sharedKeys := make([]string, 0, len(shared))
+	for key := range shared {
+		sharedKeys = append(sharedKeys, key)
+	}
+	sort.Strings(sharedKeys)
+
+	report := Report{
+		PolicyDigest: digest, Probe: probe, Kind: kindFor(probe), Cells: cells,
+		UnverifiedTrials: unverified, SharedEndpointKeys: sharedKeys,
+	}
 	report.Finding, report.Missing, report.Reasons = decide(policy, cells, probe)
 	return report, nil
 }

@@ -23,6 +23,23 @@ too few independent networks, the report's finding is `insufficient-evidence`
 and the tool exits non-zero. It never degrades into a weak preference, because
 a weak preference is what the implementation would then be built on.
 
+**Nothing counts until it verifies.** Each trial is signed by the endpoint that
+produced it and carries an attestation, signed by a coordinator, of the address
+that coordinator observed and whether the peer was publicly addressable. Those
+two facts place a trial in its stratum and no endpoint can check either about
+itself, so left unsigned they are the operator's own claim about which cell
+their result should count towards. A policy predeclares whose attestations
+count: without that list a signature proves only that somebody signed
+something, since anyone can run a coordinator.
+
+A trial altered after signing, or attested by a coordinator the policy never
+named, is not weak evidence. It is dropped and counted in `unverified_trials`.
+
+**One host cannot answer to several names.** Endpoint keys are stable per host,
+and a key seen under more than one operator identifier has every one of its
+trials excluded and the key reported. The operator minimum means nothing if one
+machine can satisfy it alone.
+
 **No operator decides a cell alone.** Rates are means over operators, not over
 trials, so running more attempts buys no influence. Each operator's
 contribution to a cell is also capped, and anything past the cap is dropped and
@@ -53,11 +70,17 @@ behavior.
 
 ## Running it
 
-Start a coordinator somewhere both endpoints can reach:
+Start a coordinator somewhere both endpoints can reach. Its identity comes
+from a key file, so restarting does not change who it is:
 
 ```sh
-tos-reachability-coordinator -listen :7691
+tos-reachability-coordinator -listen :7691 -key coordinator.key
+# coordinator_id=srv_... public_key=... listening=:7691
 ```
+
+The printed identifier goes into the policy's `coordinators` list, out of band.
+A study counts attestations only from coordinators it predeclared, so a policy
+carrying somebody else's identifier predeclares nothing.
 
 Run both endpoints of a pair with a shared session identifier:
 
@@ -66,13 +89,13 @@ SESSION=ses_$(openssl rand -hex 16)
 
 # endpoint A
 tos-reachability -coordinators host-1:7691,host-2:7691 -session "$SESSION" \
-  -role a -operator "your-lab" -site "tokyo-uplink" \
+  -role a -operator "your-lab" -site "tokyo-uplink" -identity endpoint.key \
   -carrier consumer-isp -endpoint-class desktop \
   -out study.jsonl
 
 # endpoint B
 tos-reachability -coordinators host-1:7691,host-2:7691 -session "$SESSION" \
-  -role b -operator "other-lab" -site "osaka-cgnat" \
+  -role b -operator "other-lab" -site "osaka-cgnat" -identity endpoint.key \
   -carrier carrier-grade-nat -endpoint-class edge-arm \
   -out study.jsonl
 ```
@@ -118,6 +141,15 @@ milestone's own acceptance, and nothing in this study measures them.
 
 Nothing in `pkg/probe` is a Messenger transport. It signs nothing, encrypts
 nothing, and carries no application content.
+
+## What signatures do and do not establish
+
+An endpoint signature makes a trial unrewritable and makes one host reporting
+under several names detectable. It does not make the endpoint honest: an
+operator who runs genuinely separate machines and reports honestly about each
+one is indistinguishable from one who runs genuinely separate machines and
+reports selectively. Choosing which measurements to keep is not addressed here,
+and the sample and cap rules exist partly because it is not.
 
 ## Amplification
 

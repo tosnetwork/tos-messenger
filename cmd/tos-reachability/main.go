@@ -13,6 +13,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -41,6 +44,7 @@ func main() {
 	role := flag.String("role", "", "a or b")
 	out := flag.String("out", "", "study log to append to, stdout when empty")
 	commit := flag.String("commit", "", "commit of this build, taken from build information when empty")
+	identity := flag.String("identity", "", "endpoint signing key file, created when absent")
 	listen := flag.String("listen", ":0", "local UDP address to bind")
 	pairTimeout := flag.Duration("pair-timeout", probe.DefaultPairTimeout, "how long to wait for the peer")
 	punchTimeout := flag.Duration("punch-timeout", probe.DefaultPunchTimeout, "how long to attempt a direct path")
@@ -55,7 +59,7 @@ func main() {
 	flag.StringVar(&labels.assistance, "mapping-assistance", string(reachability.AssistanceNone), "none, static-port-mapping, or discovery-assisted")
 	flag.Parse()
 
-	trial, err := measure(context.Background(), *coordinators, *session, *role, *listen, *commit, *pairTimeout, *punchTimeout, labels)
+	trial, err := measure(context.Background(), *coordinators, *session, *role, *listen, *commit, *identity, *pairTimeout, *punchTimeout, labels)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tos-reachability:", err)
 		os.Exit(1)
@@ -72,7 +76,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "outcome=%s failure=%s establish_ms=%d\n", trial.Outcome, trial.Failure, trial.EstablishMillis)
 }
 
-func measure(ctx context.Context, coordinators, session, role, listen, commit string, pairTimeout, punchTimeout time.Duration, labels declared) (reachability.Trial, error) {
+func measure(ctx context.Context, coordinators, session, role, listen, commit, identity string, pairTimeout, punchTimeout time.Duration, labels declared) (reachability.Trial, error) {
 	addresses := splitAddresses(coordinators)
 	if len(addresses) == 0 {
 		return reachability.Trial{}, errors.New("at least one coordinator is required")
@@ -98,6 +102,10 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit st
 	if err != nil {
 		return reachability.Trial{}, err
 	}
+	endpointKey, err := loadOrCreateKey(identity)
+	if err != nil {
+		return reachability.Trial{}, err
+	}
 	result, err := probe.Run(ctx, probe.Config{
 		Coordinators: addresses,
 		SessionID:    session,
@@ -116,6 +124,11 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit st
 	if result.Reachability == "" {
 		return reachability.Trial{}, errors.New("the pair's public reachability was never established")
 	}
+	// Without a verified attestation the stratum would be this endpoint's own
+	// claim about where its result should count, so no record is written.
+	if result.Observation.SignatureHex == "" {
+		return reachability.Trial{}, errors.New("no coordinator attested to this measurement")
+	}
 
 	trial := reachability.Trial{
 		Stratum: reachability.Stratum{
@@ -131,6 +144,9 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit st
 		PairID:          pair,
 		SiteID:          site,
 		OperatorID:      operator,
+		SessionID:       session,
+		Role:            reachability.Role(role),
+		Observation:     result.Observation,
 		Probe:           reachability.ProbeUDP,
 		StartedAtUnix:   uint64(time.Now().Unix()),
 		LocalCommit:     commit,
@@ -150,10 +166,42 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit st
 		trial.Failure = result.Failure
 		trial.EstablishMillis = 0
 	}
-	if err := trial.Validate(); err != nil {
+	signed, err := reachability.SignTrial(trial, endpointKey)
+	if err != nil {
 		return reachability.Trial{}, err
 	}
-	return trial, nil
+	if err := signed.Validate(); err != nil {
+		return reachability.Trial{}, err
+	}
+	return signed, nil
+}
+
+// loadOrCreateKey keeps one host's endpoint identity stable. A key that
+// changed every run would make a single host indistinguishable from many, which
+// is the counting the operator minimum exists to prevent.
+func loadOrCreateKey(path string) (ed25519.PrivateKey, error) {
+	if path == "" {
+		return nil, errors.New("an endpoint signing key file is required")
+	}
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		decoded, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+		if err != nil || len(decoded) != ed25519.PrivateKeySize {
+			return nil, errors.New("identity file is not a signing key")
+		}
+		return ed25519.PrivateKey(decoded), nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, errors.New("read identity file")
+	}
+	_, generated, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, errors.New("generate endpoint key")
+	}
+	if err := os.WriteFile(path, []byte(hex.EncodeToString(generated)+"\n"), 0o600); err != nil {
+		return nil, errors.New("write identity file")
+	}
+	return generated, nil
 }
 
 func splitAddresses(value string) []string {

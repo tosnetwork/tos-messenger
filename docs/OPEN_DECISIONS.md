@@ -47,6 +47,10 @@ than silently forking two implementations.
 | Operator weighting | rates are means over operators, with a per-operator cap on how much of a cell one may contribute, and drops reported rather than silently truncated | `reachability.summarize` |
 | Site counting | counted separately from operators, because one operator behind one uplink has measured one network | `reachability.Policy.MinSitesPerCell` |
 | Pair identity | both endpoints of one attempt derive the same identifier from their shared session, so one measurement is not counted as two | `reachability.PairID` |
+| Evidence integrity | every trial is signed by its endpoint and carries a coordinator attestation of the observed address and peer reachability, the two facts an endpoint cannot check about itself | `reachability.SignTrial`, `reachability.Observation` |
+| Predeclared coordinators | a policy names whose attestations count, because anyone can run a coordinator and a signature from an unnamed one proves only that somebody signed something | `reachability.Policy.Coordinators` |
+| Coordinator identity | derived from its key rather than chosen, so a coordinator cannot present itself under a name it does not hold | `reachability.CoordinatorID` |
+| Shared-key exclusion | an endpoint key seen under more than one operator has all of its trials dropped and the key reported | `reachability.Aggregate` |
 | Operator identity | opaque `op_` prefix over a digest of a local operator name, so diversity is counted without collecting identity | `reachability.OperatorID` |
 | Suite identifier form | `tos.messaging.e2ee.<name>.v<n>`, so a suite can be negotiated, deprecated, and upgraded | `e2ee.AlgorithmPattern` |
 | Ciphertext binding | network tuple, suite, conversation, and both sides' Agent, endpoint, and device identifiers, with direction included | `e2ee.Binding` |

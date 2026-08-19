@@ -1,11 +1,14 @@
 package probe
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"net"
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 )
 
 const (
@@ -35,6 +38,7 @@ const (
 // exists so that a measurement can be run at all.
 type Coordinator struct {
 	serverID string
+	key      ed25519.PrivateKey
 	ttl      time.Duration
 	capacity int
 	limiter  *rateLimiter
@@ -57,7 +61,10 @@ type endpointState struct {
 
 // CoordinatorOptions configures a coordinator.
 type CoordinatorOptions struct {
-	ServerID          string
+	// PrivateKey signs what the coordinator observed. The identifier is
+	// derived from it rather than chosen, so a coordinator cannot present
+	// itself under a name it does not hold the key for.
+	PrivateKey        ed25519.PrivateKey
 	SessionTTL        time.Duration
 	MaxSessions       int
 	RequestsPerWindow int
@@ -70,8 +77,16 @@ type CoordinatorOptions struct {
 // than a silent default, because a measurement service that quietly changed
 // its own limits would make the resulting matrix unreproducible.
 func NewCoordinator(options CoordinatorOptions) (*Coordinator, error) {
-	if !serverPattern.MatchString(options.ServerID) {
-		return nil, errors.New("invalid coordinator server identifier")
+	if len(options.PrivateKey) != ed25519.PrivateKeySize {
+		return nil, errors.New("a coordinator needs a signing key")
+	}
+	public, ok := options.PrivateKey.Public().(ed25519.PublicKey)
+	if !ok {
+		return nil, errors.New("invalid coordinator signing key")
+	}
+	serverID, err := reachability.CoordinatorID(public)
+	if err != nil {
+		return nil, err
 	}
 	ttl := options.SessionTTL
 	if ttl == 0 {
@@ -101,7 +116,8 @@ func NewCoordinator(options CoordinatorOptions) (*Coordinator, error) {
 		return nil, errors.New("invalid coordinator limits")
 	}
 	return &Coordinator{
-		serverID: options.ServerID,
+		serverID: serverID,
+		key:      options.PrivateKey,
 		ttl:      ttl,
 		capacity: capacity,
 		limiter:  newRateLimiter(perWindow, window, sources),
@@ -145,6 +161,19 @@ func (c *Coordinator) Handle(request []byte, from netip.AddrPort) []byte {
 			Nonce: message.Nonce, Observed: from.String(), ServerID: c.serverID,
 			Candidates: peer, PeerPublic: peerPublic, PeerCommit: peerCommit,
 		}
+		// The address observed here and whether the peer is publicly
+		// addressable are the two facts that place a trial in its stratum, and
+		// an endpoint cannot check either about itself. Attesting to them is
+		// what stops a stratum label from being the operator's own claim.
+		if peerPublic != "" {
+			attested, err := c.attest(message, from, peerPublic)
+			if err != nil {
+				return nil
+			}
+			response.ObservedAt = attested.AtUnix
+			response.SignerKey = attested.PublicKeyHex
+			response.Signature = attested.SignatureHex
+		}
 	default:
 		// Punch traffic belongs between peers. A coordinator that answered it
 		// would become a relay, which is not what is being measured.
@@ -158,6 +187,23 @@ func (c *Coordinator) Handle(request []byte, from netip.AddrPort) []byte {
 		return nil
 	}
 	return encoded
+}
+
+// attest signs what the coordinator saw.
+//
+// The address observed here and whether the peer is publicly addressable are
+// the two facts that place a trial in its stratum, and an endpoint cannot
+// check either about itself. Attesting to them is what stops a stratum label
+// from being the operator's own claim about which cell their result counts
+// towards.
+func (c *Coordinator) attest(message Message, from netip.AddrPort, peerPublic string) (reachability.Observation, error) {
+	return reachability.SignObservation(reachability.Observation{
+		SessionID:  message.SessionID,
+		Role:       string(message.Role),
+		Observed:   from.String(),
+		PeerPublic: peerPublic,
+		AtUnix:     uint64(c.now().Unix()),
+	}, c.key)
 }
 
 // pair records one endpoint and returns the peer's candidate set along with
