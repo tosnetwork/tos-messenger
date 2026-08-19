@@ -71,7 +71,7 @@ func Open(config Config, observer Observer) (*Daemon, error) {
 
 	// With no transport the dispatcher can queue and not send, which is what
 	// this installation can honestly do.
-	dispatcher, err := dispatch.New(dispatch.Config{Journal: journal})
+	dispatcher, err := dispatch.New(dispatch.Config{Journal: journal, Identity: config.Identity()})
 	if err != nil {
 		_ = journal.Close()
 		return nil, err

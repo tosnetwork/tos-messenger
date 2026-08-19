@@ -54,11 +54,15 @@ const (
 //
 // The identifier is not ours to choose. TOS Core refuses a key description
 // whose identifier is not the short identifier of the publishing public key,
-// so the endpoint key determines where its locator lives. That has a
-// consequence worth stating: a resolver must already hold the endpoint's
-// delegation, and therefore its key, before it can look anything up. Discovery
-// follows authority rather than preceding it, and first contact is bootstrapped
-// out of band.
+// so the endpoint key determines where its locator lives.
+//
+// That makes this endpoint locator refresh, and not discovery by Agent
+// identifier. A resolver must already hold the endpoint's delegation, and so
+// its key, before it can look anything up; what the DHT provides is a current
+// address for an endpoint already known. Finding an endpoint from an Agent
+// identifier alone would need a separate rendezvous for delegation documents,
+// which does not exist here, and first contact is bootstrapped out of band
+// until it does.
 type DHTKey struct {
 	ID    [32]byte
 	Name  string

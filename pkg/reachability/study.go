@@ -271,6 +271,12 @@ func (t Trial) Validate() error {
 	if !pairPattern.MatchString(t.PairID) {
 		return errors.New("invalid trial pair identifier")
 	}
+	// The pair identifier is derived, not declared. A field a reporter chooses
+	// freely cannot tie two halves of one measurement together.
+	derived, err := PairID(t.SessionID)
+	if err != nil || derived != t.PairID {
+		return errors.New("trial pair identifier is not derived from its session")
+	}
 	if !sitePattern.MatchString(t.SiteID) {
 		return errors.New("invalid trial site identifier")
 	}
@@ -481,10 +487,15 @@ func opaque(domain, name string) (string, error) {
 // OperatorID derives the opaque operator identifier used for diversity
 // counting.
 //
-// The report needs to know how many independent operators contributed to a
-// cell, never which ones. Deriving a stable opaque value from a local name
-// gives the count without collecting the identity, and without operators
-// having to coordinate identifiers with anyone.
+// The report needs to know how many distinct operators contributed to a cell,
+// never which ones. Deriving a stable opaque value from a local name gives the
+// count without collecting the identity, and without operators having to
+// coordinate identifiers with anyone.
+//
+// The identifier is self-declared. It makes two submissions from one name
+// recognisable as one operator; it does not prove that two names are two
+// parties. Shared endpoint keys are what catches the obvious case, and the
+// report says how many it caught.
 func OperatorID(name string) (string, error) {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" || len(trimmed) > 128 || trimmed != name {

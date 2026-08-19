@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -22,16 +23,11 @@ func siteFor(operator string) string {
 	return "site_" + operator[len("op_"):]
 }
 
-var pairCounter int
+var sessionCounter int
 
-func nextPair() string {
-	pairCounter++
-	return "pair_" + strings.Repeat("0", 28) + string([]byte{
-		"0123456789abcdef"[(pairCounter>>12)&0xf],
-		"0123456789abcdef"[(pairCounter>>8)&0xf],
-		"0123456789abcdef"[(pairCounter>>4)&0xf],
-		"0123456789abcdef"[pairCounter&0xf],
-	})
+func nextSession() string {
+	sessionCounter++
+	return fmt.Sprintf("ses_%012d", sessionCounter)
 }
 
 func stratum(carrier Carrier, class EndpointClass) Stratum {
@@ -78,17 +74,19 @@ func testCoordinatorID() string {
 	return identifier
 }
 
-// One key per operator by default: a shared key is the impersonation the
-// report is meant to catch, not the normal case.
-func endpointKeyFor(operator string) ed25519.PrivateKey {
-	seed := sha256.Sum256([]byte("endpoint/" + operator))
+// One key per endpoint. Both ends of a measurement are separate endpoints even
+// when one operator runs both of them, so the key varies by role as well as by
+// operator. A shared key is the impersonation the report is meant to catch,
+// not the normal case.
+func endpointKeyFor(operator string, role Role) ed25519.PrivateKey {
+	seed := sha256.Sum256([]byte("endpoint/" + operator + "/" + string(role)))
 	return ed25519.NewKeyFromSeed(seed[:])
 }
 
-func attest(session, peerPublic string) Observation {
+func attest(session string, role Role, peerPublic string) Observation {
 	observation, err := SignObservation(Observation{
 		SessionID:  session,
-		Role:       string(RoleA),
+		Role:       string(role),
 		Observed:   "203.0.113.7:41234",
 		PeerPublic: peerPublic,
 		AtUnix:     1_800_000_000,
@@ -102,66 +100,80 @@ func attest(session, peerPublic string) Observation {
 // resign re-signs a trial a test mutated. Mutating a signed trial invalidates
 // it, which is the signature doing its job.
 func resign(trial Trial) Trial {
-	signed, err := SignTrial(trial, endpointKeyFor(trial.OperatorID))
+	signed, err := SignTrial(trial, endpointKeyFor(trial.OperatorID, trial.Role))
 	if err != nil {
 		panic(err)
 	}
 	return signed
 }
 
-func complete(trial Trial, operator string) Trial {
-	session := "ses_" + trial.PairID[len("pair_"):]
+func rawTrial(s Stratum, session string, role Role, operator string,
+	outcome Outcome, failure FailureClass, millis uint64) Trial {
+	pair, err := PairID(session)
+	if err != nil {
+		panic(err)
+	}
+	local, peer := commitA, commitB
+	if role == RoleB {
+		local, peer = commitB, commitA
+	}
+	return Trial{
+		Stratum:         s,
+		PairID:          pair,
+		SiteID:          siteFor(operator),
+		OperatorID:      operator,
+		SessionID:       session,
+		Role:            role,
+		Probe:           ProbeUDP,
+		Outcome:         outcome,
+		Failure:         failure,
+		EstablishMillis: millis,
+		StartedAtUnix:   1_800_000_000,
+		LocalCommit:     local,
+		PeerCommit:      peer,
+	}
+}
+
+func complete(trial Trial) Trial {
 	peerPublic := "no"
 	if trial.Stratum.Reachability == BothPublic || trial.Stratum.Reachability == OnePublic {
 		peerPublic = "yes"
 	}
-	trial.SessionID = session
-	trial.Role = RoleA
-	trial.Observation = attest(session, peerPublic)
-	signed, err := SignTrial(trial, endpointKeyFor(operator))
+	trial.Observation = attest(trial.SessionID, trial.Role, peerPublic)
+	signed, err := SignTrial(trial, endpointKeyFor(trial.OperatorID, trial.Role))
 	if err != nil {
 		panic(err)
 	}
 	return signed
 }
 
-func directTrial(s Stratum, operator string, millis uint64) Trial {
-	return complete(rawDirectTrial(s, operator, millis), operator)
+// measurement builds both halves of one attempt. Aggregation counts pairs, so
+// a helper that produced a single record would be manufacturing exactly the
+// evidence the report is right to discard.
+func measurement(s Stratum, operator string, outcome Outcome, failure FailureClass, millis uint64) []Trial {
+	session := nextSession()
+	return []Trial{
+		complete(rawTrial(s, session, RoleA, operator, outcome, failure, millis)),
+		complete(rawTrial(s, session, RoleB, operator, outcome, failure, millis)),
+	}
 }
 
-func rawDirectTrial(s Stratum, operator string, millis uint64) Trial {
-	return Trial{
-		Stratum:         s,
-		PairID:          nextPair(),
-		SiteID:          siteFor(operator),
-		OperatorID:      operator,
-		Probe:           ProbeUDP,
-		Outcome:         OutcomeDirect,
-		Failure:         FailureNone,
-		EstablishMillis: millis,
-		StartedAtUnix:   1_800_000_000,
-		LocalCommit:     commitA,
-		PeerCommit:      commitB,
-	}
+func directPair(s Stratum, operator string, millis uint64) []Trial {
+	return measurement(s, operator, OutcomeDirect, FailureNone, millis)
+}
+
+func fallbackPair(s Stratum, operator string, outcome Outcome, failure FailureClass) []Trial {
+	return measurement(s, operator, outcome, failure, 0)
+}
+
+// directTrial and fallbackTrial return one half, for the tests that are about
+// a single record rather than about an aggregate.
+func directTrial(s Stratum, operator string, millis uint64) Trial {
+	return directPair(s, operator, millis)[0]
 }
 
 func fallbackTrial(s Stratum, operator string, outcome Outcome, failure FailureClass) Trial {
-	return complete(rawFallbackTrial(s, operator, outcome, failure), operator)
-}
-
-func rawFallbackTrial(s Stratum, operator string, outcome Outcome, failure FailureClass) Trial {
-	return Trial{
-		Stratum:       s,
-		PairID:        nextPair(),
-		SiteID:        siteFor(operator),
-		OperatorID:    operator,
-		Probe:         ProbeUDP,
-		Outcome:       outcome,
-		Failure:       failure,
-		StartedAtUnix: 1_800_000_000,
-		LocalCommit:   commitA,
-		PeerCommit:    commitB,
-	}
+	return fallbackPair(s, operator, outcome, failure)[0]
 }
 
 func testPolicy() Policy {
@@ -193,10 +205,10 @@ func testPolicy() Policy {
 func fillCell(trials []Trial, s Stratum, direct int, outcome Outcome, failure FailureClass, other int) []Trial {
 	operators := []string{opA, opB, opC}
 	for index := 0; index < direct; index++ {
-		trials = append(trials, directTrial(s, operators[index%len(operators)], uint64(100+index)))
+		trials = append(trials, directPair(s, operators[index%len(operators)], uint64(100+index))...)
 	}
 	for index := 0; index < other; index++ {
-		trials = append(trials, fallbackTrial(s, operators[(direct+index)%len(operators)], outcome, failure))
+		trials = append(trials, fallbackPair(s, operators[(direct+index)%len(operators)], outcome, failure)...)
 	}
 	return trials
 }
@@ -405,9 +417,10 @@ func TestProbeKindsAreNotMixed(t *testing.T) {
 	for _, required := range policy.RequiredStrata {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
-	adnl := directTrial(policy.RequiredStrata[0], opA, 50)
-	adnl.Probe = ProbeADNL
-	trials = append(trials, resign(adnl))
+	for _, half := range directPair(policy.RequiredStrata[0], opA, 50) {
+		half.Probe = ProbeADNL
+		trials = append(trials, resign(half))
+	}
 
 	report, err := Aggregate(policy, trials, ProbeUDP)
 	if err != nil {
@@ -426,13 +439,12 @@ func TestProbeKindsAreNotMixed(t *testing.T) {
 func TestPercentilesUseMeasuredSessionsOnly(t *testing.T) {
 	policy := testPolicy()
 	target := policy.RequiredStrata[0]
-	trials := []Trial{
-		directTrial(target, opA, 10),
-		directTrial(target, opB, 20),
-		directTrial(target, opA, 30),
-		directTrial(target, opB, 400),
-		fallbackTrial(target, opC, OutcomeRelayFallback, FailureHandshake),
-	}
+	var trials []Trial
+	trials = append(trials, directPair(target, opA, 10)...)
+	trials = append(trials, directPair(target, opB, 20)...)
+	trials = append(trials, directPair(target, opA, 30)...)
+	trials = append(trials, directPair(target, opB, 400)...)
+	trials = append(trials, fallbackPair(target, opC, OutcomeRelayFallback, FailureHandshake)...)
 	for _, required := range policy.RequiredStrata[1:] {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
@@ -669,12 +681,12 @@ func TestOneOperatorCannotDominateACell(t *testing.T) {
 	var trials []Trial
 	// A prolific operator succeeds every time.
 	for index := 0; index < 200; index++ {
-		trials = append(trials, directTrial(target, opA, 10))
+		trials = append(trials, directPair(target, opA, 10)...)
 	}
 	// Two others fail every time.
 	for index := 0; index < 4; index++ {
-		trials = append(trials, fallbackTrial(target, opB, OutcomeFailed, FailureHandshake))
-		trials = append(trials, fallbackTrial(target, opC, OutcomeFailed, FailureHandshake))
+		trials = append(trials, fallbackPair(target, opB, OutcomeFailed, FailureHandshake)...)
+		trials = append(trials, fallbackPair(target, opC, OutcomeFailed, FailureHandshake)...)
 	}
 	for _, required := range policy.RequiredStrata[1:] {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
@@ -816,17 +828,17 @@ func TestOneKeyUnderSeveralOperatorsIsExcluded(t *testing.T) {
 
 	var trials []Trial
 	for _, operator := range []string{opA, opB, opC} {
-		trial := rawDirectTrial(target, operator, 20)
-		session := "ses_" + trial.PairID[len("pair_"):]
-		trial.SessionID = session
-		trial.Role = RoleA
-		trial.Observation = attest(session, "no")
-		// Every "operator" signs with the same key.
-		signed, err := SignTrial(trial, endpointKeyFor("one-host"))
-		if err != nil {
-			t.Fatalf("sign: %v", err)
+		session := nextSession()
+		for _, role := range []Role{RoleA, RoleB} {
+			trial := rawTrial(target, session, role, operator, OutcomeDirect, FailureNone, 20)
+			trial.Observation = attest(session, role, "no")
+			// Every "operator" signs with the same key.
+			signed, err := SignTrial(trial, endpointKeyFor("one-host", RoleA))
+			if err != nil {
+				t.Fatalf("sign: %v", err)
+			}
+			trials = append(trials, signed)
 		}
-		trials = append(trials, signed, signed)
 	}
 	for _, required := range policy.RequiredStrata[1:] {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
@@ -846,5 +858,162 @@ func TestOneKeyUnderSeveralOperatorsIsExcluded(t *testing.T) {
 	}
 	if report.Finding != FindingInsufficient {
 		t.Fatalf("expected the study to fall short, got %q", report.Finding)
+	}
+}
+
+// A measurement is what two endpoints agree happened. One endpoint's account
+// of a session is an assertion, and an assertion nobody corroborated must not
+// move a threshold.
+func TestHalfAMeasurementIsNotEvidence(t *testing.T) {
+	policy := testPolicy()
+	target := policy.RequiredStrata[0]
+
+	var trials []Trial
+	for index := 0; index < 4; index++ {
+		pair := directPair(target, []string{opA, opB, opC}[index%3], uint64(100+index))
+		if index == 0 {
+			pair = pair[:1] // the peer never reported
+		}
+		trials = append(trials, pair...)
+	}
+	for _, required := range policy.RequiredStrata[1:] {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.IncompletePairs != 1 {
+		t.Fatalf("an unpaired half was not reported: %+v", report)
+	}
+	for _, cell := range report.Cells {
+		if cell.StratumKey == target.Key() && cell.Samples != 3 {
+			t.Fatalf("an unpaired half was counted as a measurement: %+v", cell)
+		}
+	}
+}
+
+// Both halves have to say the same thing. Improving one half of a result now
+// takes the other half's key as well, and the two keys are what the operator
+// minimum is counting.
+func TestContradictingHalvesAreDiscarded(t *testing.T) {
+	policy := testPolicy()
+	target := policy.RequiredStrata[0]
+
+	cases := map[string]func([]Trial) []Trial{
+		"outcome": func(pair []Trial) []Trial {
+			pair[1].Outcome = OutcomeRelayFallback
+			pair[1].Failure = FailureHandshake
+			pair[1].EstablishMillis = 0
+			pair[1] = resign(pair[1])
+			return pair
+		},
+		"commits": func(pair []Trial) []Trial {
+			pair[1].PeerCommit = "3333333333333333333333333333333333333333"
+			pair[1] = resign(pair[1])
+			return pair
+		},
+		"cell": func(pair []Trial) []Trial {
+			pair[1].Stratum.Carrier = CarrierMobile
+			pair[1] = resign(pair[1])
+			return pair
+		},
+		"one key twice": func(pair []Trial) []Trial {
+			signed, err := SignTrial(pair[1], endpointKeyFor(pair[0].OperatorID, RoleA))
+			if err != nil {
+				panic(err)
+			}
+			return []Trial{pair[0], signed}
+		},
+		"both in one role": func(pair []Trial) []Trial {
+			pair[1].Role = RoleA
+			pair[1].Observation = attest(pair[1].SessionID, RoleA, "no")
+			pair[1] = resign(pair[1])
+			return pair
+		},
+	}
+	for name, contradict := range cases {
+		t.Run(name, func(t *testing.T) {
+			var trials []Trial
+			for index := 0; index < 4; index++ {
+				pair := directPair(target, []string{opA, opB, opC}[index%3], uint64(100+index))
+				if index == 0 {
+					pair = contradict(pair)
+				}
+				trials = append(trials, pair...)
+			}
+			for _, required := range policy.RequiredStrata[1:] {
+				trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+			}
+			report, err := Aggregate(policy, trials, ProbeUDP)
+			if err != nil {
+				t.Fatalf("aggregate: %v", err)
+			}
+			if report.IncompletePairs+report.UnverifiedTrials == 0 {
+				t.Fatalf("contradicting halves were aggregated anyway: %+v", report)
+			}
+			for _, cell := range report.Cells {
+				if cell.StratumKey == target.Key() && cell.Samples > 3 {
+					t.Fatalf("a contradicted measurement was counted: %+v", cell)
+				}
+			}
+		})
+	}
+}
+
+// The pair identifier is derived from the session, so it cannot be chosen to
+// glue together two halves that were never the same attempt.
+func TestPairIdentifierMustBeDerivedFromItsSession(t *testing.T) {
+	trial := directTrial(stratum(CarrierConsumerISP, ClassDesktop), opA, 100)
+	other, err := PairID("some-other-session")
+	if err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+	trial.PairID = other
+	if err := trial.Validate(); err == nil {
+		t.Fatal("a declared pair identifier was accepted")
+	}
+}
+
+// Which trials survive the per-operator cap must not depend on submission
+// order, or an operator chooses their own sample by choosing when to send.
+func TestCapTruncatesTheSameSetWhateverTheOrder(t *testing.T) {
+	policy := testPolicy()
+	target := policy.RequiredStrata[0]
+
+	var trials []Trial
+	for index := 0; index < 20; index++ {
+		outcome, failure := OutcomeDirect, FailureNone
+		if index%2 == 0 {
+			outcome, failure = OutcomeFailed, FailureHandshake
+		}
+		trials = append(trials, measurement(target, opA, outcome, failure, map[bool]uint64{true: 0, false: 40}[index%2 == 0])...)
+	}
+	for _, required := range policy.RequiredStrata {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+
+	forward, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	reversed := make([]Trial, len(trials))
+	for index, trial := range trials {
+		reversed[len(trials)-1-index] = trial
+	}
+	backward, err := Aggregate(policy, reversed, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate reversed: %v", err)
+	}
+	for index, cell := range forward.Cells {
+		mirror := backward.Cells[index]
+		if cell.Samples != mirror.Samples || cell.DirectRate != mirror.DirectRate ||
+			cell.DroppedOverCap != mirror.DroppedOverCap {
+			t.Fatalf("the cap depended on arrival order: %+v vs %+v", cell, mirror)
+		}
+	}
+	if forward.Finding != backward.Finding {
+		t.Fatalf("the finding depended on arrival order: %q vs %q", forward.Finding, backward.Finding)
 	}
 }

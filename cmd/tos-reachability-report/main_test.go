@@ -27,6 +27,15 @@ func TestExamplePolicyIsValid(t *testing.T) {
 	}
 }
 
+func pairFor(t *testing.T, session string) string {
+	t.Helper()
+	pair, err := reachability.PairID(session)
+	if err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+	return pair
+}
+
 func writeFile(t *testing.T, name, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
@@ -80,7 +89,7 @@ func TestBuildReportsInsufficientEvidence(t *testing.T) {
 			UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
 			EndpointClass: reachability.ClassDesktop, Assistance: reachability.AssistanceNone,
 		},
-		PairID: "pair_" + strings.Repeat("1", 32), SiteID: "site_1111111111111111",
+		PairID: pairFor(t, observation.SessionID), SiteID: "site_1111111111111111",
 		OperatorID: "op_1111111111111111",
 		SessionID:  observation.SessionID, Role: reachability.RoleA, Observation: observation,
 		Probe:   reachability.ProbeUDP,
@@ -109,6 +118,10 @@ func TestBuildReportsInsufficientEvidence(t *testing.T) {
 	}
 	if report.UnverifiedTrials != 0 {
 		t.Fatalf("a correctly signed trial was rejected: %+v", report)
+	}
+	// It verified, and it still is not a measurement: the peer never reported.
+	if report.IncompletePairs != 1 {
+		t.Fatalf("an unpaired half was not reported as incomplete: %+v", report)
 	}
 
 	// The same trial attested by a coordinator the policy never predeclared is

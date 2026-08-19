@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
@@ -70,6 +71,13 @@ type Config struct {
 	// already knows about.
 	MinFinalizedCheckpoint uint64 `json:"min_finalized_checkpoint,omitempty"`
 
+	// AgentID, EndpointID and DeviceID are who this installation speaks for.
+	// Outbound events must say they came from here, so an installation that
+	// does not know its own identity cannot send at all.
+	AgentID    string `json:"agent_id"`
+	EndpointID string `json:"endpoint_id"`
+	DeviceID   string `json:"device_id"`
+
 	// Transport must be stated. There is no default, because a daemon that
 	// quietly carried nothing would look like a working one.
 	Transport TransportMode `json:"transport"`
@@ -86,6 +94,11 @@ func (c Config) Network() *nativev1.NetworkDomain {
 		GenesisRootHash: c.GenesisRootHash,
 		GenesisFileHash: c.GenesisFileHash,
 	}
+}
+
+// Identity returns who this installation speaks for.
+func (c Config) Identity() dispatch.Identity {
+	return dispatch.Identity{AgentID: c.AgentID, EndpointID: c.EndpointID, DeviceID: c.DeviceID}
 }
 
 // Chain returns the configured acceptance rules for finalized state.
@@ -148,6 +161,9 @@ func (c Config) Validate() error {
 		return errors.New("invalid network domain")
 	}
 	if err := c.Chain().Validate(); err != nil {
+		return err
+	}
+	if err := c.Identity().Validate(); err != nil {
 		return err
 	}
 	if _, known := transports[c.Transport]; !known {

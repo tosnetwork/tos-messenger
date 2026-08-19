@@ -97,9 +97,13 @@ type wirePolicy struct {
 // everyone else measured a handful of times, and the point of requiring
 // several operators is that no single one of them decides anything.
 type CellReport struct {
-	Stratum           Stratum              `json:"stratum"`
-	StratumKey        string               `json:"stratum_key"`
-	Samples           int                  `json:"samples"`
+	Stratum    Stratum `json:"stratum"`
+	StratumKey string  `json:"stratum_key"`
+	Samples    int     `json:"samples"`
+	// Operators counts distinct self-declared operator identifiers whose
+	// endpoint keys did not overlap. Nothing in the study proves that two
+	// identifiers are two independent parties; the count is the floor the
+	// evidence supports, not a claim of independence.
 	Operators         int                  `json:"operators"`
 	Sites             int                  `json:"sites"`
 	DroppedOverCap    int                  `json:"dropped_over_cap"`
@@ -132,9 +136,14 @@ type Report struct {
 	// operator. Every trial from such a key is excluded: the operator diversity
 	// requirement means nothing if one host can answer to several names.
 	SharedEndpointKeys []string `json:"shared_endpoint_keys,omitempty"`
-	Missing            []string `json:"missing_required_strata"`
-	Finding            Finding  `json:"finding"`
-	Reasons            []string `json:"reasons"`
+	// IncompletePairs counts measurements where only one endpoint reported, or
+	// the two halves contradicted each other. They are dropped and counted:
+	// half a measurement is not a measurement, and two halves that disagree
+	// are evidence of nothing except the disagreement.
+	IncompletePairs int      `json:"incomplete_pairs"`
+	Missing         []string `json:"missing_required_strata"`
+	Finding         Finding  `json:"finding"`
+	Reasons         []string `json:"reasons"`
 }
 
 // SupportsRouteDecision reports whether this study may be used to freeze a
@@ -151,7 +160,7 @@ func (r Report) SupportsRouteDecision() bool {
 // result the milestone says does not count.
 func (p Policy) Validate() error {
 	if p.MinOperatorsPerCell < 2 {
-		return errors.New("a decision needs at least two independent operators per cell")
+		return errors.New("a decision needs at least two distinct operator identifiers per cell")
 	}
 	if p.MinSamplesPerCell < p.MinOperatorsPerCell {
 		return errors.New("a cell cannot hold more operators than samples")
@@ -376,19 +385,42 @@ func Aggregate(policy Policy, trials []Trial, probe ProbeKind) (Report, error) {
 		}
 	}
 
-	grouped := make(map[string][]Trial)
-	strata := make(map[string]Stratum)
+	// Nothing verifying at all is a different situation from nothing
+	// qualifying: it means the submissions could not be checked, not that the
+	// network answered badly, and it must not read as a completed study.
+	if len(verified) == 0 {
+		return Report{}, errors.New("no trial in the study could be verified")
+	}
+
+	// A measurement has two halves and counts once. Both endpoints report, and
+	// a pair counts only when the two agree about what happened: forging a
+	// result now takes both halves, from two different keys, saying the same
+	// false thing.
+	halves := make(map[string][]Trial)
 	for _, trial := range verified {
 		if _, impersonating := shared[trial.EndpointPublicKeyHex]; impersonating {
 			continue
 		}
-		key := trial.Stratum.Key()
-		grouped[key] = append(grouped[key], trial)
-		strata[key] = trial.Stratum
+		halves[trial.PairID] = append(halves[trial.PairID], trial)
 	}
-	if len(grouped) == 0 {
-		return Report{}, errors.New("no verified trials for the requested probe")
+
+	grouped := make(map[string][]pairResult)
+	strata := make(map[string]Stratum)
+	incomplete := 0
+	for _, both := range halves {
+		result, err := combine(both)
+		if err != nil {
+			incomplete++
+			continue
+		}
+		key := result.stratum.Key()
+		grouped[key] = append(grouped[key], result)
+		strata[key] = result.stratum
 	}
+	// A study with nothing complete in it is not an error. It is a study that
+	// concluded nothing, and saying so is the useful answer: every required
+	// stratum comes back missing rather than the caller getting a failure they
+	// might mistake for a tooling problem.
 
 	cells := make([]CellReport, 0, len(grouped))
 	for key, group := range grouped {
@@ -405,77 +437,104 @@ func Aggregate(policy Policy, trials []Trial, probe ProbeKind) (Report, error) {
 	report := Report{
 		PolicyDigest: digest, Probe: probe, Kind: kindFor(probe), Cells: cells,
 		UnverifiedTrials: unverified, SharedEndpointKeys: sharedKeys,
+		IncompletePairs: incomplete,
 	}
 	report.Finding, report.Missing, report.Reasons = decide(policy, cells, probe)
 	return report, nil
 }
 
-func summarize(policy Policy, stratum Stratum, key string, group []Trial) CellReport {
+func summarize(policy Policy, stratum Stratum, key string, group []pairResult) CellReport {
 	cell := CellReport{
 		Stratum:       stratum,
 		StratumKey:    key,
 		FailureCounts: map[FailureClass]int{},
 	}
 
-	// One operator's trials are capped before anything is counted. Past the
-	// cap they are dropped and reported: a truncation nobody can see reads as
-	// coverage that was never measured.
-	byOperator := map[string][]Trial{}
-	for _, trial := range group {
-		if len(byOperator[trial.OperatorID]) >= policy.MaxTrialsPerOperatorPerCell {
+	// The cap is applied in digest order, not arrival order, so the same set of
+	// measurements always truncates to the same sample -- otherwise an operator
+	// could choose which of their trials survive by choosing when to submit
+	// them. A pair spans up to two operators and counts against both caps.
+	ordered := make([]pairResult, len(group))
+	copy(ordered, group)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].digest < ordered[j].digest })
+
+	counts := map[string]int{}
+	byOperator := map[string][]pairResult{}
+	sites := map[string]struct{}{}
+	kept := make([]pairResult, 0, len(ordered))
+	for _, pair := range ordered {
+		room := true
+		for _, operator := range pair.operators {
+			if counts[operator] >= policy.MaxTrialsPerOperatorPerCell {
+				room = false
+			}
+		}
+		if !room {
 			cell.DroppedOverCap++
 			continue
 		}
-		byOperator[trial.OperatorID] = append(byOperator[trial.OperatorID], trial)
+		for _, operator := range pair.operators {
+			counts[operator]++
+			byOperator[operator] = append(byOperator[operator], pair)
+		}
+		for _, site := range pair.sites {
+			sites[site] = struct{}{}
+		}
+		kept = append(kept, pair)
 	}
 
-	sites := map[string]struct{}{}
 	var establish, reconnect, survival []uint64
-	var directRates, tunnelRates []float64
-	var proxy, relay, https, failed, counted int
-
-	for _, trials := range byOperator {
-		var direct, withProxy int
-		for _, trial := range trials {
-			counted++
-			sites[trial.SiteID] = struct{}{}
-			if trial.Failure != FailureNone {
-				cell.FailureCounts[trial.Failure]++
+	var proxy, relay, https, failed int
+	for _, pair := range kept {
+		for _, failure := range pair.failures {
+			cell.FailureCounts[failure]++
+		}
+		switch pair.outcome {
+		case OutcomeDirect:
+			establish = append(establish, pair.establish)
+			if pair.reconnect != 0 {
+				reconnect = append(reconnect, pair.reconnect)
 			}
-			switch trial.Outcome {
+			if pair.survival != 0 {
+				survival = append(survival, pair.survival)
+			}
+		case OutcomeProxyFallback:
+			proxy++
+		case OutcomeRelayFallback:
+			relay++
+		case OutcomeHTTPSFallback:
+			https++
+		case OutcomeFailed:
+			failed++
+		}
+	}
+
+	// Rates are averaged over operators, not over measurements, so one operator
+	// with a large fleet cannot outvote the rest of the study.
+	var directRates, tunnelRates []float64
+	for _, pairs := range byOperator {
+		var direct, withProxy int
+		for _, pair := range pairs {
+			switch pair.outcome {
 			case OutcomeDirect:
 				direct++
 				withProxy++
-				establish = append(establish, trial.EstablishMillis)
-				if trial.ReconnectMillis != 0 {
-					reconnect = append(reconnect, trial.ReconnectMillis)
-				}
-				if trial.SurvivalSeconds != 0 {
-					survival = append(survival, trial.SurvivalSeconds)
-				}
 			case OutcomeProxyFallback:
-				proxy++
 				withProxy++
-			case OutcomeRelayFallback:
-				relay++
-			case OutcomeHTTPSFallback:
-				https++
-			case OutcomeFailed:
-				failed++
 			}
 		}
-		total := float64(len(trials))
+		total := float64(len(pairs))
 		directRates = append(directRates, float64(direct)/total)
 		tunnelRates = append(tunnelRates, float64(withProxy)/total)
 	}
 
-	cell.Samples = counted
+	cell.Samples = len(kept)
 	cell.Operators = len(byOperator)
 	cell.Sites = len(sites)
 	cell.DirectRate = mean(directRates)
 	cell.DirectOrProxyRate = mean(tunnelRates)
-	if counted > 0 {
-		total := float64(counted)
+	if cell.Samples > 0 {
+		total := float64(cell.Samples)
 		cell.ProxyShare = float64(proxy) / total
 		cell.RelayShare = float64(relay) / total
 		cell.HTTPSShare = float64(https) / total

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
@@ -66,6 +67,10 @@ type Config struct {
 	Sender   Sender
 	Bindings BindingResolver
 	Now      func() time.Time
+	// Identity is who this installation is. Outbound events must say they came
+	// from it, because a runtime that could set the sender fields freely could
+	// send as somebody else from this daemon's own sessions.
+	Identity Identity
 	// AttemptLease bounds how long one sweep may hold a delivery. A lease that
 	// never expires strands an event when the sweep holding it dies.
 	AttemptLease time.Duration
@@ -73,6 +78,27 @@ type Config struct {
 
 // DefaultAttemptLease is how long one sweep holds a delivery by default.
 const DefaultAttemptLease = 2 * time.Minute
+
+// Identity is the Agent, endpoint, and device this installation speaks for.
+type Identity struct {
+	AgentID    string
+	EndpointID string
+	DeviceID   string
+}
+
+// Validate enforces a complete local identity.
+func (i Identity) Validate() error {
+	if !ids.Agent.MatchString(i.AgentID) {
+		return errors.New("invalid local Agent identifier")
+	}
+	if !ids.Endpoint.MatchString(i.EndpointID) {
+		return errors.New("invalid local endpoint identifier")
+	}
+	if !ids.Device.MatchString(i.DeviceID) {
+		return errors.New("invalid local device identifier")
+	}
+	return nil
+}
 
 // Dispatcher sends what the journal says is due.
 type Dispatcher struct {
@@ -104,6 +130,9 @@ var ErrNoTransport = errors.New("no transport is configured")
 func New(config Config) (*Dispatcher, error) {
 	if config.Journal == nil {
 		return nil, errors.New("dispatch requires a durable journal")
+	}
+	if err := config.Identity.Validate(); err != nil {
+		return nil, err
 	}
 	present := 0
 	for _, dependency := range []bool{config.Suite != nil, config.Sender != nil, config.Bindings != nil} {
@@ -142,6 +171,20 @@ func (d *Dispatcher) Queue(event envelope.Event, sessionID, recipientEndpointID 
 	}
 	if err := envelope.ValidateEvent(event); err != nil {
 		return false, eventlog.Delivery{}, err
+	}
+	// A local-only kind carries authority granted here. The receiving side
+	// refuses it on every route, and refusing to send it is what makes the
+	// invariant hold at both ends rather than only at the far one.
+	if envelope.LocalOnly(event.Kind) {
+		return false, eventlog.Delivery{}, errors.New("this event kind exists only on the owner's own interface")
+	}
+	// The sender fields say who this came from, and a runtime does not get to
+	// choose that: the session it would be sealed under belongs to this
+	// installation.
+	if event.SenderAgentID != d.config.Identity.AgentID ||
+		event.SenderEndpointID != d.config.Identity.EndpointID ||
+		event.SenderDeviceID != d.config.Identity.DeviceID {
+		return false, eventlog.Delivery{}, errors.New("event does not come from this installation")
 	}
 	payload, err := envelope.EncodeEventJSON(event)
 	if err != nil {

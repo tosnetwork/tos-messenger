@@ -103,6 +103,7 @@ func newHarness(t *testing.T) *harness {
 	dispatcher, err := dispatch.New(dispatch.Config{
 		Journal: journal, Suite: stubSuite{}, Sender: instance.sender,
 		Bindings: stubBindings{}, Now: func() time.Time { return instance.clock },
+		Identity: dispatch.Identity{AgentID: senderID, EndpointID: senderMEP, DeviceID: senderDev},
 	})
 	if err != nil {
 		t.Fatalf("dispatcher: %v", err)
@@ -499,6 +500,7 @@ func TestServerRequiresEveryDependency(t *testing.T) {
 	h := newHarness(t)
 	dispatcher, err := dispatch.New(dispatch.Config{
 		Journal: h.journal, Suite: stubSuite{}, Sender: h.sender, Bindings: stubBindings{},
+		Identity: dispatch.Identity{AgentID: senderID, EndpointID: senderMEP, DeviceID: senderDev},
 	})
 	if err != nil {
 		t.Fatalf("dispatcher: %v", err)

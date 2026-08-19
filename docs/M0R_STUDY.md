@@ -18,7 +18,7 @@ after seeing the data produce a different digest, which is visible in the
 report.
 
 **A weak study yields no finding.** If any required stratum was never measured,
-or was measured with too few samples, too few independent operators, or from
+or was measured with too few samples, too few distinct operator identifiers, or from
 too few independent networks, the report's finding is `insufficient-evidence`
 and the tool exits non-zero. It never degrades into a weak preference, because
 a weak preference is what the implementation would then be built on.
@@ -35,17 +35,41 @@ something, since anyone can run a coordinator.
 A trial altered after signing, or attested by a coordinator the policy never
 named, is not weak evidence. It is dropped and counted in `unverified_trials`.
 
+**A measurement is what two endpoints agree happened.** Both ends of an attempt
+report, each signing with its own key, and the two halves are joined by a pair
+identifier derived from the session rather than declared. A pair counts as one
+sample only when the halves agree on the cell, the probe, the outcome, and
+which commit each side was running, and only when they come from two different
+keys in the two different roles. Latency takes the slower half and session
+survival the shorter one, because a session exists only while both ends have
+it. A half whose peer never reported, and a pair whose halves contradict each
+other, are dropped and counted in `incomplete_pairs`. Improving a result
+therefore takes both keys, and the keys are what the operator minimum counts.
+
+The stratum is a property of the attempt, not of one endpoint, so both halves
+must declare the same cell. A pair of endpoints in different hardware classes
+has to agree on how the cell is declared before measuring; the vocabulary
+cannot express an asymmetric one, and a disagreement is discarded rather than
+resolved.
+
 **One host cannot answer to several names.** Endpoint keys are stable per host,
 and a key seen under more than one operator identifier has every one of its
 trials excluded and the key reported. The operator minimum means nothing if one
 machine can satisfy it alone.
 
 **No operator decides a cell alone.** Rates are means over operators, not over
-trials, so running more attempts buys no influence. Each operator's
-contribution to a cell is also capped, and anything past the cap is dropped and
-reported rather than silently truncated. Sites are counted separately from
-operators, because one operator with twenty hosts behind one uplink has
-measured one network.
+measurements, so running more attempts buys no influence. Each operator's
+contribution to a cell is also capped, and the cap is applied in digest order
+rather than arrival order, so an operator cannot choose which of their
+measurements survive by choosing when to submit them. Anything past the cap is
+dropped and reported rather than silently truncated. Sites are counted
+separately from operators, because one operator with twenty hosts behind one
+uplink has measured one network.
+
+The operator identifier is self-declared. It makes repeated submissions from
+one operator recognisable as one operator; it is not proof that two identifiers
+are two parties, and the report says "distinct operator identifiers" rather
+than claiming independence it cannot establish.
 
 **A policy that a laboratory pair could satisfy is refused.** `Policy.Validate`
 requires the predeclared strata to cover a network behind NAT, consumer ISP,
@@ -101,7 +125,8 @@ tos-reachability -coordinators host-1:7691,host-2:7691 -session "$SESSION" \
 ```
 
 Operator and site names are hashed into opaque identifiers. The report counts
-how many independent operators and networks contributed to a cell; it never
+how many distinct self-declared operator identifiers and networks contributed
+to a cell; it never
 needs to know which. Both endpoints of one attempt derive the same pair
 identifier from the session they share, so the two halves are recognisable as
 one measurement rather than two independent successes.

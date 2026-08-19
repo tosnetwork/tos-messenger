@@ -124,6 +124,7 @@ func newHarness(t *testing.T) *harness {
 		Sender:   instance.sender,
 		Bindings: bindings{},
 		Now:      func() time.Time { return instance.clock },
+		Identity: testIdentity(),
 	})
 	if err != nil {
 		t.Fatalf("dispatcher: %v", err)
@@ -407,7 +408,7 @@ func TestDispatcherRequiresEveryDependency(t *testing.T) {
 	defer journal.Close()
 	seals := 0
 	complete := Config{Journal: journal, Suite: countingSuite{seals: &seals},
-		Sender: &fakeSender{}, Bindings: bindings{}}
+		Sender: &fakeSender{}, Bindings: bindings{}, Identity: testIdentity()}
 	for name, mutate := range map[string]func(*Config){
 		"no journal":           func(c *Config) { c.Journal = nil },
 		"suite without sender": func(c *Config) { c.Sender = nil },
@@ -455,7 +456,8 @@ func TestQueueWithoutATransport(t *testing.T) {
 	}
 	defer journal.Close()
 	clock := time.Unix(int64(baseUnix), 0)
-	dispatcher, err := New(Config{Journal: journal, Now: func() time.Time { return clock }})
+	dispatcher, err := New(Config{Journal: journal, Identity: testIdentity(),
+		Now: func() time.Time { return clock }})
 	if err != nil {
 		t.Fatalf("dispatcher: %v", err)
 	}
@@ -489,5 +491,52 @@ func TestQueueWithoutATransport(t *testing.T) {
 	}
 	if ciphertext, err := delivery.Ciphertext(); err != nil || ciphertext != nil {
 		t.Fatalf("an event was sealed with nothing to carry it: %v", err)
+	}
+}
+
+func testIdentity() Identity {
+	return Identity{AgentID: senderID, EndpointID: senderMEP, DeviceID: senderDev}
+}
+
+// A local-only kind carries authority granted here. Refusing to send it is
+// what makes the invariant hold at both ends rather than only at the far one.
+func TestLocalOnlyKindsCannotBeQueued(t *testing.T) {
+	h := newHarness(t)
+	for _, kind := range []string{"owner.approval.grant", "owner.approval.deny"} {
+		t.Run(kind, func(t *testing.T) {
+			event := h.event(t, "approved")
+			event.Kind = kind
+			event.PayloadSchema = ""
+			completed, err := envelope.NewEvent(event)
+			if err != nil {
+				t.Fatalf("new event: %v", err)
+			}
+			if _, _, err := h.dispatcher.Queue(completed, sessionID, peerMEP, baseUnix+3600); err == nil {
+				t.Fatalf("%q was queued for the network", kind)
+			}
+		})
+	}
+}
+
+// A runtime does not get to choose who a message came from: the session it
+// would be sealed under belongs to this installation.
+func TestOutboundSenderMustBeThisInstallation(t *testing.T) {
+	h := newHarness(t)
+	for name, mutate := range map[string]func(*envelope.Event){
+		"another Agent":    func(e *envelope.Event) { e.SenderAgentID = "agent_" + strings.Repeat("9", 64) },
+		"another endpoint": func(e *envelope.Event) { e.SenderEndpointID = "mep_" + strings.Repeat("9", 64) },
+		"another device":   func(e *envelope.Event) { e.SenderDeviceID = "dev_" + strings.Repeat("9", 64) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			event := h.event(t, "impersonation")
+			mutate(&event)
+			completed, err := envelope.NewEvent(event)
+			if err != nil {
+				t.Fatalf("new event: %v", err)
+			}
+			if _, _, err := h.dispatcher.Queue(completed, sessionID, peerMEP, baseUnix+3600); err == nil {
+				t.Fatalf("an event from %q was queued", name)
+			}
+		})
 	}
 }

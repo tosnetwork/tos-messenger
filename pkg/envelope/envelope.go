@@ -3,8 +3,15 @@
 // The outer Relay Envelope is what a Mailbox Relay sees: an opaque mailbox
 // identifier, bounded ciphertext, and the resource fields needed to store and
 // expire it. It carries no sender identity, no conversation identity, and no
-// commercial state, because a Relay must be able to do its job without being
-// able to read or correlate the conversation.
+// commercial state.
+//
+// That is a narrower claim than it sounds. A Relay cannot read a message or
+// resolve the canonical Agent and Conversation it belongs to, and it can still
+// observe and correlate what is left: a stable mailbox identifier, message
+// identifiers, storage tokens, ciphertext sizes, expiry, timing, addresses,
+// and how often each appears. Reducing that residue is mailbox rotation,
+// padding, and batching, none of which exists yet, and the honest description
+// is that the content is closed and the metadata is not.
 //
 // The inner Messaging Event is what the recipient obtains after decryption.
 // Nothing in this package performs encryption: the cryptographic suite is an

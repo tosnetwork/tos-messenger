@@ -34,6 +34,9 @@ func testConfig(t *testing.T) Config {
 		GenesisRootHash:    strings.Repeat("a", 64),
 		GenesisFileHash:    strings.Repeat("b", 64),
 		RegistryCodeHashes: []string{registryCode},
+		AgentID:            "agent_" + strings.Repeat("2", 64),
+		EndpointID:         "mep_" + strings.Repeat("3", 64),
+		DeviceID:           "dev_" + strings.Repeat("4", 64),
 		Transport:          TransportNone,
 	}
 }
@@ -299,6 +302,9 @@ func TestUnknownConfigurationKeysAreRefused(t *testing.T) {
 		"genesis_root_hash": "` + strings.Repeat("a", 64) + `",
 		"genesis_file_hash": "` + strings.Repeat("b", 64) + `",
 		"registry_code_hashes": ["` + registryCode + `"],
+		"agent_id": "agent_` + strings.Repeat("2", 64) + `",
+		"endpoint_id": "mep_` + strings.Repeat("3", 64) + `",
+		"device_id": "dev_` + strings.Repeat("4", 64) + `",
 		"transport": "none"
 	}`
 	if _, err := DecodeConfig([]byte(valid)); err != nil {
