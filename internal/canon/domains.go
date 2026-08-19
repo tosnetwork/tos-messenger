@@ -52,6 +52,9 @@ const (
 	DomainPrekeyBundle = "tos.messaging.prekey-bundle.v1\x00"
 	// DomainPrekeyBundleSet namespaces a published device set.
 	DomainPrekeyBundleSet = "tos.messaging.prekey-bundle-set.v1\x00"
+	// DomainDeviceSession namespaces the session identifier a device pair
+	// derives without negotiating.
+	DomainDeviceSession = "tos.messaging.device-session.v1\x00"
 	// DomainE2EEBinding namespaces the associated data of a ciphertext.
 	DomainE2EEBinding = "tos.messaging.e2ee-binding.v1\x00"
 	// DomainReachabilityTrial namespaces one measured trial record.
@@ -88,6 +91,7 @@ var Domains = []string{
 	DomainEventID,
 	DomainPrekeyBundle,
 	DomainPrekeyBundleSet,
+	DomainDeviceSession,
 	DomainE2EEBinding,
 	DomainReachabilityTrial,
 	DomainReachabilityPolicy,

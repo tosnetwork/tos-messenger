@@ -50,6 +50,12 @@ const (
 	CodeDelegationExpired Code = "delegation-expired"
 	// CodeAgentTombstoned reports a revoked Agent.
 	CodeAgentTombstoned Code = "agent-tombstoned"
+	// CodeDeviceRevoked reports a sending device removed from its endpoint's
+	// published set. It is peer-visible and permanent: a well-behaved sender
+	// whose device was legitimately retired needs to learn it is retired, and
+	// a device that comes back does so under a fresh key, which is a fresh
+	// identifier, not a retried one.
+	CodeDeviceRevoked Code = "device-revoked"
 	// CodeSignatureInvalid reports a signature that is not from the key the
 	// delegation authorizes.
 	CodeSignatureInvalid Code = "signature-invalid"
@@ -158,6 +164,7 @@ var registry = map[Code]spec{
 	CodeDelegationUncommitted: {Refresh, true, false},
 	CodeDelegationExpired:     {Refresh, true, false},
 	CodeAgentTombstoned:       {Permanent, true, false},
+	CodeDeviceRevoked:         {Permanent, true, false},
 	CodeSignatureInvalid:      {Permanent, true, false},
 	CodeSenderMismatch:        {Permanent, true, false},
 
