@@ -64,6 +64,7 @@ func TestBuildReportsInsufficientEvidence(t *testing.T) {
 			UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
 			EndpointClass: reachability.ClassDesktop, Assistance: reachability.AssistanceNone,
 		},
+		PairID: "pair_" + strings.Repeat("1", 32), SiteID: "site_1111111111111111",
 		OperatorID: "op_1111111111111111", Probe: reachability.ProbeUDP,
 		Outcome: reachability.OutcomeDirect, Failure: reachability.FailureNone,
 		EstablishMillis: 12, StartedAtUnix: 1_800_000_000,
@@ -78,8 +79,11 @@ func TestBuildReportsInsufficientEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if report.Decision != reachability.DecisionInsufficient {
-		t.Fatalf("a single trial must not decide a route strategy, got %q", report.Decision)
+	if report.Finding != reachability.FindingInsufficient {
+		t.Fatalf("a single trial must not decide anything, got %q", report.Finding)
+	}
+	if report.SupportsRouteDecision() {
+		t.Fatal("a single UDP trial was accepted as a route decision")
 	}
 	if report.PolicyDigest == "" {
 		t.Fatal("the report must name the policy it was judged against")

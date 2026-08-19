@@ -10,24 +10,55 @@ import (
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 )
 
-// Decision is the route strategy the study selects.
-type Decision string
+// Finding is what a study concluded. The vocabulary depends on which probe
+// produced the evidence, and the two vocabularies do not overlap.
+//
+// A UDP probe measures whether a datagram path can be established. That is the
+// network factor, and it is protocol independent, but it is not a route
+// decision: a datagram getting through says nothing about whether an ADNL
+// handshake completes, whether a channel stays up, whether keepalives survive
+// a NAT, or whether a session recovers after a network change. A study that
+// answered "direct-first" from UDP evidence would be inviting exactly the
+// mistake of freezing an ADNL design on a measurement of something else.
+type Finding string
+
+// Kind separates the two questions a study can answer.
+type Kind string
 
 const (
-	// DecisionInsufficient means the study did not meet its own predeclared
+	// KindFeasibility is what a UDP study produces.
+	KindFeasibility Kind = "network-feasibility"
+	// KindRouteDecision is what an ADNL study produces.
+	KindRouteDecision Kind = "route-decision"
+)
+
+const (
+	// FindingInsufficient means the study did not meet its own predeclared
 	// minimums. It is not a weak preference for any route; it is the absence
-	// of a result.
-	DecisionInsufficient Decision = "insufficient-evidence"
-	// DecisionDirectFirst means direct sessions carry the normal path.
-	DecisionDirectFirst Decision = "direct-first"
-	// DecisionTunnelFirst means a proxy or tunnel service is primary delivery
+	// of a result, and it is the only finding both vocabularies share.
+	FindingInsufficient Finding = "insufficient-evidence"
+
+	// FindingUDPDirectViable reports that a direct datagram path is reachable
+	// across the required strata. It is an input to a route decision, never a
+	// route decision.
+	FindingUDPDirectViable Finding = "udp-direct-viable"
+	// FindingUDPDirectNotViable reports that it is not.
+	FindingUDPDirectNotViable Finding = "udp-direct-not-viable"
+
+	// FindingDirectFirst means direct sessions carry the normal path.
+	FindingDirectFirst Finding = "direct-first"
+	// FindingTunnelFirst means a proxy or tunnel service is primary delivery
 	// infrastructure.
-	DecisionTunnelFirst Decision = "tunnel-first"
-	// DecisionRelayFirst means the Mailbox Relay is the primary delivery path
-	// rather than a fallback.
-	DecisionRelayFirst Decision = "relay-first"
-	// DecisionHybrid means the route order differs by network class.
-	DecisionHybrid Decision = "hybrid-by-network-class"
+	FindingTunnelFirst Finding = "tunnel-first"
+	// FindingHybrid means the route order differs by network class.
+	FindingHybrid Finding = "hybrid-by-network-class"
+	// FindingRelayRequired means neither a direct path nor a tunnel reaches the
+	// predeclared rate, so a Mailbox Relay is necessary.
+	//
+	// Necessary is all it means. That a Relay is required says nothing about
+	// whether one works: its latency, retention, redundancy, and failover are
+	// the technical Relay milestone's own acceptance, not this study's.
+	FindingRelayRequired Finding = "relay-required"
 )
 
 // Policy is the predeclared acceptance policy. It is content-addressed and
@@ -35,11 +66,19 @@ const (
 // after seeing the data cannot be passed off as the ones the study committed
 // to.
 type Policy struct {
-	MinSamplesPerCell   int       `json:"min_samples_per_cell"`
-	MinOperatorsPerCell int       `json:"min_operators_per_cell"`
-	DirectViableRate    float64   `json:"direct_viable_rate"`
-	TunnelViableRate    float64   `json:"tunnel_viable_rate"`
-	RequiredStrata      []Stratum `json:"required_strata"`
+	MinSamplesPerCell   int `json:"min_samples_per_cell"`
+	MinOperatorsPerCell int `json:"min_operators_per_cell"`
+	// MinSitesPerCell bounds how concentrated the evidence may be. One
+	// operator running twenty hosts behind one uplink has measured one
+	// network, and counting operators alone would not notice.
+	MinSitesPerCell int `json:"min_sites_per_cell"`
+	// MaxTrialsPerOperatorPerCell caps how much of a cell one operator may
+	// contribute. Trials past the cap are dropped and reported, never counted
+	// silently.
+	MaxTrialsPerOperatorPerCell int       `json:"max_trials_per_operator_per_cell"`
+	DirectViableRate            float64   `json:"direct_viable_rate"`
+	TunnelViableRate            float64   `json:"tunnel_viable_rate"`
+	RequiredStrata              []Stratum `json:"required_strata"`
 }
 
 type wirePolicy struct {
@@ -48,11 +87,18 @@ type wirePolicy struct {
 }
 
 // CellReport is the aggregate for one stratum.
+//
+// The rates are means over operators rather than over trials. Pooling trials
+// would let one operator who ran thousands of attempts decide a cell that
+// everyone else measured a handful of times, and the point of requiring
+// several operators is that no single one of them decides anything.
 type CellReport struct {
 	Stratum           Stratum              `json:"stratum"`
 	StratumKey        string               `json:"stratum_key"`
 	Samples           int                  `json:"samples"`
 	Operators         int                  `json:"operators"`
+	Sites             int                  `json:"sites"`
+	DroppedOverCap    int                  `json:"dropped_over_cap"`
 	DirectRate        float64              `json:"direct_rate"`
 	DirectOrProxyRate float64              `json:"direct_or_proxy_rate"`
 	ProxyShare        float64              `json:"proxy_share"`
@@ -71,10 +117,18 @@ type CellReport struct {
 // Report is the published study result.
 type Report struct {
 	PolicyDigest string       `json:"policy_digest"`
+	Probe        ProbeKind    `json:"probe"`
+	Kind         Kind         `json:"kind"`
 	Cells        []CellReport `json:"cells"`
 	Missing      []string     `json:"missing_required_strata"`
-	Decision     Decision     `json:"decision"`
+	Finding      Finding      `json:"finding"`
 	Reasons      []string     `json:"reasons"`
+}
+
+// SupportsRouteDecision reports whether this study may be used to freeze a
+// transport design.
+func (r Report) SupportsRouteDecision() bool {
+	return r.Kind == KindRouteDecision && r.Finding != FindingInsufficient
 }
 
 // Validate enforces that a policy is strong enough to decide anything.
@@ -89,6 +143,15 @@ func (p Policy) Validate() error {
 	}
 	if p.MinSamplesPerCell < p.MinOperatorsPerCell {
 		return errors.New("a cell cannot hold more operators than samples")
+	}
+	if p.MinSitesPerCell < 2 {
+		return errors.New("a decision needs at least two independent sites per cell")
+	}
+	if p.MinSitesPerCell > p.MinOperatorsPerCell*8 {
+		return errors.New("a site requirement no operator set could satisfy is not a policy")
+	}
+	if p.MaxTrialsPerOperatorPerCell < 1 {
+		return errors.New("a policy must cap how much of a cell one operator contributes")
 	}
 	if p.DirectViableRate <= 0 || p.DirectViableRate > 1 ||
 		p.TunnelViableRate <= 0 || p.TunnelViableRate > 1 {
@@ -172,6 +235,8 @@ func (p Policy) CanonicalBytes() ([]byte, error) {
 	canon.Text(buffer, PolicySchema)
 	canon.Uint64(buffer, uint64(p.MinSamplesPerCell))
 	canon.Uint64(buffer, uint64(p.MinOperatorsPerCell))
+	canon.Uint64(buffer, uint64(p.MinSitesPerCell))
+	canon.Uint64(buffer, uint64(p.MaxTrialsPerOperatorPerCell))
 	canon.Uint64(buffer, ratePoints(p.DirectViableRate))
 	canon.Uint64(buffer, ratePoints(p.TunnelViableRate))
 	canon.Uint32(buffer, uint32(len(keys)))
@@ -269,8 +334,8 @@ func Aggregate(policy Policy, trials []Trial, probe ProbeKind) (Report, error) {
 	}
 	sort.Slice(cells, func(i, j int) bool { return cells[i].StratumKey < cells[j].StratumKey })
 
-	report := Report{PolicyDigest: digest, Cells: cells}
-	report.Decision, report.Missing, report.Reasons = decide(policy, cells)
+	report := Report{PolicyDigest: digest, Probe: probe, Kind: kindFor(probe), Cells: cells}
+	report.Finding, report.Missing, report.Reasons = decide(policy, cells, probe)
 	return report, nil
 }
 
@@ -278,60 +343,112 @@ func summarize(policy Policy, stratum Stratum, key string, group []Trial) CellRe
 	cell := CellReport{
 		Stratum:       stratum,
 		StratumKey:    key,
-		Samples:       len(group),
 		FailureCounts: map[FailureClass]int{},
 	}
-	operators := make(map[string]struct{}, len(group))
-	var establish, reconnect, survival []uint64
-	var direct, proxy, relay, https, failed int
+
+	// One operator's trials are capped before anything is counted. Past the
+	// cap they are dropped and reported: a truncation nobody can see reads as
+	// coverage that was never measured.
+	byOperator := map[string][]Trial{}
 	for _, trial := range group {
-		operators[trial.OperatorID] = struct{}{}
-		if trial.Failure != FailureNone {
-			cell.FailureCounts[trial.Failure]++
+		if len(byOperator[trial.OperatorID]) >= policy.MaxTrialsPerOperatorPerCell {
+			cell.DroppedOverCap++
+			continue
 		}
-		switch trial.Outcome {
-		case OutcomeDirect:
-			direct++
-			establish = append(establish, trial.EstablishMillis)
-			if trial.ReconnectMillis != 0 {
-				reconnect = append(reconnect, trial.ReconnectMillis)
-			}
-			if trial.SurvivalSeconds != 0 {
-				survival = append(survival, trial.SurvivalSeconds)
-			}
-		case OutcomeProxyFallback:
-			proxy++
-		case OutcomeRelayFallback:
-			relay++
-		case OutcomeHTTPSFallback:
-			https++
-		case OutcomeFailed:
-			failed++
-		}
+		byOperator[trial.OperatorID] = append(byOperator[trial.OperatorID], trial)
 	}
-	total := float64(len(group))
-	cell.Operators = len(operators)
-	cell.DirectRate = float64(direct) / total
-	cell.DirectOrProxyRate = float64(direct+proxy) / total
-	cell.ProxyShare = float64(proxy) / total
-	cell.RelayShare = float64(relay) / total
-	cell.HTTPSShare = float64(https) / total
-	cell.FailureShare = float64(failed) / total
+
+	sites := map[string]struct{}{}
+	var establish, reconnect, survival []uint64
+	var directRates, tunnelRates []float64
+	var proxy, relay, https, failed, counted int
+
+	for _, trials := range byOperator {
+		var direct, withProxy int
+		for _, trial := range trials {
+			counted++
+			sites[trial.SiteID] = struct{}{}
+			if trial.Failure != FailureNone {
+				cell.FailureCounts[trial.Failure]++
+			}
+			switch trial.Outcome {
+			case OutcomeDirect:
+				direct++
+				withProxy++
+				establish = append(establish, trial.EstablishMillis)
+				if trial.ReconnectMillis != 0 {
+					reconnect = append(reconnect, trial.ReconnectMillis)
+				}
+				if trial.SurvivalSeconds != 0 {
+					survival = append(survival, trial.SurvivalSeconds)
+				}
+			case OutcomeProxyFallback:
+				proxy++
+				withProxy++
+			case OutcomeRelayFallback:
+				relay++
+			case OutcomeHTTPSFallback:
+				https++
+			case OutcomeFailed:
+				failed++
+			}
+		}
+		total := float64(len(trials))
+		directRates = append(directRates, float64(direct)/total)
+		tunnelRates = append(tunnelRates, float64(withProxy)/total)
+	}
+
+	cell.Samples = counted
+	cell.Operators = len(byOperator)
+	cell.Sites = len(sites)
+	cell.DirectRate = mean(directRates)
+	cell.DirectOrProxyRate = mean(tunnelRates)
+	if counted > 0 {
+		total := float64(counted)
+		cell.ProxyShare = float64(proxy) / total
+		cell.RelayShare = float64(relay) / total
+		cell.HTTPSShare = float64(https) / total
+		cell.FailureShare = float64(failed) / total
+	}
 	cell.EstablishP50 = percentile(establish, 50)
 	cell.EstablishP95 = percentile(establish, 95)
 	cell.ReconnectP50 = percentile(reconnect, 50)
 	cell.ReconnectP95 = percentile(reconnect, 95)
 	cell.SurvivalP50 = percentile(survival, 50)
-	cell.Qualifying = cell.Samples >= policy.MinSamplesPerCell && cell.Operators >= policy.MinOperatorsPerCell
+	cell.Qualifying = cell.Samples >= policy.MinSamplesPerCell &&
+		cell.Operators >= policy.MinOperatorsPerCell &&
+		cell.Sites >= policy.MinSitesPerCell
 	return cell
+}
+
+// mean gives every operator the same weight, whatever their sample count.
+func mean(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	var total float64
+	for _, value := range values {
+		total += value
+	}
+	return total / float64(len(values))
+}
+
+func kindFor(probe ProbeKind) Kind {
+	if probe == ProbeADNL {
+		return KindRouteDecision
+	}
+	return KindFeasibility
 }
 
 // decide applies the predeclared thresholds.
 //
 // Any required stratum that is missing or under-sampled ends the evaluation
-// with no route decision. Partial evidence does not become a weak preference,
+// with no finding at all. Partial evidence does not become a weak preference,
 // because a weak preference is what the implementation would then be built on.
-func decide(policy Policy, cells []CellReport) (Decision, []string, []string) {
+//
+// The vocabulary depends on the probe. A UDP study reports whether a direct
+// datagram path is feasible; only an ADNL study reports a route.
+func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []string, []string) {
 	byKey := make(map[string]CellReport, len(cells))
 	for _, cell := range cells {
 		byKey[cell.StratumKey] = cell
@@ -362,21 +479,31 @@ func decide(policy Policy, cells []CellReport) (Decision, []string, []string) {
 	}
 	sort.Strings(missing)
 	if len(missing) > 0 || evaluated == 0 {
-		return DecisionInsufficient, missing, reasons
+		return FindingInsufficient, missing, reasons
 	}
+
+	if probe != ProbeADNL {
+		if directViable == evaluated {
+			reasons = append(reasons, "a direct datagram path reached the required rate in every required stratum; this is an input to a route decision, not one")
+			return FindingUDPDirectViable, nil, reasons
+		}
+		reasons = append(reasons, "a direct datagram path did not reach the required rate in every required stratum")
+		return FindingUDPDirectNotViable, nil, reasons
+	}
+
 	switch {
 	case directViable == evaluated:
 		reasons = append(reasons, "every required stratum reached the direct viability rate")
-		return DecisionDirectFirst, nil, reasons
+		return FindingDirectFirst, nil, reasons
 	case directViable > 0:
 		reasons = append(reasons, "direct establishment is viable in some required strata and not others")
-		return DecisionHybrid, nil, reasons
+		return FindingHybrid, nil, reasons
 	case tunnelViable == evaluated:
 		reasons = append(reasons, "no required stratum reached the direct rate, and a proxy or tunnel lifts every one of them")
-		return DecisionTunnelFirst, nil, reasons
+		return FindingTunnelFirst, nil, reasons
 	default:
-		reasons = append(reasons, "neither direct establishment nor a proxy reaches the predeclared rate, so the Mailbox Relay is the primary delivery path")
-		return DecisionRelayFirst, nil, reasons
+		reasons = append(reasons, "neither direct establishment nor a proxy reaches the predeclared rate, so a Mailbox Relay is necessary; whether one performs adequately is the Relay milestone's own acceptance")
+		return FindingRelayRequired, nil, reasons
 	}
 }
 

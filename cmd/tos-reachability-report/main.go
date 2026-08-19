@@ -3,8 +3,12 @@
 //
 // It exits non-zero when the study does not meet its own predeclared minimums.
 // That is the point of the tool: a study that has not covered its required
-// strata produces no route decision, and a build pipeline should be able to
-// tell the difference without reading prose.
+// strata produces no finding, and a build pipeline should be able to tell the
+// difference without reading prose.
+//
+// A UDP study never produces a route decision, whatever its success rate. It
+// measures whether a datagram path exists, which an ADNL handshake, channel,
+// keepalive, and recovery still have to survive.
 package main
 
 import (
@@ -33,9 +37,15 @@ func main() {
 		os.Exit(2)
 	}
 	fmt.Println(string(encoded))
-	if report.Decision == reachability.DecisionInsufficient {
-		fmt.Fprintln(os.Stderr, "tos-reachability-report: the study does not support a route decision")
+	if report.Finding == reachability.FindingInsufficient {
+		fmt.Fprintln(os.Stderr, "tos-reachability-report: the study does not meet its own predeclared minimums")
 		os.Exit(1)
+	}
+	if !report.SupportsRouteDecision() {
+		// Said plainly, because the finding alone reads like an answer.
+		fmt.Fprintf(os.Stderr,
+			"tos-reachability-report: %s evidence yields %q, which is network feasibility and not a route decision; freezing a transport needs an %s study\n",
+			report.Probe, report.Finding, reachability.ProbeADNL)
 	}
 }
 

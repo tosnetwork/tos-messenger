@@ -13,6 +13,24 @@ const (
 	opC     = "op_3333333333333333"
 )
 
+// Each operator measures from its own site, which is what the site minimum is
+// there to require.
+func siteFor(operator string) string {
+	return "site_" + operator[len("op_"):]
+}
+
+var pairCounter int
+
+func nextPair() string {
+	pairCounter++
+	return "pair_" + strings.Repeat("0", 28) + string([]byte{
+		"0123456789abcdef"[(pairCounter>>12)&0xf],
+		"0123456789abcdef"[(pairCounter>>8)&0xf],
+		"0123456789abcdef"[(pairCounter>>4)&0xf],
+		"0123456789abcdef"[pairCounter&0xf],
+	})
+}
+
 func stratum(carrier Carrier, class EndpointClass) Stratum {
 	return Stratum{
 		Family:        FamilyIPv4,
@@ -42,6 +60,8 @@ func publicStratum() Stratum {
 func directTrial(s Stratum, operator string, millis uint64) Trial {
 	return Trial{
 		Stratum:         s,
+		PairID:          nextPair(),
+		SiteID:          siteFor(operator),
 		OperatorID:      operator,
 		Probe:           ProbeUDP,
 		Outcome:         OutcomeDirect,
@@ -56,6 +76,8 @@ func directTrial(s Stratum, operator string, millis uint64) Trial {
 func fallbackTrial(s Stratum, operator string, outcome Outcome, failure FailureClass) Trial {
 	return Trial{
 		Stratum:       s,
+		PairID:        nextPair(),
+		SiteID:        siteFor(operator),
 		OperatorID:    operator,
 		Probe:         ProbeUDP,
 		Outcome:       outcome,
@@ -68,10 +90,12 @@ func fallbackTrial(s Stratum, operator string, outcome Outcome, failure FailureC
 
 func testPolicy() Policy {
 	return Policy{
-		MinSamplesPerCell:   4,
-		MinOperatorsPerCell: 2,
-		DirectViableRate:    0.75,
-		TunnelViableRate:    0.9,
+		MinSamplesPerCell:           4,
+		MinOperatorsPerCell:         2,
+		MinSitesPerCell:             2,
+		MaxTrialsPerOperatorPerCell: 8,
+		DirectViableRate:            0.75,
+		TunnelViableRate:            0.9,
 		RequiredStrata: []Stratum{
 			stratum(CarrierConsumerISP, ClassDesktop),
 			stratum(CarrierCarrierGrade, ClassEdgeARM),
@@ -165,9 +189,11 @@ func TestPolicyDigestIsOrderIndependentAndThresholdSensitive(t *testing.T) {
 			p.MinOperatorsPerCell = 3
 			p.MinSamplesPerCell = 5
 		},
-		"direct rate": func(p *Policy) { p.DirectViableRate = 0.74 },
-		"tunnel rate": func(p *Policy) { p.TunnelViableRate = 0.95 },
-		"strata":      func(p *Policy) { p.RequiredStrata = append(p.RequiredStrata, stratum(CarrierMobile, ClassEdgeRISC)) },
+		"sites":        func(p *Policy) { p.MinSitesPerCell = 3 },
+		"operator cap": func(p *Policy) { p.MaxTrialsPerOperatorPerCell = 4 },
+		"direct rate":  func(p *Policy) { p.DirectViableRate = 0.74 },
+		"tunnel rate":  func(p *Policy) { p.TunnelViableRate = 0.95 },
+		"strata":       func(p *Policy) { p.RequiredStrata = append(p.RequiredStrata, stratum(CarrierMobile, ClassEdgeRISC)) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			mutated := testPolicy()
@@ -191,8 +217,8 @@ func TestMissingRequiredStratumYieldsNoDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
-	if report.Decision != DecisionInsufficient {
-		t.Fatalf("expected no decision from partial coverage, got %q", report.Decision)
+	if report.Finding != FindingInsufficient {
+		t.Fatalf("expected no decision from partial coverage, got %q", report.Finding)
 	}
 	if len(report.Missing) != 2 {
 		t.Fatalf("expected two missing strata, got %d", len(report.Missing))
@@ -218,8 +244,8 @@ func TestUnderSampledStratumYieldsNoDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
-	if report.Decision != DecisionInsufficient {
-		t.Fatalf("expected no decision without operator diversity, got %q", report.Decision)
+	if report.Finding != FindingInsufficient {
+		t.Fatalf("expected no decision without operator diversity, got %q", report.Finding)
 	}
 	if len(report.Missing) != 1 || report.Missing[0] != single.Key() {
 		t.Fatalf("expected the single-operator cell to be named, got %v", report.Missing)
@@ -232,13 +258,13 @@ func TestDecisionFollowsMeasurement(t *testing.T) {
 		name     string
 		direct   []int
 		proxy    []int
-		expected Decision
+		expected Finding
 	}{
-		{"direct everywhere", []int{4, 4, 4}, []int{0, 0, 0}, DecisionDirectFirst},
-		{"direct nowhere, tunnel everywhere", []int{0, 0, 0}, []int{4, 4, 4}, DecisionTunnelFirst},
-		{"direct nowhere, tunnel nowhere", []int{0, 0, 0}, []int{0, 0, 0}, DecisionRelayFirst},
-		{"direct in one class only", []int{4, 0, 0}, []int{0, 4, 4}, DecisionHybrid},
-		{"direct just under the bar", []int{2, 2, 2}, []int{2, 2, 2}, DecisionTunnelFirst},
+		{"direct everywhere", []int{4, 4, 4}, []int{0, 0, 0}, FindingDirectFirst},
+		{"direct nowhere, tunnel everywhere", []int{0, 0, 0}, []int{4, 4, 4}, FindingTunnelFirst},
+		{"direct nowhere, tunnel nowhere", []int{0, 0, 0}, []int{0, 0, 0}, FindingRelayRequired},
+		{"direct in one class only", []int{4, 0, 0}, []int{0, 4, 4}, FindingHybrid},
+		{"direct just under the bar", []int{2, 2, 2}, []int{2, 2, 2}, FindingTunnelFirst},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -252,12 +278,18 @@ func TestDecisionFollowsMeasurement(t *testing.T) {
 					trials = fillCell(trials, required, 0, OutcomeRelayFallback, FailurePeerUnreachable, remaining)
 				}
 			}
-			report, err := Aggregate(policy, trials, ProbeUDP)
+			for index := range trials {
+				trials[index].Probe = ProbeADNL
+			}
+			report, err := Aggregate(policy, trials, ProbeADNL)
 			if err != nil {
 				t.Fatalf("aggregate: %v", err)
 			}
-			if report.Decision != testCase.expected {
-				t.Fatalf("expected %q, got %q (reasons %v)", testCase.expected, report.Decision, report.Reasons)
+			if report.Finding != testCase.expected {
+				t.Fatalf("expected %q, got %q (reasons %v)", testCase.expected, report.Finding, report.Reasons)
+			}
+			if !report.SupportsRouteDecision() {
+				t.Fatal("an ADNL study did not support a route decision")
 			}
 			if report.PolicyDigest == "" {
 				t.Fatal("a report must name the policy it was judged against")
@@ -280,8 +312,8 @@ func TestReportKeepsUnrequiredEvidence(t *testing.T) {
 	if len(report.Cells) != 4 {
 		t.Fatalf("expected every measured cell to be published, got %d", len(report.Cells))
 	}
-	if report.Decision != DecisionDirectFirst {
-		t.Fatalf("unexpected decision %q", report.Decision)
+	if report.Finding != FindingUDPDirectViable {
+		t.Fatalf("unexpected finding %q", report.Finding)
 	}
 }
 
@@ -338,8 +370,18 @@ func TestPercentilesUseMeasuredSessionsOnly(t *testing.T) {
 	if cell.EstablishP50 != 20 || cell.EstablishP95 != 400 {
 		t.Fatalf("unexpected latency percentiles: p50=%d p95=%d", cell.EstablishP50, cell.EstablishP95)
 	}
-	if cell.DirectRate != 0.8 || cell.RelayShare != 0.2 {
-		t.Fatalf("unexpected shares: direct=%v relay=%v", cell.DirectRate, cell.RelayShare)
+	// The rate is the mean over operators, not over trials. Two operators
+	// succeeded twice each and one failed once, so the cell reads two thirds
+	// rather than the four fifths a pooled count would give. That difference
+	// is the point: an operator does not gain influence by running more.
+	if cell.DirectRate < 0.66 || cell.DirectRate > 0.67 {
+		t.Fatalf("unexpected operator-weighted direct rate: %v", cell.DirectRate)
+	}
+	if cell.RelayShare != 0.2 {
+		t.Fatalf("unexpected relay share: %v", cell.RelayShare)
+	}
+	if cell.Sites != 3 {
+		t.Fatalf("unexpected site count: %d", cell.Sites)
 	}
 	if cell.FailureCounts[FailureHandshake] != 1 {
 		t.Fatalf("unexpected failure counts: %v", cell.FailureCounts)
@@ -475,5 +517,167 @@ func TestOperatorIDIsStableAndOpaque(t *testing.T) {
 		if _, err := OperatorID(invalid); err == nil {
 			t.Fatalf("expected %q to be refused", invalid)
 		}
+	}
+}
+
+// A UDP study reports whether a datagram path exists. It never reports a
+// route, whatever its success rate, because an ADNL handshake, channel,
+// keepalive, and recovery all still have to survive that path.
+func TestUDPEvidenceNeverYieldsARouteDecision(t *testing.T) {
+	policy := testPolicy()
+	var trials []Trial
+	for _, required := range policy.RequiredStrata {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.Kind != KindFeasibility {
+		t.Fatalf("a UDP study reported kind %q", report.Kind)
+	}
+	if report.Finding != FindingUDPDirectViable {
+		t.Fatalf("expected feasibility, got %q", report.Finding)
+	}
+	if report.SupportsRouteDecision() {
+		t.Fatal("a UDP study was accepted as a route decision")
+	}
+	for _, forbidden := range []Finding{FindingDirectFirst, FindingTunnelFirst, FindingHybrid, FindingRelayRequired} {
+		if report.Finding == forbidden {
+			t.Fatalf("a UDP study produced the route vocabulary: %q", forbidden)
+		}
+	}
+}
+
+func TestUnreachableUDPPathIsReportedAsSuch(t *testing.T) {
+	policy := testPolicy()
+	var trials []Trial
+	for _, required := range policy.RequiredStrata {
+		trials = fillCell(trials, required, 0, OutcomeFailed, FailureHandshake, 4)
+	}
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.Finding != FindingUDPDirectNotViable {
+		t.Fatalf("expected an unviable direct path, got %q", report.Finding)
+	}
+}
+
+// Relay-required says a Relay is necessary. Whether one performs adequately is
+// a different milestone's acceptance, and the vocabulary must not blur them.
+func TestRelayIsRequiredNotAccepted(t *testing.T) {
+	if FindingRelayRequired != "relay-required" {
+		t.Fatalf("unexpected finding name %q", FindingRelayRequired)
+	}
+	for _, name := range []Finding{FindingDirectFirst, FindingTunnelFirst, FindingHybrid,
+		FindingRelayRequired, FindingUDPDirectViable, FindingUDPDirectNotViable, FindingInsufficient} {
+		if strings.Contains(string(name), "relay-first") {
+			t.Fatalf("the vocabulary still claims relay-first: %q", name)
+		}
+	}
+}
+
+// One operator running thousands of attempts must not decide a cell that
+// everyone else measured a handful of times.
+func TestOneOperatorCannotDominateACell(t *testing.T) {
+	policy := testPolicy()
+	target := policy.RequiredStrata[0]
+
+	var trials []Trial
+	// A prolific operator succeeds every time.
+	for index := 0; index < 200; index++ {
+		trials = append(trials, directTrial(target, opA, 10))
+	}
+	// Two others fail every time.
+	for index := 0; index < 4; index++ {
+		trials = append(trials, fallbackTrial(target, opB, OutcomeFailed, FailureHandshake))
+		trials = append(trials, fallbackTrial(target, opC, OutcomeFailed, FailureHandshake))
+	}
+	for _, required := range policy.RequiredStrata[1:] {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	var cell CellReport
+	for _, candidate := range report.Cells {
+		if candidate.StratumKey == target.Key() {
+			cell = candidate
+		}
+	}
+	if cell.DroppedOverCap != 200-policy.MaxTrialsPerOperatorPerCell {
+		t.Fatalf("the cap was not applied or not reported: %+v", cell)
+	}
+	// One of three operators succeeded, so the cell reads a third, not the
+	// ninety-six percent a pooled count would have produced.
+	if cell.DirectRate > 0.34 {
+		t.Fatalf("a single operator decided the cell: %v", cell.DirectRate)
+	}
+	if report.Finding != FindingUDPDirectNotViable {
+		t.Fatalf("expected the cell to fail its rate, got %q", report.Finding)
+	}
+}
+
+// Counting operators alone would not notice one operator running everything
+// behind a single uplink.
+func TestConcentratedEvidenceIsUnderSampled(t *testing.T) {
+	policy := testPolicy()
+	var trials []Trial
+	for _, required := range policy.RequiredStrata {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+	// Every operator now reports from the same network.
+	for index := range trials {
+		trials[index].SiteID = "site_0000000000000000"
+	}
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.Finding != FindingInsufficient {
+		t.Fatalf("evidence from one network produced %q", report.Finding)
+	}
+	if len(report.Missing) != len(policy.RequiredStrata) {
+		t.Fatalf("expected every cell to be under-sampled, got %d", len(report.Missing))
+	}
+}
+
+func TestPairAndSiteIdentityAreRequired(t *testing.T) {
+	base := directTrial(stratum(CarrierConsumerISP, ClassDesktop), opA, 100)
+	for name, mutate := range map[string]func(*Trial){
+		"no pair":  func(t *Trial) { t.PairID = "" },
+		"bad pair": func(t *Trial) { t.PairID = "pair_bad" },
+		"no site":  func(t *Trial) { t.SiteID = "" },
+		"bad site": func(t *Trial) { t.SiteID = "site_bad" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			trial := base
+			mutate(&trial)
+			if err := trial.Validate(); err == nil {
+				t.Fatalf("expected %q to be refused", name)
+			}
+		})
+	}
+	pair, err := PairID("session-one")
+	if err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+	if !pairPattern.MatchString(pair) {
+		t.Fatalf("unexpected pair identifier: %s", pair)
+	}
+	site, err := SiteID("tokyo-uplink")
+	if err != nil {
+		t.Fatalf("site: %v", err)
+	}
+	if !sitePattern.MatchString(site) || strings.Contains(site, "tokyo") {
+		t.Fatalf("unexpected site identifier: %s", site)
+	}
+	if _, err := SiteID(""); err == nil {
+		t.Fatal("an empty site name was accepted")
+	}
+	if _, err := PairID(" padded "); err == nil {
+		t.Fatal("an untrimmed pair session was accepted")
 	}
 }

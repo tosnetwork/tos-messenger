@@ -147,6 +147,8 @@ var (
 
 	commitPattern   = regexp.MustCompile(`^[0-9a-f]{40}$|^[0-9a-f]{64}$`)
 	operatorPattern = regexp.MustCompile(`^op_[0-9a-f]{16}$`)
+	pairPattern     = regexp.MustCompile(`^pair_[0-9a-f]{32}$`)
+	sitePattern     = regexp.MustCompile(`^site_[0-9a-f]{16}$`)
 )
 
 func set[T ~string](values ...T) map[T]struct{} {
@@ -207,7 +209,14 @@ func member[T ~string](membership map[T]struct{}, value T) bool {
 
 // Trial is one measured attempt.
 type Trial struct {
-	Stratum         Stratum      `json:"stratum"`
+	Stratum Stratum `json:"stratum"`
+	// PairID is shared by the two endpoints of one measurement, so the two
+	// halves of an attempt can be recognised as one attempt rather than
+	// counted as two independent successes.
+	PairID string `json:"pair_id"`
+	// SiteID identifies the network an operator ran from. One operator with
+	// twenty hosts on one uplink has measured one network, not twenty.
+	SiteID          string       `json:"site_id"`
 	OperatorID      string       `json:"operator_id"`
 	Probe           ProbeKind    `json:"probe"`
 	Outcome         Outcome      `json:"outcome"`
@@ -240,6 +249,12 @@ func (t Trial) Validate() error {
 	}
 	if !operatorPattern.MatchString(t.OperatorID) {
 		return errors.New("invalid trial operator identifier")
+	}
+	if !pairPattern.MatchString(t.PairID) {
+		return errors.New("invalid trial pair identifier")
+	}
+	if !sitePattern.MatchString(t.SiteID) {
+		return errors.New("invalid trial site identifier")
 	}
 	if !member(probes, t.Probe) || !member(outcomes, t.Outcome) || !member(failures, t.Failure) {
 		return errors.New("invalid trial vocabulary")
@@ -282,6 +297,8 @@ func (t Trial) CanonicalBytes() ([]byte, error) {
 	buffer := bytes.NewBufferString(canon.DomainReachabilityTrial)
 	canon.Text(buffer, TrialSchema)
 	canon.Text(buffer, t.Stratum.Key())
+	canon.Text(buffer, t.PairID)
+	canon.Text(buffer, t.SiteID)
 	canon.Text(buffer, t.OperatorID)
 	canon.Text(buffer, string(t.Probe))
 	canon.Text(buffer, string(t.Outcome))
@@ -395,6 +412,36 @@ func percentile(samples []uint64, rank int) uint64 {
 		index = len(ordered)
 	}
 	return ordered[index-1]
+}
+
+// SiteID derives the opaque site identifier used to tell one network from
+// another within an operator.
+func SiteID(name string) (string, error) {
+	digest, err := opaque(canon.DomainReachabilitySite, name)
+	if err != nil {
+		return "", errors.New("invalid site name")
+	}
+	return "site_" + digest[:16], nil
+}
+
+// PairID derives the identifier the two endpoints of one measurement share.
+func PairID(session string) (string, error) {
+	digest, err := opaque(canon.DomainReachabilityPair, session)
+	if err != nil {
+		return "", errors.New("invalid pair session")
+	}
+	return "pair_" + digest[:32], nil
+}
+
+func opaque(domain, name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || len(trimmed) > 128 || trimmed != name {
+		return "", errors.New("invalid name")
+	}
+	buffer := bytes.NewBufferString(domain)
+	canon.Text(buffer, trimmed)
+	digest := canon.Digest(buffer.Bytes())
+	return digest[len("sha256:"):], nil
 }
 
 // OperatorID derives the opaque operator identifier used for diversity

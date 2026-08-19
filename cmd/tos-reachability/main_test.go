@@ -19,7 +19,7 @@ func TestSplitAddresses(t *testing.T) {
 
 func TestMeasureRefusesUnusableInput(t *testing.T) {
 	ctx := context.Background()
-	labels := declared{operator: "lab", carrier: "consumer-isp", udpPolicy: "allowed",
+	labels := declared{operator: "lab", site: "uplink", carrier: "consumer-isp", udpPolicy: "allowed",
 		mobility: "stationary", class: "desktop", assistance: "none"}
 	commit := strings.Repeat("a", 40)
 	session := "ses_0123456789abcdef0123456789abcdef"
@@ -32,6 +32,11 @@ func TestMeasureRefusesUnusableInput(t *testing.T) {
 	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, time.Second, time.Second, blank); err == nil {
 		t.Fatal("expected a missing operator to be refused")
 	}
+	noSite := labels
+	noSite.site = ""
+	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, time.Second, time.Second, noSite); err == nil {
+		t.Fatal("expected a missing site to be refused")
+	}
 	if _, err := measure(ctx, "127.0.0.1:1", "ses_short", "a", ":0", commit, time.Second, time.Second, labels); err == nil {
 		t.Fatal("expected an invalid session to be refused")
 	}
@@ -43,7 +48,7 @@ func TestMeasureRefusesUnusableInput(t *testing.T) {
 // A probe that never reached a coordinator has no stratum to file its result
 // under, so it must refuse to write a record rather than invent labels.
 func TestMeasureRefusesToRecordAnUnclassifiedTrial(t *testing.T) {
-	labels := declared{operator: "lab", carrier: "consumer-isp", udpPolicy: "allowed",
+	labels := declared{operator: "lab", site: "uplink", carrier: "consumer-isp", udpPolicy: "allowed",
 		mobility: "stationary", class: "desktop", assistance: "none"}
 	_, err := measure(context.Background(), "127.0.0.1:9",
 		"ses_0123456789abcdef0123456789abcdef", "a", "127.0.0.1:0",

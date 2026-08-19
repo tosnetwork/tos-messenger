@@ -2,6 +2,8 @@
   "schema": "tos.messaging.reachability-policy.v1",
   "min_samples_per_cell": 30,
   "min_operators_per_cell": 3,
+  "min_sites_per_cell": 3,
+  "max_trials_per_operator_per_cell": 20,
   "direct_viable_rate": 0.8,
   "tunnel_viable_rate": 0.95,
   "required_strata": [

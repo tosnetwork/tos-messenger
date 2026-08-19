@@ -42,7 +42,11 @@ than silently forking two implementations.
 | Decision record contents | event identifier, outcome, code, route, class, and a salted per-install sender reference; no Agent, endpoint, conversation, or device identifier | `admission.Record` |
 | Inbox policy interface | the mechanism is fixed and always consulted; what an unknown sender must present is not | `admission.ContactPolicy` |
 | Study acceptance policy | content-addressed, and required to cover NAT, consumer ISP, carrier-grade NAT, mobile, two address families, two UDP-policy environments, a low-cost class, and a mobile endpoint | `reachability.Policy.Validate` |
-| Route decision rule | every required stratum viable direct → direct-first; none viable but all lifted by a proxy → tunnel-first; some viable → hybrid; otherwise relay-first | `reachability.decide` |
+| Finding vocabulary | probe-specific and non-overlapping: a UDP study reports feasibility, only an ADNL study reports a route, and a report names both the probe and the kind of question it answered | `reachability.Finding`, `reachability.Kind` |
+| Route rule | every required stratum viable direct → direct-first; none viable but all lifted by a proxy → tunnel-first; some viable → hybrid; otherwise relay-required, which asserts necessity and not that a Relay performs | `reachability.decide` |
+| Operator weighting | rates are means over operators, with a per-operator cap on how much of a cell one may contribute, and drops reported rather than silently truncated | `reachability.summarize` |
+| Site counting | counted separately from operators, because one operator behind one uplink has measured one network | `reachability.Policy.MinSitesPerCell` |
+| Pair identity | both endpoints of one attempt derive the same identifier from their shared session, so one measurement is not counted as two | `reachability.PairID` |
 | Operator identity | opaque `op_` prefix over a digest of a local operator name, so diversity is counted without collecting identity | `reachability.OperatorID` |
 | Suite identifier form | `tos.messaging.e2ee.<name>.v<n>`, so a suite can be negotiated, deprecated, and upgraded | `e2ee.AlgorithmPattern` |
 | Ciphertext binding | network tuple, suite, conversation, and both sides' Agent, endpoint, and device identifiers, with direction included | `e2ee.Binding` |

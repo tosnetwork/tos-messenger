@@ -17,11 +17,18 @@ every report names the policy digest it was judged against. Thresholds invented
 after seeing the data produce a different digest, which is visible in the
 report.
 
-**A weak study yields no decision.** If any required stratum was never measured,
-or was measured with too few samples or by too few independent operators, the
-report's decision is `insufficient-evidence` and the tool exits non-zero. It
-never degrades into a weak preference for a route, because a weak preference is
-what the implementation would then be built on.
+**A weak study yields no finding.** If any required stratum was never measured,
+or was measured with too few samples, too few independent operators, or from
+too few independent networks, the report's finding is `insufficient-evidence`
+and the tool exits non-zero. It never degrades into a weak preference, because
+a weak preference is what the implementation would then be built on.
+
+**No operator decides a cell alone.** Rates are means over operators, not over
+trials, so running more attempts buys no influence. Each operator's
+contribution to a cell is also capped, and anything past the cap is dropped and
+reported rather than silently truncated. Sites are counted separately from
+operators, because one operator with twenty hosts behind one uplink has
+measured one network.
 
 **A policy that a laboratory pair could satisfy is refused.** `Policy.Validate`
 requires the predeclared strata to cover a network behind NAT, consumer ISP,
@@ -59,17 +66,22 @@ SESSION=ses_$(openssl rand -hex 16)
 
 # endpoint A
 tos-reachability -coordinators host-1:7691,host-2:7691 -session "$SESSION" \
-  -role a -operator "your-lab" -carrier consumer-isp -endpoint-class desktop \
+  -role a -operator "your-lab" -site "tokyo-uplink" \
+  -carrier consumer-isp -endpoint-class desktop \
   -out study.jsonl
 
 # endpoint B
 tos-reachability -coordinators host-1:7691,host-2:7691 -session "$SESSION" \
-  -role b -operator "other-lab" -carrier carrier-grade-nat -endpoint-class edge-arm \
+  -role b -operator "other-lab" -site "osaka-cgnat" \
+  -carrier carrier-grade-nat -endpoint-class edge-arm \
   -out study.jsonl
 ```
 
-The operator name is hashed into an opaque identifier. The report counts how
-many independent operators contributed to a cell; it never needs to know which.
+Operator and site names are hashed into opaque identifiers. The report counts
+how many independent operators and networks contributed to a cell; it never
+needs to know which. Both endpoints of one attempt derive the same pair
+identifier from the session they share, so the two halves are recognisable as
+one measurement rather than two independent successes.
 
 Aggregate the log against the predeclared policy:
 
@@ -80,15 +92,29 @@ tos-reachability-report -policy reachability-policy.json -log study.jsonl -probe
 Exit status `0` carries a route decision, `1` means the study does not support
 one, and `2` is a tooling error.
 
-## Probe scope
+## Two studies, two vocabularies
 
-The UDP probe measures the network factor: whether a datagram path can be
-established between two endpoints under a given NAT and carrier class. That is
-the factor the route decision turns on, and it is protocol-independent.
+The study is split, because the two questions have different answers and only
+one of them can freeze a transport.
 
-Whether ADNL's handshake and keepalive survive such a path is a separate
-question, recorded under the `adnl` probe kind. Trials are aggregated per probe
-and are never mixed, so an ADNL result can never be satisfied by UDP evidence.
+**M0-R1, network feasibility.** The UDP probe measures whether a datagram path
+can be established between two endpoints under a given NAT and carrier class.
+It reports `udp-direct-viable` or `udp-direct-not-viable`, and it cannot report
+anything else. A datagram getting through says nothing about whether an ADNL
+handshake completes, whether a channel stays up, whether keepalives survive a
+NAT, or whether a session recovers after a network change.
+
+**M0-R2, route decision.** An ADNL probe exercises the real handshake, session,
+keepalive, and reliable transfer, and only its evidence produces
+`direct-first`, `tunnel-first`, `hybrid-by-network-class`, or `relay-required`.
+
+Trials are aggregated per probe and never mixed, and the report names both the
+probe and the kind of question it answered. `Report.SupportsRouteDecision`
+is the single check a caller makes before freezing anything.
+
+`relay-required` means a Relay is necessary. It does not mean a Relay works:
+its latency, retention, redundancy, and failover are the technical Relay
+milestone's own acceptance, and nothing in this study measures them.
 
 Nothing in `pkg/probe` is a Messenger transport. It signs nothing, encrypts
 nothing, and carries no application content.

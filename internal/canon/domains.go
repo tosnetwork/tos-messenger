@@ -33,6 +33,10 @@ const (
 	DomainReachabilityPolicy = "tos.messaging.reachability-policy.v1\x00"
 	// DomainReachabilityOperator namespaces the opaque operator derivation.
 	DomainReachabilityOperator = "tos.messaging.reachability-operator.v1\x00"
+	// DomainReachabilitySite namespaces the opaque site derivation.
+	DomainReachabilitySite = "tos.messaging.reachability-site.v1\x00"
+	// DomainReachabilityPair namespaces the paired-measurement derivation.
+	DomainReachabilityPair = "tos.messaging.reachability-pair.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -49,4 +53,6 @@ var Domains = []string{
 	DomainReachabilityTrial,
 	DomainReachabilityPolicy,
 	DomainReachabilityOperator,
+	DomainReachabilitySite,
+	DomainReachabilityPair,
 }

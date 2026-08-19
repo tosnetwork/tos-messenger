@@ -6,6 +6,9 @@
 // behavior, and the commits of both endpoints come from the measurement and
 // are not accepted as flags. An operator can misdescribe their access network;
 // they should not be able to misdescribe the result.
+//
+// It records a UDP trial. A UDP study answers whether a datagram path exists,
+// which is an input to a route decision and never a route decision itself.
 package main
 
 import (
@@ -29,6 +32,7 @@ type declared struct {
 	class      string
 	assistance string
 	operator   string
+	site       string
 }
 
 func main() {
@@ -43,6 +47,7 @@ func main() {
 
 	var labels declared
 	flag.StringVar(&labels.operator, "operator", "", "operator name, hashed into an opaque identifier")
+	flag.StringVar(&labels.site, "site", "", "name of the network this endpoint runs on, hashed into an opaque identifier")
 	flag.StringVar(&labels.carrier, "carrier", "", "datacenter, consumer-isp, carrier-grade-nat, or mobile-carrier")
 	flag.StringVar(&labels.udpPolicy, "udp-policy", string(reachability.UDPAllowed), "allowed, rate-limited, or blocked")
 	flag.StringVar(&labels.mobility, "mobility", string(reachability.MobilityStationary), "stationary, wifi-to-mobile, mobile-to-wifi, address-change, or sleep-wake")
@@ -82,6 +87,17 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit st
 	if err != nil {
 		return reachability.Trial{}, err
 	}
+	site, err := reachability.SiteID(labels.site)
+	if err != nil {
+		return reachability.Trial{}, err
+	}
+	// Both endpoints of one attempt derive the same pair identifier from the
+	// session they shared, so the two halves are recognisable as one
+	// measurement rather than two independent successes.
+	pair, err := reachability.PairID(session)
+	if err != nil {
+		return reachability.Trial{}, err
+	}
 	result, err := probe.Run(ctx, probe.Config{
 		Coordinators: addresses,
 		SessionID:    session,
@@ -112,6 +128,8 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit st
 			EndpointClass: reachability.EndpointClass(labels.class),
 			Assistance:    reachability.Assistance(labels.assistance),
 		},
+		PairID:          pair,
+		SiteID:          site,
 		OperatorID:      operator,
 		Probe:           reachability.ProbeUDP,
 		StartedAtUnix:   uint64(time.Now().Unix()),
