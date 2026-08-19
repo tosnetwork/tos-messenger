@@ -1,0 +1,75 @@
+// Package canon holds the shared canonical-encoding primitives used by every
+// signed or digest-committed Messenger object.
+//
+// Canonical form is always a domain-separated, length-prefixed binary
+// preimage. JSON is a transport encoding and is never hashed or signed, so a
+// reordered or re-serialized JSON document can never change an object's
+// identity.
+package canon
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"regexp"
+)
+
+// DigestPattern matches the digest form committed by TOS objects.
+var DigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// HashPattern matches a bare 32-byte hash in lowercase hex.
+var HashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// Text appends a length-prefixed string. The prefix is what stops two
+// different field splits from producing the same preimage.
+func Text(buffer *bytes.Buffer, value string) {
+	Uint32(buffer, uint32(len(value)))
+	buffer.WriteString(value)
+}
+
+// Bytes appends a length-prefixed byte slice.
+func Bytes(buffer *bytes.Buffer, value []byte) {
+	Uint32(buffer, uint32(len(value)))
+	buffer.Write(value)
+}
+
+// Uint32 appends a big-endian 32-bit value.
+func Uint32(buffer *bytes.Buffer, value uint32) {
+	var number [4]byte
+	binary.BigEndian.PutUint32(number[:], value)
+	buffer.Write(number[:])
+}
+
+// Uint64 appends a big-endian 64-bit value.
+func Uint64(buffer *bytes.Buffer, value uint64) {
+	var number [8]byte
+	binary.BigEndian.PutUint64(number[:], value)
+	buffer.Write(number[:])
+}
+
+// Digest returns the TOS digest form of a preimage.
+func Digest(preimage []byte) string {
+	sum := sha256.Sum256(preimage)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// ValidDigest reports whether a digest is well formed and not the all-zero
+// value. An all-zero digest is almost always an uninitialized field rather
+// than a real commitment, so it fails closed.
+func ValidDigest(digest string) bool {
+	if !DigestPattern.MatchString(digest) {
+		return false
+	}
+	raw, err := hex.DecodeString(digest[len("sha256:"):])
+	if err != nil {
+		return false
+	}
+	return !bytes.Equal(raw, make([]byte, sha256.Size))
+}
+
+// IsZero reports whether a byte slice is entirely zero. A zero key, nonce, or
+// identifier is never a legitimate value.
+func IsZero(value []byte) bool {
+	return bytes.Equal(value, make([]byte, len(value)))
+}
