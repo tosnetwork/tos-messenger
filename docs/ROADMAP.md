@@ -11,18 +11,18 @@ because a table that rounds partial work up is a table that hides exactly the pa
 somebody would need to finish. Nothing in this file changes gate status: this repository
 carries none and consumes no gate capacity.
 
-**Last checked: 2026-08-19, at `95f6a61`.**
+**Last checked: 2026-08-19, at `f84a02c`.**
 
 ## Milestone gates
 
 | Gate | Status | Where it stands |
 |---|---:|---|
 | M0 protocol core, route-independent parts | ✅ | Identity, discovery, envelope, journal, admission, dispatch, local API, negotiation, payload typing, context firewall. Frozen values are still proposals: see [`OPEN_DECISIONS.md`](OPEN_DECISIONS.md) |
-| M0 protocol freeze | ⬜ | Not declared. Several values are proposals, and one representation discrepancy is open (genesis hash form) |
+| M0 protocol freeze | ⬜ | Not declared, and not ready. Readiness material, with what is closed and what is not, is in [`M0_FREEZE_REVIEW.md`](M0_FREEZE_REVIEW.md) |
 | M0-R reachability study | 🟡 | Tooling complete and tested; **no study has been run**, so no route decision exists |
 | M1 one-to-one transport | ⬜ | Blocked on M0-R by the architecture, not merely for acceptance |
 | M2-T rooms and threads | ⬜ | Event kinds exist; no membership or group encryption |
-| M2-C conversation and commerce | 🟡 | Negotiation, mandates and the firewall exist; no transport to carry them |
+| M2-C conversation and commerce | 🟡 | Negotiation, mandates, budgets and the firewall exist and are durable; commitments are read from finalized state. No transport to carry any of it, and no wallet is attached |
 
 ## Components
 
@@ -41,8 +41,8 @@ carries none and consumes no gate capacity.
 | Public Agent channels over Overlay with history synchronization | ⬜ | — | Nothing |
 | Messenger-specific encrypted attachment protocol | ⬜ | `artifact.*` event kinds in `pkg/payload` — `ffcd4a6` | Only references by digest. No attachment format, encryption policy, retention, or collection |
 | OpenFox `tos-messenger` channel adapter | ⬜ | — | Nothing here. It needs a transport first |
-| Agent message policy engine and prompt-injection firewall | ✅ | `pkg/firewall`, `pkg/eventlog` approvals and mandates, `pkg/localapi` — `ff15cb2`, `550ab37` | — (its limits are stated rather than closed: it governs proposals to act, not what a model concludes from what it reads) |
-| First-contact admission policy and sybil resistance | 🟡 | `pkg/admission` — `5693cab`, `657d104` | The policy mechanism is complete and bound to what the endpoint publishes. What an unknown sender must present — a bond, an invite, nothing — is a freeze decision, and the economic profile is roadmap-locked |
+| Agent message policy engine and prompt-injection firewall | ✅ | `pkg/firewall`, `pkg/eventlog` approvals and mandates, `pkg/localapi` — `ff15cb2`, `550ab37`, `79fdbf6`, `95f6a61` | — (its limits are stated rather than closed: it governs proposals to act, not what a model concludes from what it reads) |
+| First-contact admission policy and sybil resistance | 🟡 | `pkg/admission` — `5693cab`, `657d104`, `95f6a61` | The policy mechanism is complete and bound to what the endpoint publishes. What an unknown sender must present — a bond, an invite, nothing — is a freeze decision, and the economic profile is roadmap-locked |
 | Agent Packet-to-Execution-Gate adapter and three-transport replay tests | ⬜ | — | Nothing |
 | Native desktop, Web, iOS, and Android Messenger clients | ⬜ | — | Nothing |
 | Relay, attachment, history, and inbox-bond commercial profiles | 🔒 | — | Locked behind the Expansion Gate in the governing roadmap |
