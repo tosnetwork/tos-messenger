@@ -74,8 +74,24 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 	if resolver == nil {
 		return errors.New("a commitment must be verified against finalized state")
 	}
+	// Finalising is the commit boundary; a proposal authority or a budgetless
+	// negotiation must not reach it, even though the state check above already
+	// implies canonicalisation gated on both. This is the second lock on the
+	// one door value moves through.
+	if n.Mandate.Authority != AuthorityCommit {
+		return errors.New("only a mandate that may commit can finalize")
+	}
+	if n.budget == nil {
+		return errors.New("finalizing needs a budget to commit against")
+	}
 	if err := n.Mandate.Live(now); err != nil {
-		n.end(StateExpired, "the mandate expired before the commitment existed")
+		// The mandate expired: end durably, so the budget hold is released and
+		// the expired state survives a restart. Ending only in memory would
+		// leave a canonicalisation-pending snapshot beside a live hold that
+		// reconciliation would keep forever.
+		if settleErr := n.settle(StateExpired, "the mandate expired before the commitment existed"); settleErr != nil {
+			return settleErr
+		}
 		return err
 	}
 	if !digestPattern.MatchString(commitment) {
@@ -110,7 +126,7 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 			return err
 		}
 	}
-	if _, err := n.Mandate.Permits(quote.Terms, now); err != nil {
+	if _, err := n.Mandate.PermitsCommit(quote.Terms, now); err != nil {
 		if settleErr := n.settle(StateRejected, "the finalized quote falls outside the mandate"); settleErr != nil {
 			return settleErr
 		}

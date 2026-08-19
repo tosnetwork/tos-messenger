@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,43 @@ func writeFile(t *testing.T, name, content string) string {
 		t.Fatalf("write %s: %v", name, err)
 	}
 	return path
+}
+
+// The exit code is the tool's contract with a build gate, so the mapping is a
+// tested pure function over constructed reports rather than a full study
+// fixture. The regression the code review found is the second case: a UDP
+// feasibility result -- not insufficient, but not a route decision either --
+// must exit 1, not 0.
+func TestExitCode(t *testing.T) {
+	cases := []struct {
+		name   string
+		report reachability.Report
+		want   int
+	}{
+		{"insufficient",
+			reachability.Report{Kind: reachability.KindRouteDecision, Finding: reachability.FindingInsufficient}, 1},
+		{"udp feasibility is not a route decision",
+			reachability.Report{Kind: reachability.KindFeasibility, Finding: reachability.FindingUDPDirectViable}, 1},
+		{"udp not viable is still feasibility",
+			reachability.Report{Kind: reachability.KindFeasibility, Finding: reachability.FindingUDPDirectNotViable}, 1},
+		{"adnl route decision",
+			reachability.Report{Kind: reachability.KindRouteDecision, Finding: reachability.FindingDirectFirst}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if code := exitCode(tc.report); code != tc.want {
+				t.Fatalf("exit code for %q = %d, want %d", tc.report.Finding, code, tc.want)
+			}
+		})
+	}
+}
+
+// A tooling or input failure is exit code 2, distinct from a report that merely
+// supports no route decision.
+func TestRunReportsInputFailureAsTwo(t *testing.T) {
+	if code := run("", "", "udp", io.Discard, io.Discard); code != 2 {
+		t.Fatalf("missing input exit code = %d, want 2", code)
+	}
 }
 
 func TestBuildRefusesIncompleteInput(t *testing.T) {

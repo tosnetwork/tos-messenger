@@ -113,7 +113,24 @@ func (m Mandate) Live(now time.Time) error {
 // authorised" and "authorised but worth a person's attention" are different
 // situations with different remedies. The first ends the exchange; the second
 // pauses it.
+// Permits judges terms at the conversational level: whether an authority above
+// bare conversation may agree to them in principle. It does not authorise a
+// commitment; agreeing to terms is not owing them. Use PermitsCommit for the
+// boundary where value can actually move.
 func (m Mandate) Permits(terms Terms, now time.Time) (needsApproval bool, err error) {
+	return m.permits(terms, now, false)
+}
+
+// PermitsCommit judges terms at the commitment level: it requires the mandate to
+// grant AuthorityCommit, because producing the exact terms a canonical action
+// carries -- or authorising a spend against them -- is the one act a proposal
+// authority must not reach. A mandate that may only propose is refused here even
+// though the same terms would pass Permits.
+func (m Mandate) PermitsCommit(terms Terms, now time.Time) (needsApproval bool, err error) {
+	return m.permits(terms, now, true)
+}
+
+func (m Mandate) permits(terms Terms, now time.Time, requireCommit bool) (needsApproval bool, err error) {
 	if err := m.Live(now); err != nil {
 		return false, err
 	}
@@ -124,6 +141,12 @@ func (m Mandate) Permits(terms Terms, now time.Time) (needsApproval bool, err er
 	// not a small mandate; it is permission to talk.
 	if m.Authority == AuthorityConverse {
 		return false, errors.New("this mandate permits conversation and nothing else")
+	}
+	// A proposal authority may agree to terms in conversation but may never
+	// commit them: canonicalisation, finalisation, and spend all pass through
+	// PermitsCommit, which is the only caller that sets this.
+	if requireCommit && m.Authority != AuthorityCommit {
+		return false, errors.New("this mandate may propose but not commit")
 	}
 	if terms.CapabilityClass != m.CapabilityClass {
 		return false, errors.New("these terms buy something the mandate does not cover")

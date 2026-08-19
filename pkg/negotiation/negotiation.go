@@ -354,6 +354,15 @@ func (n *Negotiation) BeginCanonicalization(now time.Time) error {
 	if n.state != StateIntentAgreed {
 		return errors.New("only an agreed intent can be canonicalised")
 	}
+	// Canonicalisation is where conversation becomes a commitment. A mandate
+	// that may only propose stops here, and a commitment needs a durable budget
+	// to reserve against -- without one there is nothing to hold the price.
+	if n.Mandate.Authority != AuthorityCommit {
+		return errors.New("only a mandate that may commit can canonicalise terms")
+	}
+	if n.budget == nil {
+		return errors.New("canonicalisation needs a budget to commit against")
+	}
 	if err := n.Mandate.Live(now); err != nil {
 		return err
 	}

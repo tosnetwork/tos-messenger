@@ -198,6 +198,35 @@ func testAsset() negotiation.Asset {
 	}
 }
 
+// A spend commits value, so a mandate that may only propose cannot
+// pre-authorise one, even for terms that fit its class, asset, and ceiling. The
+// owner may still say yes; what a proposal authority cannot do is have said yes
+// in advance.
+func TestProposalAuthorityCannotPreAuthoriseASpend(t *testing.T) {
+	now := time.Unix(int64(baseUnix)+60, 0)
+	permissive := Policy{UnattendedCeiling: EffectSpend, OwnInitiativeCeiling: EffectSpend}
+
+	proposal := testMandate()
+	proposal.Authority = negotiation.AuthorityPropose
+	decision, err := EvaluateSpend(permissive, proposal, spendAction(200, testOrigin("1")), now)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if decision.Outcome != RequireOwnerApproval {
+		t.Fatalf("a proposal authority pre-authorised a spend: %+v", decision)
+	}
+
+	// The same terms under a committing mandate are allowed, so the refusal is
+	// the authority and not the terms.
+	allowed, err := EvaluateSpend(permissive, testMandate(), spendAction(200, testOrigin("1")), now)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if allowed.Outcome != Allow {
+		t.Fatalf("a committing authority was refused the same terms: %+v", allowed)
+	}
+}
+
 // The mandate and the ceiling are independent, and neither substitutes for the
 // other. A spend the owner authorised in advance is still stopped when a
 // stranger's message drove it, and a spend inside the ceiling is still stopped

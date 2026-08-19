@@ -441,6 +441,73 @@ func TestFinalizePropagatesAResolverError(t *testing.T) {
 	}
 }
 
+func proposalMandate() Mandate {
+	m := testMandate()
+	m.Authority = AuthorityPropose
+	return m
+}
+
+// A proposal authority may agree in conversation but must never walk that
+// agreement up into a commitment. This is the escalation the review found:
+// propose -> accept -> canonicalise -> finalise, with no budget. Agreeing is
+// allowed; canonicalising is refused, and the state does not advance.
+func TestProposalAuthorityCannotCommit(t *testing.T) {
+	// A proposal mandate is created with no budget: New demands a budget only of
+	// a committing mandate, which is the budgetless path the review flagged.
+	instance, err := New("neg-propose", conversation, counterparty, proposalMandate(), nil, &memoryStore{}, at(0))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if err := instance.AcceptIntent(at(2)); err != nil {
+		t.Fatalf("a proposal authority could not agree in conversation: %v", err)
+	}
+	if instance.ActiveAgreement() {
+		t.Fatal("agreeing in conversation reported a commercial agreement")
+	}
+	if err := instance.BeginCanonicalization(at(3)); err == nil {
+		t.Fatal("a proposal authority canonicalised terms into a commitment")
+	}
+	if instance.State() == StateCanonicalizationPending {
+		t.Fatal("a proposal authority reached canonicalisation-pending")
+	}
+}
+
+// A mandate that expires between canonicalisation and finalisation must release
+// its budget hold durably, so a restart does not find the hold still on the
+// books with an expired negotiation behind it.
+func TestFinalizeReleasesBudgetOnMandateExpiry(t *testing.T) {
+	budget := testBudget(t, "1000000000")
+	instance := start(t, budget)
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if err := instance.AcceptIntent(at(2)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := instance.BeginCanonicalization(at(3)); err != nil {
+		t.Fatalf("canonicalise: %v", err)
+	}
+	if remaining := left(t, budget); remaining.Atomic != "950000000" {
+		t.Fatalf("the hold was not taken at agreement: remaining %q, want 950000000", remaining.Atomic)
+	}
+
+	// The mandate expires (ExpiresAtUnix = baseUnix+86400) before finalisation.
+	past := time.Unix(int64(baseUnix)+86_400+10, 0)
+	if err := instance.Finalize(stubResolver{quote: finalizedQuote(terms("50000000")), found: true}, commitment, past); err == nil {
+		t.Fatal("finalize succeeded past the mandate's expiry")
+	}
+	if instance.State() != StateExpired {
+		t.Fatalf("state after expiry = %q, want expired", instance.State())
+	}
+	// The hold is released, not leaked into a canonicalisation-pending snapshot.
+	if remaining := left(t, budget); remaining.Atomic != "1000000000" {
+		t.Fatalf("budget hold leaked on expiry: remaining %q, want the full 1000000000", remaining.Atomic)
+	}
+}
+
 // One commitment per negotiation. A repeated event does not produce a second.
 func TestFinalizingTwiceIsRefused(t *testing.T) {
 	instance := start(t, testBudget(t, "1000000000"))

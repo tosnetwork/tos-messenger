@@ -43,10 +43,14 @@ func EvaluateSpend(policy Policy, mandate negotiation.Mandate, action Action, no
 		return decision, nil
 	}
 
-	needsApproval, err := mandate.Permits(*action.Terms, now)
+	// A spend commits value, so it is judged at the commitment level: a mandate
+	// that may only propose cannot pre-authorise a spend, and is sent to the
+	// owner rather than allowed to move money on a proposal authority.
+	needsApproval, err := mandate.PermitsCommit(*action.Terms, now)
 	if err != nil {
-		// Outside the mandate, or past its expiry. The owner can still say
-		// yes; what they cannot do is have said yes in advance.
+		// Outside the mandate, past its expiry, or not a committing authority.
+		// The owner can still say yes; what they cannot do is have said yes in
+		// advance.
 		decision.Outcome = RequireOwnerApproval
 		decision.Reason = "outside what the owner authorised in advance: " + err.Error()
 		return decision, nil

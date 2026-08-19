@@ -15,6 +15,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/tosnetwork/tos-messenger/pkg/reachability"
@@ -25,28 +26,51 @@ func main() {
 	logPath := flag.String("log", "", "study log of trial records")
 	probeKind := flag.String("probe", string(reachability.ProbeUDP), "probe to aggregate, udp or adnl")
 	flag.Parse()
+	os.Exit(run(*policyPath, *logPath, *probeKind, os.Stdout, os.Stderr))
+}
 
-	report, err := build(*policyPath, *logPath, *probeKind)
+// run returns the process exit code, so the code is a tested value rather than a
+// side effect: 2 for a tooling or input failure, 1 for a valid report that
+// supports no route decision (including an insufficient study or a UDP
+// feasibility result), and 0 only when the evidence actually supports a route
+// decision. A build gate reads this without parsing prose.
+func run(policyPath, logPath, probeKind string, stdout, stderr io.Writer) int {
+	report, err := build(policyPath, logPath, probeKind)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tos-reachability-report:", err)
-		os.Exit(2)
+		fmt.Fprintln(stderr, "tos-reachability-report:", err)
+		return 2
 	}
 	encoded, err := reachability.EncodeReportJSON(report)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tos-reachability-report:", err)
-		os.Exit(2)
+		fmt.Fprintln(stderr, "tos-reachability-report:", err)
+		return 2
 	}
-	fmt.Println(string(encoded))
+	fmt.Fprintln(stdout, string(encoded))
 	if report.Finding == reachability.FindingInsufficient {
-		fmt.Fprintln(os.Stderr, "tos-reachability-report: the study does not meet its own predeclared minimums")
-		os.Exit(1)
-	}
-	if !report.SupportsRouteDecision() {
-		// Said plainly, because the finding alone reads like an answer.
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintln(stderr, "tos-reachability-report: the study does not meet its own predeclared minimums")
+	} else if !report.SupportsRouteDecision() {
+		// A feasibility result is not a route decision. Saying so plainly is not
+		// enough: the exit code has to carry it, or a gate that only reads the
+		// status treats network feasibility as a frozen transport answer.
+		fmt.Fprintf(stderr,
 			"tos-reachability-report: %s evidence yields %q, which is network feasibility and not a route decision; freezing a transport needs an %s study\n",
 			report.Probe, report.Finding, reachability.ProbeADNL)
 	}
+	return exitCode(report)
+}
+
+// exitCode maps a report to the process exit code, kept separate so the mapping
+// is a tested pure function rather than a branch buried in I/O: 1 for a report
+// that supports no route decision -- an insufficient study, or any feasibility
+// result however successful -- and 0 only when the evidence decides a route.
+func exitCode(report reachability.Report) int {
+	if report.Finding == reachability.FindingInsufficient {
+		return 1
+	}
+	if !report.SupportsRouteDecision() {
+		return 1
+	}
+	return 0
 }
 
 func build(policyPath, logPath, probeKind string) (reachability.Report, error) {
