@@ -18,8 +18,6 @@ const (
 	// EventSchema is the strict wire schema identifier.
 	EventSchema = "tos.messaging.event.v1"
 
-	eventIDDomain = "tos.messaging.event-id.v1\x00"
-
 	// MaxContentBytes bounds one event body.
 	MaxContentBytes = 128 << 10
 	// MaxCausalParents bounds the causal reference set.
@@ -138,7 +136,7 @@ func EventCanonicalBytes(event Event) ([]byte, error) {
 	if err := validateEventFields(event); err != nil {
 		return nil, err
 	}
-	buffer := bytes.NewBufferString(eventIDDomain)
+	buffer := bytes.NewBufferString(canon.DomainEventID)
 	canon.Text(buffer, EventSchema)
 	canon.Text(buffer, event.Network.NetworkId)
 	canon.Text(buffer, event.Network.GenesisRootHash)

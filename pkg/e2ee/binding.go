@@ -9,8 +9,6 @@ import (
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
-const bindingDomain = "tos.messaging.e2ee-binding.v1\x00"
-
 // Binding names exactly where one ciphertext belongs.
 //
 // It is passed to Seal and Open as associated data, so a ciphertext that is
@@ -35,7 +33,7 @@ func (b Binding) Bytes() ([]byte, error) {
 	if err := b.Validate(); err != nil {
 		return nil, err
 	}
-	buffer := bytes.NewBufferString(bindingDomain)
+	buffer := bytes.NewBufferString(canon.DomainE2EEBinding)
 	canon.Text(buffer, b.Network.NetworkId)
 	canon.Text(buffer, b.Network.GenesisRootHash)
 	canon.Text(buffer, b.Network.GenesisFileHash)

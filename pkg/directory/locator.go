@@ -21,11 +21,6 @@ const (
 	// LocatorSchema is the strict wire schema identifier.
 	LocatorSchema = "tos.messaging.dht-locator.v1"
 
-	locatorDomain       = "tos.messaging.dht-locator.v1\x00"
-	networkDigestDomain = "tos.messaging.network-domain.v1\x00"
-	agentDigestDomain   = "tos.messaging.agent-locator.v1\x00"
-	lookupKeyDomain     = "tos.messaging.dht-key.v1\x00"
-
 	// MaxLocatorBytes bounds one published DHT value. The DHT carries a
 	// pointer, never history, so the bound is deliberately small.
 	MaxLocatorBytes = 1024
@@ -65,7 +60,7 @@ func NetworkDomainDigest(network *nativev1.NetworkDomain) (string, error) {
 		!canon.HashPattern.MatchString(network.GenesisFileHash) {
 		return "", errors.New("invalid locator network domain")
 	}
-	buffer := bytes.NewBufferString(networkDigestDomain)
+	buffer := bytes.NewBufferString(canon.DomainNetworkDomain)
 	canon.Text(buffer, network.NetworkId)
 	canon.Text(buffer, network.GenesisRootHash)
 	canon.Text(buffer, network.GenesisFileHash)
@@ -83,7 +78,7 @@ func AgentIDDigest(network *nativev1.NetworkDomain, agentID string) (string, err
 	if !identity.AgentPattern.MatchString(agentID) {
 		return "", errors.New("invalid locator Agent identifier")
 	}
-	buffer := bytes.NewBufferString(agentDigestDomain)
+	buffer := bytes.NewBufferString(canon.DomainAgentLocator)
 	canon.Text(buffer, networkDigest)
 	canon.Text(buffer, agentID)
 	return canon.Digest(buffer.Bytes()), nil
@@ -100,7 +95,7 @@ func LookupKey(network *nativev1.NetworkDomain, agentID, endpointID string) ([sh
 	if !identity.EndpointPattern.MatchString(endpointID) {
 		return [sha256.Size]byte{}, errors.New("invalid locator endpoint identifier")
 	}
-	buffer := bytes.NewBufferString(lookupKeyDomain)
+	buffer := bytes.NewBufferString(canon.DomainDHTKey)
 	canon.Text(buffer, agentDigest)
 	canon.Text(buffer, endpointID)
 	return sha256.Sum256(buffer.Bytes()), nil
@@ -111,7 +106,7 @@ func LocatorSigningBytes(locator Locator) ([]byte, error) {
 	if err := ValidateLocator(locator, false); err != nil {
 		return nil, err
 	}
-	buffer := bytes.NewBufferString(locatorDomain)
+	buffer := bytes.NewBufferString(canon.DomainDHTLocator)
 	canon.Text(buffer, LocatorSchema)
 	canon.Text(buffer, locator.NetworkDomainDigest)
 	canon.Text(buffer, locator.AgentIDDigest)

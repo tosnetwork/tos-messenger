@@ -31,9 +31,6 @@ const (
 	// Schema is the strict wire schema identifier.
 	Schema = "tos.messaging.endpoint-delegation.v1"
 
-	digestDomain     = "tos.messaging.endpoint-delegation.v1\x00"
-	endpointIDDomain = "tos.messaging.endpoint-id.v1\x00"
-
 	// MaxProtocolVersions bounds the advertised messaging protocol versions.
 	MaxProtocolVersions = 16
 	// MaxEventClasses bounds the event classes one endpoint may accept.
@@ -122,7 +119,7 @@ func DeriveEndpointID(network *nativev1.NetworkDomain, agentID string, key ed255
 	if err := validateKey(key); err != nil {
 		return "", err
 	}
-	buffer := bytes.NewBufferString(endpointIDDomain)
+	buffer := bytes.NewBufferString(canon.DomainEndpointID)
 	canon.Text(buffer, network.NetworkId)
 	canon.Text(buffer, network.GenesisRootHash)
 	canon.Text(buffer, network.GenesisFileHash)
@@ -139,7 +136,7 @@ func CanonicalBytes(delegation Delegation) ([]byte, error) {
 	if err := Validate(delegation); err != nil {
 		return nil, err
 	}
-	buffer := bytes.NewBufferString(digestDomain)
+	buffer := bytes.NewBufferString(canon.DomainEndpointDelegation)
 	canon.Text(buffer, Schema)
 	canon.Text(buffer, delegation.Network.NetworkId)
 	canon.Text(buffer, delegation.Network.GenesisRootHash)

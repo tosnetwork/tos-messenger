@@ -168,7 +168,7 @@ func (p Policy) CanonicalBytes() ([]byte, error) {
 		keys = append(keys, stratum.Key())
 	}
 	sort.Strings(keys)
-	buffer := bytes.NewBufferString(policyDomain)
+	buffer := bytes.NewBufferString(canon.DomainReachabilityPolicy)
 	canon.Text(buffer, PolicySchema)
 	canon.Uint64(buffer, uint64(p.MinSamplesPerCell))
 	canon.Uint64(buffer, uint64(p.MinOperatorsPerCell))

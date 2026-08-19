@@ -2,6 +2,10 @@ package canon
 
 import (
 	"bytes"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -81,5 +85,75 @@ func TestIsZero(t *testing.T) {
 	}
 	if IsZero([]byte{0, 0, 1}) {
 		t.Fatal("expected a non-zero value to be detected")
+	}
+}
+
+func TestDomainSeparatorsAreUnique(t *testing.T) {
+	if len(Domains) == 0 {
+		t.Fatal("no domain separators are registered")
+	}
+	seen := make(map[string]struct{}, len(Domains))
+	for _, domain := range Domains {
+		if _, duplicate := seen[domain]; duplicate {
+			t.Fatalf("domain separator %q is used twice", domain)
+		}
+		seen[domain] = struct{}{}
+	}
+}
+
+func TestDomainSeparatorsAreWellFormed(t *testing.T) {
+	for _, domain := range Domains {
+		if !strings.HasPrefix(domain, "tos.messaging.") {
+			t.Fatalf("domain separator %q is outside the namespace", domain)
+		}
+		if !strings.HasSuffix(domain, "\x00") {
+			t.Fatalf("domain separator %q does not terminate", domain)
+		}
+		body := strings.TrimSuffix(domain, "\x00")
+		if !strings.Contains(body, ".v") {
+			t.Fatalf("domain separator %q carries no version", domain)
+		}
+		if strings.Count(domain, "\x00") != 1 {
+			t.Fatalf("domain separator %q has more than one terminator", domain)
+		}
+	}
+}
+
+// Every separator this repository actually uses must be registered. A package
+// that inlines its own string is invisible to the uniqueness check, which is
+// the whole reason the list exists.
+func TestEveryUsedSeparatorIsRegistered(t *testing.T) {
+	registered := make(map[string]struct{}, len(Domains))
+	for _, domain := range Domains {
+		registered[strings.TrimSuffix(domain, "\x00")] = struct{}{}
+	}
+	root := filepath.Join("..", "..")
+	pattern := regexp.MustCompile(`"(tos\.messaging\.[a-z0-9.-]+)\\x00"`)
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "domains.go") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, match := range pattern.FindAllStringSubmatch(string(content), -1) {
+			if _, known := registered[match[1]]; !known {
+				t.Errorf("%s uses unregistered domain separator %q", path, match[1])
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
 	}
 }

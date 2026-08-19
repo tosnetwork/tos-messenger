@@ -24,6 +24,10 @@ than silently forking two implementations.
 | Event kind to delegated class mapping | explicit table; an unrecognised kind has no class | `envelope.eventClasses` |
 | Event body bounds | content at most 128 KiB, 16 causal parents, 16 attachment references | `envelope` constants |
 | Durable store format | one JSON record per event in a private directory owned by one process, forward-only state machine | `pkg/eventlog` |
+| Failure taxonomy | four dispositions: permanent, transient, refresh-state, and await-approval, the last never retried on a timer | `pkg/fault` |
+| Peer visibility | a per-code decision; hidden codes all become `rejected`, and authentication, replay, and approval outcomes are deliberately indistinguishable | `fault.registry`, `fault.PeerCode` |
+| Retry schedule | transient doubles from 1s to a 5m cap over 8 attempts; refresh doubles from 5s to a 15m cap over 4; jitter is the caller's | `pkg/fault/retry.go` |
+| Domain separator registry | one list, with a test that scans the repository for unregistered separators | `canon.Domains` |
 | Study acceptance policy | content-addressed, and required to cover NAT, consumer ISP, carrier-grade NAT, mobile, two address families, two UDP-policy environments, a low-cost class, and a mobile endpoint | `reachability.Policy.Validate` |
 | Route decision rule | every required stratum viable direct → direct-first; none viable but all lifted by a proxy → tunnel-first; some viable → hybrid; otherwise relay-first | `reachability.decide` |
 | Operator identity | opaque `op_` prefix over a digest of a local operator name, so diversity is counted without collecting identity | `reachability.OperatorID` |

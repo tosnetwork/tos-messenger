@@ -32,10 +32,6 @@ const (
 	// PolicySchema is the strict acceptance-policy schema identifier.
 	PolicySchema = "tos.messaging.reachability-policy.v1"
 
-	trialDomain    = "tos.messaging.reachability-trial.v1\x00"
-	policyDomain   = "tos.messaging.reachability-policy.v1\x00"
-	operatorDomain = "tos.messaging.reachability-operator.v1\x00"
-
 	// MaxStrataPerPolicy bounds a predeclared stratum set.
 	MaxStrataPerPolicy = 128
 )
@@ -283,7 +279,7 @@ func (t Trial) CanonicalBytes() ([]byte, error) {
 	if err := t.Validate(); err != nil {
 		return nil, err
 	}
-	buffer := bytes.NewBufferString(trialDomain)
+	buffer := bytes.NewBufferString(canon.DomainReachabilityTrial)
 	canon.Text(buffer, TrialSchema)
 	canon.Text(buffer, t.Stratum.Key())
 	canon.Text(buffer, t.OperatorID)
@@ -413,7 +409,7 @@ func OperatorID(name string) (string, error) {
 	if trimmed == "" || len(trimmed) > 128 || trimmed != name {
 		return "", errors.New("invalid operator name")
 	}
-	buffer := bytes.NewBufferString(operatorDomain)
+	buffer := bytes.NewBufferString(canon.DomainReachabilityOperator)
 	canon.Text(buffer, trimmed)
 	digest := canon.Digest(buffer.Bytes())
 	return "op_" + digest[len("sha256:"):len("sha256:")+16], nil

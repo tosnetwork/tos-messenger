@@ -21,9 +21,6 @@ const (
 	// BundleSchema is the strict wire schema identifier.
 	BundleSchema = "tos.messaging.prekey-bundle.v1"
 
-	bundleDomain    = "tos.messaging.prekey-bundle.v1\x00"
-	bundleSetDomain = "tos.messaging.prekey-bundle-set.v1\x00"
-
 	// MaxMaterialBytes bounds one published prekey bundle's material.
 	MaxMaterialBytes = 4 << 10
 	// MaxBundleLifetimeSeconds bounds how long published material stays valid.
@@ -71,7 +68,7 @@ func BundleSigningBytes(bundle Bundle) ([]byte, error) {
 	if err := ValidateBundle(bundle, false); err != nil {
 		return nil, err
 	}
-	buffer := bytes.NewBufferString(bundleDomain)
+	buffer := bytes.NewBufferString(canon.DomainPrekeyBundle)
 	canon.Text(buffer, BundleSchema)
 	canon.Text(buffer, bundle.Network.NetworkId)
 	canon.Text(buffer, bundle.Network.GenesisRootHash)
@@ -124,7 +121,7 @@ func SetDigest(bundles []Bundle) (string, error) {
 		digests = append(digests, digest)
 	}
 	sort.Strings(digests)
-	buffer := bytes.NewBufferString(bundleSetDomain)
+	buffer := bytes.NewBufferString(canon.DomainPrekeyBundleSet)
 	canon.Uint32(buffer, uint32(len(digests)))
 	for _, digest := range digests {
 		canon.Text(buffer, digest)

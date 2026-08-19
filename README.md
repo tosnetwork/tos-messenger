@@ -28,6 +28,7 @@ decision:
 | `pkg/directory` | Signed Messaging Contact Descriptor, bounded DHT locator, and the discovery half of the resolution algorithm |
 | `pkg/envelope` | Outer Relay Envelope and inner typed Messaging Event, including content-addressed Event IDs |
 | `pkg/eventlog` | Single-writer durable claim and delivery-state journal |
+| `pkg/fault` | Typed failures, retry dispositions, and what a peer may be told |
 | `pkg/e2ee` | The contract a candidate encryption suite must satisfy, message bindings, and published prekey bundles |
 | `pkg/e2ee/conformance` | Refutes a candidate suite: ten properties a black-box run can disprove |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
@@ -78,6 +79,10 @@ Deliberately absent, with the reason:
   collected, and a study that misses its own minimums produces no decision.
 - A conformance run can only refute. Passing every check clears a floor; it
   does not approve a construction.
+- An error code returned to a stranger is an oracle, so peer visibility is a
+  property of the code and everything hidden collapses into one refusal.
+- Every domain separator is registered in one list, because a reused separator
+  is signature confusion rather than a merge conflict.
 
 ## Build and test
 
