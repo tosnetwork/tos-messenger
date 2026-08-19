@@ -25,6 +25,7 @@ import (
 	"regexp"
 
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
+	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
 
 const (
@@ -331,12 +332,17 @@ type Response struct {
 
 // WaitingAction is one decision the owner has not made yet.
 type WaitingAction struct {
-	ActionID    string         `json:"action_id"`
-	Effect      string         `json:"effect"`
-	Summary     string         `json:"summary"`
-	Reason      string         `json:"reason"`
-	Origins     []ActionOrigin `json:"origins,omitempty"`
-	AskedAtUnix uint64         `json:"asked_at_unix"`
+	ActionID string         `json:"action_id"`
+	Effect   string         `json:"effect"`
+	Summary  string         `json:"summary"`
+	Reason   string         `json:"reason"`
+	Origins  []ActionOrigin `json:"origins,omitempty"`
+	// Terms is the structured purchase, present for a spend. The owner renders
+	// the amount, asset, provider, and expiry from this rather than from the
+	// summary, and recomputes the action identifier from it to confirm the
+	// signature commits the purchase actually shown.
+	Terms       *negotiation.Terms `json:"terms,omitempty"`
+	AskedAtUnix uint64             `json:"asked_at_unix"`
 }
 
 // EncodeRequest returns one framed request.

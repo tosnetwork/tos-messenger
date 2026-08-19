@@ -5,7 +5,59 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
+
+func approvalTerms() *negotiation.Terms {
+	return &negotiation.Terms{
+		CapabilityID:           "cap_" + strings.Repeat("9", 64),
+		CapabilityVersion:      "1.0.0",
+		CapabilityClass:        "software.audit",
+		ProviderAgentID:        "agent_" + strings.Repeat("5", 64),
+		ManifestDigest:         "sha256:" + strings.Repeat("d", 64),
+		TransportBindingDigest: "sha256:" + strings.Repeat("e", 64),
+		Price: negotiation.Money{Asset: negotiation.Asset{
+			Workchain: 0, AccountID: strings.Repeat("a", 64),
+			MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
+			WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64), Decimals: 6,
+		}, Atomic: "100"},
+		EscrowTermsDigest:   "sha256:" + strings.Repeat("f", 64),
+		DisputePolicyDigest: "sha256:" + strings.Repeat("1", 64),
+		NotAfterUnix:        1_800_000_000 + 3600,
+	}
+}
+
+// A spend approval must carry the structured purchase, and it persists that
+// purchase along with the full provenance the action identifier commits, so the
+// owner is shown -- and signs over -- typed state, not the runtime's summary.
+func TestSpendApprovalPersistsStructuredPurchase(t *testing.T) {
+	journal := approvalJournal(t)
+	request := testRequest("a")
+	request.Effect = "spend"
+	if _, err := journal.RequestApproval(request); err == nil {
+		t.Fatal("a spend approval with no structured terms was accepted")
+	}
+
+	request.Terms = approvalTerms()
+	request.Origins[0].DeviceID = "dev_" + strings.Repeat("6", 64)
+	request.Origins[0].ReceivedAtUnix = 1_800_000_000
+	if _, err := journal.RequestApproval(request); err != nil {
+		t.Fatalf("a complete spend approval was refused: %v", err)
+	}
+	stored, found, err := journal.LookupApproval(request.ActionID)
+	if err != nil || !found {
+		t.Fatalf("lookup: found=%v err=%v", found, err)
+	}
+	if stored.Terms == nil || stored.Terms.Price.Atomic != "100" ||
+		stored.Terms.ProviderAgentID != request.Terms.ProviderAgentID {
+		t.Fatalf("the structured purchase was not persisted: %+v", stored.Terms)
+	}
+	if len(stored.Origins) != 1 || stored.Origins[0].DeviceID != request.Origins[0].DeviceID ||
+		stored.Origins[0].ReceivedAtUnix != 1_800_000_000 {
+		t.Fatalf("the full provenance was not persisted: %+v", stored.Origins)
+	}
+}
 
 func approvalJournal(t *testing.T) *Journal {
 	t.Helper()

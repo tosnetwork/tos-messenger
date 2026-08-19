@@ -402,7 +402,7 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 			approval, err := s.config.Journal.RecordAutoAuthorization(eventlog.ApprovalRequest{
 				ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
 				Reason:  "allowed by policy, inside the owner's mandate",
-				Origins: toApprovalOrigins(decision.Provenance),
+				Origins: toApprovalOrigins(decision.Provenance), Terms: action.Terms,
 				AskedAt: uint64(now.Unix()),
 			})
 			if err != nil {
@@ -418,7 +418,7 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 	approval, err := s.config.Journal.RequestApproval(eventlog.ApprovalRequest{
 		ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
 		Reason: decision.Reason, Origins: toApprovalOrigins(decision.Provenance),
-		AskedAt: uint64(now.Unix()),
+		Terms: action.Terms, AskedAt: uint64(now.Unix()),
 	})
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
@@ -469,10 +469,19 @@ func (s *Server) pendingActions(request Request, now time.Time) Response {
 	}
 	actions := make([]WaitingAction, 0, len(waiting))
 	for _, approval := range waiting {
+		// The owner is never shown -- and must never sign -- an action whose
+		// stored structured fields do not reproduce its identifier. A mismatch
+		// means the summary and the identifier disagree about what is being
+		// approved, which is exactly the substitution this record exists to
+		// prevent, so it is surfaced as a fault rather than presented.
+		if !approvalReproducesID(approval) {
+			return refuse(fault.CodeInternal,
+				errors.New("a pending approval's stored action does not reproduce its identifier"))
+		}
 		actions = append(actions, WaitingAction{
 			ActionID: approval.ActionID, Effect: approval.Effect, Summary: approval.Summary,
 			Reason: approval.Reason, Origins: fromApprovalOrigins(approval.Origins),
-			AskedAtUnix: approval.AskedAtUnix,
+			Terms: approval.Terms, AskedAtUnix: approval.AskedAtUnix,
 		})
 	}
 	return Response{Schema: ResponseSchema, OK: true, Actions: actions}
@@ -516,8 +525,9 @@ func toApprovalOrigins(origins []firewall.Origin) []eventlog.ApprovalOrigin {
 	stored := make([]eventlog.ApprovalOrigin, 0, len(origins))
 	for _, origin := range origins {
 		stored = append(stored, eventlog.ApprovalOrigin{
-			AgentID: origin.AgentID, EndpointID: origin.EndpointID, EventID: origin.EventID,
-			ConversationID: origin.ConversationID, Kind: origin.Kind,
+			AgentID: origin.AgentID, EndpointID: origin.EndpointID, DeviceID: origin.DeviceID,
+			EventID: origin.EventID, ConversationID: origin.ConversationID, Kind: origin.Kind,
+			ReceivedAtUnix: origin.ReceivedAtUnix,
 		})
 	}
 	return stored
@@ -527,11 +537,45 @@ func fromApprovalOrigins(origins []eventlog.ApprovalOrigin) []ActionOrigin {
 	shown := make([]ActionOrigin, 0, len(origins))
 	for _, origin := range origins {
 		shown = append(shown, ActionOrigin{
-			AgentID: origin.AgentID, EndpointID: origin.EndpointID, EventID: origin.EventID,
-			ConversationID: origin.ConversationID, Kind: origin.Kind,
+			AgentID: origin.AgentID, EndpointID: origin.EndpointID, DeviceID: origin.DeviceID,
+			EventID: origin.EventID, ConversationID: origin.ConversationID, Kind: origin.Kind,
+			ReceivedAtUnix: origin.ReceivedAtUnix,
 		})
 	}
 	return shown
+}
+
+// firewallOrigins reconstructs the provenance in the form the action identifier
+// is derived from, so a stored approval can be re-identified from what it holds.
+func firewallOrigins(origins []eventlog.ApprovalOrigin) []firewall.Origin {
+	rebuilt := make([]firewall.Origin, 0, len(origins))
+	for _, origin := range origins {
+		rebuilt = append(rebuilt, firewall.Origin{
+			AgentID: origin.AgentID, EndpointID: origin.EndpointID, DeviceID: origin.DeviceID,
+			EventID: origin.EventID, ConversationID: origin.ConversationID, Kind: origin.Kind,
+			ReceivedAtUnix: origin.ReceivedAtUnix,
+		})
+	}
+	return rebuilt
+}
+
+// approvalReproducesID recomputes the action identifier from the structured
+// fields a stored approval holds and reports whether it matches the identifier
+// on record. It is the daemon's own check that what the owner is shown -- and
+// what a signature would commit to -- is the action the identifier names, not a
+// gentler description substituted for a harsher one.
+func approvalReproducesID(approval eventlog.Approval) bool {
+	action := firewall.Action{
+		Effect:      firewall.Effect(approval.Effect),
+		Summary:     approval.Summary,
+		DerivedFrom: firewallOrigins(approval.Origins),
+		Terms:       approval.Terms,
+	}
+	recomputed, err := firewall.ActionID(action)
+	if err != nil {
+		return false
+	}
+	return recomputed == approval.ActionID
 }
 
 func (s *Server) placeMandate(request Request, now time.Time) Response {

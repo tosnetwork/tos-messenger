@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/ids"
+	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
 
 const (
@@ -66,11 +67,18 @@ var ErrApprovalNotGranted = errors.New("this action is not authorised")
 // request would be showing the owner a different question than the one that
 // was asked.
 type ApprovalOrigin struct {
-	AgentID        string `json:"agent_id"`
-	EndpointID     string `json:"messaging_endpoint_id"`
+	AgentID    string `json:"agent_id"`
+	EndpointID string `json:"messaging_endpoint_id"`
+	// DeviceID and ReceivedAtUnix are part of the provenance the action
+	// identifier commits, so they are stored: without them the owner cannot
+	// reproduce the identifier they are signing, and a record that dropped them
+	// would show a different provenance than the one the identifier was derived
+	// from.
+	DeviceID       string `json:"device_id"`
 	EventID        string `json:"event_id"`
 	ConversationID string `json:"conversation_id"`
 	Kind           string `json:"event_kind"`
+	ReceivedAtUnix uint64 `json:"received_at_unix"`
 }
 
 // ApprovalRequest is what the runtime asks the owner to decide.
@@ -83,22 +91,28 @@ type ApprovalRequest struct {
 	Summary  string
 	Reason   string
 	Origins  []ApprovalOrigin
-	AskedAt  uint64
+	// Terms are the exact structured purchase, present for a spend. They are
+	// persisted so the owner is shown the real amount, asset, provider, and
+	// expiry from typed state rather than the runtime's summary, and so the
+	// identifier can be recomputed and checked against what is being signed.
+	Terms   *negotiation.Terms
+	AskedAt uint64
 }
 
 // Approval is the durable state of one request.
 type Approval struct {
-	Schema        string           `json:"schema"`
-	ActionID      string           `json:"action_id"`
-	Effect        string           `json:"effect"`
-	Summary       string           `json:"summary"`
-	Reason        string           `json:"reason"`
-	Origins       []ApprovalOrigin `json:"origins,omitempty"`
-	State         ApprovalState    `json:"state"`
-	AskedAtUnix   uint64           `json:"asked_at_unix"`
-	DecidedAtUnix uint64           `json:"decided_at_unix,omitempty"`
-	SpentAtUnix   uint64           `json:"spent_at_unix,omitempty"`
-	DenialReason  string           `json:"denial_reason,omitempty"`
+	Schema        string             `json:"schema"`
+	ActionID      string             `json:"action_id"`
+	Effect        string             `json:"effect"`
+	Summary       string             `json:"summary"`
+	Reason        string             `json:"reason"`
+	Origins       []ApprovalOrigin   `json:"origins,omitempty"`
+	Terms         *negotiation.Terms `json:"terms,omitempty"`
+	State         ApprovalState      `json:"state"`
+	AskedAtUnix   uint64             `json:"asked_at_unix"`
+	DecidedAtUnix uint64             `json:"decided_at_unix,omitempty"`
+	SpentAtUnix   uint64             `json:"spent_at_unix,omitempty"`
+	DenialReason  string             `json:"denial_reason,omitempty"`
 }
 
 // RequestApproval durably records that an action is waiting for a person.
@@ -134,7 +148,7 @@ func (j *Journal) RequestApproval(request ApprovalRequest) (Approval, error) {
 	approval := Approval{
 		Schema: ApprovalSchema, ActionID: request.ActionID, Effect: request.Effect,
 		Summary: request.Summary, Reason: request.Reason, Origins: request.Origins,
-		State: ApprovalPending, AskedAtUnix: request.AskedAt,
+		Terms: request.Terms, State: ApprovalPending, AskedAtUnix: request.AskedAt,
 	}
 	return j.commitApproval(approval)
 }
@@ -337,8 +351,26 @@ func validateApprovalRequest(request ApprovalRequest) error {
 			!ids.Event.MatchString(origin.EventID) || !ids.Conversation.MatchString(origin.ConversationID) {
 			return errors.New("an approval request cites content it cannot identify")
 		}
+		// The device is part of the provenance the action identifier commits, so
+		// it has to be a real device identifier, not an empty one that would make
+		// the stored provenance disagree with the identifier.
+		if origin.DeviceID != "" && !ids.Device.MatchString(origin.DeviceID) {
+			return errors.New("an approval request cites content from an unidentifiable device")
+		}
 		if origin.Kind == "" || len(origin.Kind) > 128 {
 			return errors.New("an approval request cites content with no kind")
+		}
+	}
+	// A spend is a purchase, and a purchase the owner cannot see in structured
+	// form is one they cannot verify. The terms are required for a spend and are
+	// validated whenever they are present, so a stored purchase is always a
+	// complete one.
+	if request.Effect == "spend" && request.Terms == nil {
+		return errors.New("a spend approval must carry the structured purchase it is for")
+	}
+	if request.Terms != nil {
+		if err := request.Terms.Validate(); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -450,7 +482,7 @@ func (j *Journal) RecordAutoAuthorization(request ApprovalRequest) (Approval, er
 	approval := Approval{
 		Schema: ApprovalSchema, ActionID: request.ActionID, Effect: request.Effect,
 		Summary: request.Summary, Reason: request.Reason, Origins: request.Origins,
-		State: ApprovalGranted, AskedAtUnix: request.AskedAt, DecidedAtUnix: request.AskedAt,
+		Terms: request.Terms, State: ApprovalGranted, AskedAtUnix: request.AskedAt, DecidedAtUnix: request.AskedAt,
 	}
 	return j.commitApproval(approval)
 }
