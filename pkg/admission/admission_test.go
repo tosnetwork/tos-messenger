@@ -19,6 +19,7 @@ import (
 const (
 	baseUnix = uint64(1_800_000_000)
 	senderID = "agent_" + "2222222222222222222222222222222222222222222222222222222222222222"
+	localID  = "agent_" + "7777777777777777777777777777777777777777777777777777777777777777"
 	deviceID = "dev_" + "4444444444444444444444444444444444444444444444444444444444444444"
 	convoID  = "conv_" + "1111111111111111111111111111111111111111111111111111111111111111"
 )
@@ -78,7 +79,7 @@ func testDelegation(t *testing.T) (identity.Delegation, []byte) {
 		EndpointID:                    endpointID,
 		IdentityPublicKey:             public,
 		AllowedProtocolVersions:       []uint32{1},
-		AllowedEventClasses:           []string{"text"},
+		AllowedOutboundEventClasses:   []string{"text"},
 		NotBeforeUnix:                 baseUnix,
 		ExpiresAtUnix:                 baseUnix + 86_400,
 		MaximumSessionLifetimeSeconds: 3600,
@@ -114,6 +115,35 @@ func testEvent(t *testing.T, delegation identity.Delegation, mutate func(*envelo
 	return completed
 }
 
+// testLocalDelegation is the recipient's own delegation: the one that says
+// which inbox policy this endpoint publishes.
+func testLocalDelegation(t *testing.T, policy ContactPolicy) identity.Delegation {
+	t.Helper()
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x77}, ed25519.SeedSize))
+	public, ok := key.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected public key type")
+	}
+	network := testNetwork()
+	endpointID, err := identity.DeriveEndpointID(network, localID, public)
+	if err != nil {
+		t.Fatalf("derive endpoint: %v", err)
+	}
+	return identity.Delegation{
+		Network:                       network,
+		AgentID:                       localID,
+		EndpointID:                    endpointID,
+		IdentityPublicKey:             public,
+		AllowedProtocolVersions:       []uint32{1},
+		AllowedOutboundEventClasses:   []string{"text"},
+		NotBeforeUnix:                 baseUnix,
+		ExpiresAtUnix:                 baseUnix + 86_400,
+		MaximumSessionLifetimeSeconds: 3600,
+		ContactDescriptorPolicyDigest: "sha256:" + strings.Repeat("3d", 32),
+		InboxAdmissionPolicyDigest:    policy.Digest(),
+	}
+}
+
 func testGate(t *testing.T, policy ContactPolicy) (*Gate, *eventlog.Journal, identity.Delegation, []byte) {
 	t.Helper()
 	delegation, encoded := testDelegation(t)
@@ -137,9 +167,10 @@ func testGate(t *testing.T, policy ContactPolicy) (*Gate, *eventlog.Journal, ide
 				DelegationDigests: []string{digest},
 			}),
 		}},
-		Journal:     journal,
-		Policy:      policy,
-		InstallSalt: bytes.Repeat([]byte{0x5a}, MinInstallSaltBytes),
+		Journal:         journal,
+		Policy:          policy,
+		LocalDelegation: testLocalDelegation(t, policy),
+		InstallSalt:     bytes.Repeat([]byte{0x5a}, MinInstallSaltBytes),
 	})
 	if err != nil {
 		t.Fatalf("gate: %v", err)
@@ -373,6 +404,7 @@ func TestContentAboveThePublishedBoundIsRefused(t *testing.T) {
 		}},
 		Journal:         journal,
 		Policy:          OpenInbox{},
+		LocalDelegation: testLocalDelegation(t, OpenInbox{}),
 		MaxContentBytes: 16,
 		InstallSalt:     bytes.Repeat([]byte{0x5a}, MinInstallSaltBytes),
 	})
@@ -502,16 +534,20 @@ func TestGateRequiresEveryDependency(t *testing.T) {
 	}}
 	complete := Config{
 		Network: testNetwork(), Chain: testChain(), Resolver: resolver, Journal: journal,
-		Policy: OpenInbox{}, InstallSalt: bytes.Repeat([]byte{1}, MinInstallSaltBytes),
+		Policy: OpenInbox{}, LocalDelegation: testLocalDelegation(t, OpenInbox{}),
+		InstallSalt: bytes.Repeat([]byte{1}, MinInstallSaltBytes),
 	}
 	cases := map[string]func(*Config){
-		"no network":  func(c *Config) { c.Network = nil },
-		"bad network": func(c *Config) { c.Network = &nativev1.NetworkDomain{NetworkId: "x"} },
-		"no resolver": func(c *Config) { c.Resolver = nil },
-		"no journal":  func(c *Config) { c.Journal = nil },
-		"no policy":   func(c *Config) { c.Policy = nil },
-		"no salt":     func(c *Config) { c.InstallSalt = nil },
-		"short salt":  func(c *Config) { c.InstallSalt = bytes.Repeat([]byte{1}, MinInstallSaltBytes-1) },
+		"no network":               func(c *Config) { c.Network = nil },
+		"bad network":              func(c *Config) { c.Network = &nativev1.NetworkDomain{NetworkId: "x"} },
+		"no resolver":              func(c *Config) { c.Resolver = nil },
+		"no journal":               func(c *Config) { c.Journal = nil },
+		"no policy":                func(c *Config) { c.Policy = nil },
+		"no salt":                  func(c *Config) { c.InstallSalt = nil },
+		"short salt":               func(c *Config) { c.InstallSalt = bytes.Repeat([]byte{1}, MinInstallSaltBytes-1) },
+		"no delegation of its own": func(c *Config) { c.LocalDelegation = identity.Delegation{} },
+		// The published digest and the policy actually in memory disagree.
+		"policy this endpoint never published": func(c *Config) { c.Policy = AllowList{HoldUnknown: true} },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -593,6 +629,8 @@ func TestPolicySeesOnlySenderAndKind(t *testing.T) {
 type policyFunc func(string, string) Admission
 
 func (p policyFunc) Admits(sender, kind string) Admission { return p(sender, kind) }
+
+func (p policyFunc) Digest() string { return policyDigest("test-policy") }
 
 // Acceptance means durably queued, not delivered. The event has to be
 // recoverable from the journal alone, because the process that admitted it may
@@ -719,5 +757,54 @@ func TestDeniedEventIsNeverOffered(t *testing.T) {
 	}
 	if _, err := journal.AdmitEvent(event.EventID, timeAt(baseUnix+64)); err == nil {
 		t.Fatal("a denied event was admitted afterwards")
+	}
+}
+
+// A published inbox policy digest that nothing enforces is a claim. An
+// installation must not be able to advertise one policy and run another.
+func TestPolicyMustBeTheOnePublished(t *testing.T) {
+	published := AllowList{Known: map[string]struct{}{senderID: {}}, HoldUnknown: true}
+	running := AllowList{Known: map[string]struct{}{senderID: {}}}
+	if published.Digest() == running.Digest() {
+		t.Fatal("two policies with different answers for an unknown sender share a digest")
+	}
+
+	journal, err := eventlog.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("journal: %v", err)
+	}
+	defer journal.Close()
+	config := Config{
+		Network: testNetwork(), Chain: testChain(), Journal: journal,
+		Resolver:        stubResolver{states: map[string]*nativev1.NativeStateV1{}},
+		Policy:          running,
+		LocalDelegation: testLocalDelegation(t, published),
+		InstallSalt:     bytes.Repeat([]byte{1}, MinInstallSaltBytes),
+	}
+	if _, err := New(config); err == nil {
+		t.Fatal("a gate ran a policy its endpoint never published")
+	}
+	config.Policy = published
+	if _, err := New(config); err != nil {
+		t.Fatalf("the published policy was refused: %v", err)
+	}
+}
+
+// The digest commits the rule, not the roster. Adding a contact must not force
+// the endpoint to republish its descriptor, because the pattern of those
+// republications would leak the roster the policy keeps private.
+func TestPolicyDigestDoesNotTrackTheRoster(t *testing.T) {
+	empty := AllowList{HoldUnknown: true}
+	populated := AllowList{
+		Known:       map[string]struct{}{senderID: {}, localID: {}},
+		Blocked:     map[string]struct{}{deviceID: {}},
+		HoldUnknown: true,
+	}
+	if empty.Digest() != populated.Digest() {
+		t.Fatal("the published policy digest changed when a contact was added")
+	}
+	open := OpenInbox{}
+	if open.Digest() == empty.Digest() {
+		t.Fatal("an open inbox and an allow list publish the same digest")
 	}
 }

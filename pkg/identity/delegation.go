@@ -65,13 +65,17 @@ var (
 // of the canonical digest; none of them may be changed without a new on-chain
 // commitment.
 type Delegation struct {
-	Network                       *nativev1.NetworkDomain
-	AgentID                       string
-	EndpointID                    string
-	IdentityPublicKey             ed25519.PublicKey
-	ADNLID                        string
-	AllowedProtocolVersions       []uint32
-	AllowedEventClasses           []string
+	Network                 *nativev1.NetworkDomain
+	AgentID                 string
+	EndpointID              string
+	IdentityPublicKey       ed25519.PublicKey
+	ADNLID                  string
+	AllowedProtocolVersions []uint32
+	// AllowedOutboundEventClasses is what this endpoint may send under the
+	// Agent's authority. It is not an inbox filter: what a recipient will
+	// accept is its own inbox policy, and reading this field as a receive
+	// permission would put the sender in charge of the recipient's firewall.
+	AllowedOutboundEventClasses   []string
 	NotBeforeUnix                 uint64
 	ExpiresAtUnix                 uint64
 	MaximumSessionLifetimeSeconds uint64
@@ -89,7 +93,7 @@ type wireDelegation struct {
 	IdentityPublicKeyHex          string   `json:"messaging_identity_public_key_hex"`
 	ADNLID                        string   `json:"adnl_id,omitempty"`
 	AllowedProtocolVersions       []uint32 `json:"allowed_protocol_versions"`
-	AllowedEventClasses           []string `json:"allowed_event_classes"`
+	AllowedOutboundEventClasses   []string `json:"allowed_outbound_event_classes"`
 	NotBeforeUnix                 uint64   `json:"not_before_unix"`
 	ExpiresAtUnix                 uint64   `json:"expires_at_unix"`
 	MaximumSessionLifetimeSeconds uint64   `json:"maximum_session_lifetime_seconds"`
@@ -142,8 +146,8 @@ func CanonicalBytes(delegation Delegation) ([]byte, error) {
 	for _, version := range delegation.AllowedProtocolVersions {
 		canon.Uint32(buffer, version)
 	}
-	canon.Uint32(buffer, uint32(len(delegation.AllowedEventClasses)))
-	for _, class := range delegation.AllowedEventClasses {
+	canon.Uint32(buffer, uint32(len(delegation.AllowedOutboundEventClasses)))
+	for _, class := range delegation.AllowedOutboundEventClasses {
 		canon.Text(buffer, class)
 	}
 	canon.Uint64(buffer, delegation.NotBeforeUnix)
@@ -178,7 +182,7 @@ func EncodeJSON(delegation Delegation) ([]byte, error) {
 		IdentityPublicKeyHex:          hex.EncodeToString(delegation.IdentityPublicKey),
 		ADNLID:                        delegation.ADNLID,
 		AllowedProtocolVersions:       delegation.AllowedProtocolVersions,
-		AllowedEventClasses:           delegation.AllowedEventClasses,
+		AllowedOutboundEventClasses:   delegation.AllowedOutboundEventClasses,
 		NotBeforeUnix:                 delegation.NotBeforeUnix,
 		ExpiresAtUnix:                 delegation.ExpiresAtUnix,
 		MaximumSessionLifetimeSeconds: delegation.MaximumSessionLifetimeSeconds,
@@ -219,7 +223,7 @@ func DecodeJSON(raw []byte) (Delegation, error) {
 		IdentityPublicKey:             ed25519.PublicKey(key),
 		ADNLID:                        value.ADNLID,
 		AllowedProtocolVersions:       value.AllowedProtocolVersions,
-		AllowedEventClasses:           value.AllowedEventClasses,
+		AllowedOutboundEventClasses:   value.AllowedOutboundEventClasses,
 		NotBeforeUnix:                 value.NotBeforeUnix,
 		ExpiresAtUnix:                 value.ExpiresAtUnix,
 		MaximumSessionLifetimeSeconds: value.MaximumSessionLifetimeSeconds,
@@ -316,7 +320,7 @@ func AllowsEventClass(delegation Delegation, class string) bool {
 	if !eventClassPattern.MatchString(class) {
 		return false
 	}
-	for _, allowed := range delegation.AllowedEventClasses {
+	for _, allowed := range delegation.AllowedOutboundEventClasses {
 		if allowed == class {
 			return true
 		}
@@ -367,7 +371,7 @@ func Validate(delegation Delegation) error {
 	if err := validateVersions(delegation.AllowedProtocolVersions); err != nil {
 		return err
 	}
-	if err := validateEventClasses(delegation.AllowedEventClasses); err != nil {
+	if err := validateEventClasses(delegation.AllowedOutboundEventClasses); err != nil {
 		return err
 	}
 	if err := validateWindowFields(delegation); err != nil {

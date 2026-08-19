@@ -110,10 +110,15 @@ type Config struct {
 	Network *nativev1.NetworkDomain
 	// Chain is what this install accepts as finalized state: which registry
 	// contract produced it, and how far back a checkpoint may be.
-	Chain               identity.ChainPolicy
-	Resolver            identity.AgentResolver
-	Journal             *eventlog.Journal
-	Policy              ContactPolicy
+	Chain    identity.ChainPolicy
+	Resolver identity.AgentResolver
+	Journal  *eventlog.Journal
+	Policy   ContactPolicy
+	// LocalDelegation is this installation's own published delegation. It is
+	// here for one reason: it names the inbox policy digest this endpoint told
+	// the network it enforces, and the gate refuses to run unless the policy it
+	// was actually given answers to that digest.
+	LocalDelegation     identity.Delegation
 	MaxContentBytes     int
 	MaxClockSkewSeconds uint64
 	InstallSalt         []byte
@@ -144,6 +149,15 @@ func New(config Config) (*Gate, error) {
 	}
 	if config.Policy == nil {
 		return nil, errors.New("admission requires an inbox policy")
+	}
+	// A published policy digest that nothing checks is a claim, not a
+	// commitment. An installation that advertises one policy and enforces
+	// another must not start.
+	if err := identity.Validate(config.LocalDelegation); err != nil {
+		return nil, errors.New("admission requires this endpoint's own delegation: " + err.Error())
+	}
+	if config.Policy.Digest() != config.LocalDelegation.InboxAdmissionPolicyDigest {
+		return nil, errors.New("the inbox policy in use is not the one this endpoint published")
 	}
 	if len(config.InstallSalt) < MinInstallSaltBytes {
 		return nil, errors.New("admission requires a per-install salt")

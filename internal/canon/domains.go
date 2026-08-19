@@ -15,6 +15,9 @@ const (
 	DomainEndpointDelegation = "tos.messaging.endpoint-delegation.v1\x00"
 	// DomainEndpointID namespaces the endpoint identifier derivation.
 	DomainEndpointID = "tos.messaging.endpoint-id.v1\x00"
+	// DomainInboxPolicy namespaces the published identity of an inbox
+	// admission policy.
+	DomainInboxPolicy = "tos.messaging.inbox-policy.v1\x00"
 	// DomainDescriptorPolicy namespaces what an Agent commits its endpoint may
 	// advertise.
 	DomainDescriptorPolicy = "tos.messaging.descriptor-policy.v1\x00"

@@ -98,7 +98,7 @@ func testDelegation(t *testing.T, key ed25519.PrivateKey) identity.Delegation {
 		IdentityPublicKey:             public,
 		ADNLID:                        "adnl:" + strings.Repeat("2e", 32),
 		AllowedProtocolVersions:       []uint32{1, 2},
-		AllowedEventClasses:           []string{"agent.task", "text"},
+		AllowedOutboundEventClasses:   []string{"agent.task", "text"},
 		NotBeforeUnix:                 baseUnix,
 		ExpiresAtUnix:                 baseUnix + 86_400,
 		MaximumSessionLifetimeSeconds: 3600,

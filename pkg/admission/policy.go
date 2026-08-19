@@ -15,8 +15,10 @@
 package admission
 
 import (
+	"bytes"
 	"errors"
 
+	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 )
 
@@ -50,6 +52,31 @@ type ContactPolicy interface {
 	// else: a policy that could read the content would be making a content
 	// judgement this layer is not entitled to make.
 	Admits(senderAgentID string, kind string) Admission
+
+	// Digest is the published identity of this policy. The recipient commits
+	// it in its delegation and republishes it in its descriptor, and the gate
+	// refuses to run if the policy in memory does not answer to the digest the
+	// network was told about. Without that check the published digest is a
+	// decoration: an installation could advertise one policy and enforce
+	// another, and nothing would notice.
+	//
+	// It commits the rule a sender has to satisfy, not the recipient's roster.
+	// A digest that changed whenever a contact was added would force the
+	// descriptor to be republished on every change, and the pattern of those
+	// republications would leak the roster the policy exists to keep private.
+	Digest() string
+}
+
+// policyDigest derives the published identity of a policy from its rule and
+// the parameters a sender would have to satisfy.
+func policyDigest(rule string, parameters ...string) string {
+	buffer := bytes.NewBufferString(canon.DomainInboxPolicy)
+	canon.Text(buffer, rule)
+	canon.Uint64(buffer, uint64(len(parameters)))
+	for _, parameter := range parameters {
+		canon.Text(buffer, parameter)
+	}
+	return canon.Digest(buffer.Bytes())
 }
 
 // OpenInbox admits every sender.
@@ -61,6 +88,9 @@ type OpenInbox struct{}
 
 // Admits implements ContactPolicy.
 func (OpenInbox) Admits(string, string) Admission { return AdmitAllow }
+
+// Digest implements ContactPolicy.
+func (OpenInbox) Digest() string { return policyDigest("open-inbox") }
 
 // AllowList admits known contacts, holds unknown senders for an owner
 // decision, and denies anyone explicitly blocked.
@@ -89,6 +119,19 @@ func (a AllowList) Admits(senderAgentID string, _ string) Admission {
 		return AdmitHoldForApproval
 	}
 	return AdmitRequireAdmission
+}
+
+// Digest implements ContactPolicy.
+//
+// The entries are deliberately not committed. What a sender must satisfy is
+// "be known to this recipient", and that rule does not change when the roster
+// does.
+func (a AllowList) Digest() string {
+	unknown := "require-admission"
+	if a.HoldUnknown {
+		unknown = "hold-for-approval"
+	}
+	return policyDigest("allow-list", unknown)
 }
 
 // codeFor maps a policy answer to its failure code.

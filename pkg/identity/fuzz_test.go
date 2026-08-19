@@ -17,7 +17,7 @@ func FuzzDecodeJSON(f *testing.F) {
 		AgentID:                       "agent_" + repeat("c", 64),
 		IdentityPublicKey:             make([]byte, 32),
 		AllowedProtocolVersions:       []uint32{1},
-		AllowedEventClasses:           []string{"text"},
+		AllowedOutboundEventClasses:   []string{"text"},
 		NotBeforeUnix:                 1_800_000_000,
 		ExpiresAtUnix:                 1_800_086_400,
 		MaximumSessionLifetimeSeconds: 3600,
