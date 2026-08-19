@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -30,10 +31,10 @@ func nextSession() string {
 	return fmt.Sprintf("ses_%012d", sessionCounter)
 }
 
-func stratum(carrier Carrier, class EndpointClass) Stratum {
-	return Stratum{
+func mapped(carrier Carrier, class EndpointClass) EndpointStratum {
+	return EndpointStratum{
 		Family:        FamilyIPv4,
-		Reachability:  NeitherPublic,
+		Reachability:  BehindNAT,
 		NATBehavior:   NATAddressPortDependent,
 		Carrier:       carrier,
 		UDPPolicy:     UDPAllowed,
@@ -43,10 +44,10 @@ func stratum(carrier Carrier, class EndpointClass) Stratum {
 	}
 }
 
-func publicStratum() Stratum {
-	return Stratum{
-		Family:        FamilyDual,
-		Reachability:  BothPublic,
+func publicEndpoint() EndpointStratum {
+	return EndpointStratum{
+		Family:        FamilyIPv4,
+		Reachability:  PublicAddress,
 		NATBehavior:   NATNone,
 		Carrier:       CarrierDatacenter,
 		UDPPolicy:     UDPAllowed,
@@ -54,6 +55,39 @@ func publicStratum() Stratum {
 		EndpointClass: ClassServer,
 		Assistance:    AssistanceNone,
 	}
+}
+
+// A real scenario is asymmetric: the two ends are in different situations, and
+// the model has to be able to say so.
+func scenario(carrier Carrier, class EndpointClass) Scenario {
+	return Scenario{Initiator: mapped(carrier, class), Responder: publicEndpoint()}
+}
+
+func publicScenario() Scenario {
+	responder := publicEndpoint()
+	responder.Carrier = CarrierConsumerISP
+	return Scenario{Initiator: publicEndpoint(), Responder: responder}
+}
+
+// mobileScenario is the study's only source of IPv6 and of a rate-limited UDP
+// path, so each coverage rule the policy enforces has exactly one place it can
+// be removed from.
+func mobileScenario() Scenario { return mobileScenarioOn(FamilyIPv6) }
+
+func mobileScenarioOn(family AddressFamily) Scenario {
+	phone := EndpointStratum{
+		Family:        family,
+		Reachability:  BehindNAT,
+		NATBehavior:   NATSymmetric,
+		Carrier:       CarrierMobile,
+		UDPPolicy:     UDPRateLimited,
+		Mobility:      MobilityWiFiToMobile,
+		EndpointClass: ClassMobile,
+		Assistance:    AssistanceNone,
+	}
+	responder := mapped(CarrierConsumerISP, ClassDesktop)
+	responder.Family = family
+	return Scenario{Initiator: phone, Responder: responder}
 }
 
 // Every constructed trial is attested and signed the way a real one would be,
@@ -83,18 +117,41 @@ func endpointKeyFor(operator string, role Role) ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(seed[:])
 }
 
-func attest(session string, role Role, peerPublic string) Observation {
+// attest names the endpoint it is about, so a copied attestation cannot be
+// worn by another key.
+func attest(session string, role Role, operator, peerPublic string) Observation {
+	public, ok := endpointKeyFor(operator, role).Public().(ed25519.PublicKey)
+	if !ok {
+		panic("unexpected key type")
+	}
 	observation, err := SignObservation(Observation{
-		SessionID:  session,
-		Role:       string(role),
-		Observed:   "203.0.113.7:41234",
-		PeerPublic: peerPublic,
-		AtUnix:     1_800_000_000,
+		SessionID:            session,
+		Role:                 string(role),
+		EndpointPublicKeyHex: hex.EncodeToString(public),
+		Probe:                string(ProbeUDP),
+		Observed:             "203.0.113.7:41234",
+		PeerPublic:           peerPublic,
+		AtUnix:               1_800_000_000,
 	}, testCoordinatorKey())
 	if err != nil {
 		panic(err)
 	}
 	return observation
+}
+
+// switchProbe moves a trial to another probe. The attestation names the probe,
+// so it has to be reissued: changing the probe alone would leave an
+// attestation about a different measurement, which is what the binding is for.
+func switchProbe(trial Trial, probe ProbeKind) Trial {
+	trial.Probe = probe
+	trial.Observation = attest(trial.SessionID, trial.Role, trial.OperatorID, trial.Observation.PeerPublic)
+	trial.Observation.Probe = string(probe)
+	signed, err := SignObservation(trial.Observation, testCoordinatorKey())
+	if err != nil {
+		panic(err)
+	}
+	trial.Observation = signed
+	return resign(trial)
 }
 
 // resign re-signs a trial a test mutated. Mutating a signed trial invalidates
@@ -107,7 +164,16 @@ func resign(trial Trial) Trial {
 	return signed
 }
 
-func rawTrial(s Stratum, session string, role Role, operator string,
+// localOf is the side of a scenario one role reports. Each endpoint describes
+// only itself, which is the whole point of the pair model.
+func localOf(s Scenario, role Role) EndpointStratum {
+	if role == RoleB {
+		return s.Responder
+	}
+	return s.Initiator
+}
+
+func rawTrial(s Scenario, session string, role Role, operator string,
 	outcome Outcome, failure FailureClass, millis uint64) Trial {
 	pair, err := PairID(session)
 	if err != nil {
@@ -118,7 +184,7 @@ func rawTrial(s Stratum, session string, role Role, operator string,
 		local, peer = commitB, commitA
 	}
 	return Trial{
-		Stratum:         s,
+		Local:           localOf(s, role),
 		PairID:          pair,
 		SiteID:          siteFor(operator),
 		OperatorID:      operator,
@@ -136,10 +202,10 @@ func rawTrial(s Stratum, session string, role Role, operator string,
 
 func complete(trial Trial) Trial {
 	peerPublic := "no"
-	if trial.Stratum.Reachability == BothPublic || trial.Stratum.Reachability == OnePublic {
+	if trial.Local.Reachability == PublicAddress {
 		peerPublic = "yes"
 	}
-	trial.Observation = attest(trial.SessionID, trial.Role, peerPublic)
+	trial.Observation = attest(trial.SessionID, trial.Role, trial.OperatorID, peerPublic)
 	signed, err := SignTrial(trial, endpointKeyFor(trial.OperatorID, trial.Role))
 	if err != nil {
 		panic(err)
@@ -150,7 +216,7 @@ func complete(trial Trial) Trial {
 // measurement builds both halves of one attempt. Aggregation counts pairs, so
 // a helper that produced a single record would be manufacturing exactly the
 // evidence the report is right to discard.
-func measurement(s Stratum, operator string, outcome Outcome, failure FailureClass, millis uint64) []Trial {
+func measurement(s Scenario, operator string, outcome Outcome, failure FailureClass, millis uint64) []Trial {
 	session := nextSession()
 	return []Trial{
 		complete(rawTrial(s, session, RoleA, operator, outcome, failure, millis)),
@@ -158,21 +224,21 @@ func measurement(s Stratum, operator string, outcome Outcome, failure FailureCla
 	}
 }
 
-func directPair(s Stratum, operator string, millis uint64) []Trial {
+func directPair(s Scenario, operator string, millis uint64) []Trial {
 	return measurement(s, operator, OutcomeDirect, FailureNone, millis)
 }
 
-func fallbackPair(s Stratum, operator string, outcome Outcome, failure FailureClass) []Trial {
+func fallbackPair(s Scenario, operator string, outcome Outcome, failure FailureClass) []Trial {
 	return measurement(s, operator, outcome, failure, 0)
 }
 
 // directTrial and fallbackTrial return one half, for the tests that are about
 // a single record rather than about an aggregate.
-func directTrial(s Stratum, operator string, millis uint64) Trial {
+func directTrial(s Scenario, operator string, millis uint64) Trial {
 	return directPair(s, operator, millis)[0]
 }
 
-func fallbackTrial(s Stratum, operator string, outcome Outcome, failure FailureClass) Trial {
+func fallbackTrial(s Scenario, operator string, outcome Outcome, failure FailureClass) Trial {
 	return fallbackPair(s, operator, outcome, failure)[0]
 }
 
@@ -185,24 +251,15 @@ func testPolicy() Policy {
 		DirectViableRate:            0.75,
 		TunnelViableRate:            0.9,
 		Coordinators:                []string{testCoordinatorID()},
-		RequiredStrata: []Stratum{
-			stratum(CarrierConsumerISP, ClassDesktop),
-			stratum(CarrierCarrierGrade, ClassEdgeARM),
-			{
-				Family:        FamilyIPv6,
-				Reachability:  OnePublic,
-				NATBehavior:   NATSymmetric,
-				Carrier:       CarrierMobile,
-				UDPPolicy:     UDPRateLimited,
-				Mobility:      MobilityWiFiToMobile,
-				EndpointClass: ClassMobile,
-				Assistance:    AssistanceNone,
-			},
+		RequiredScenarios: []Scenario{
+			scenario(CarrierConsumerISP, ClassDesktop),
+			scenario(CarrierCarrierGrade, ClassEdgeARM),
+			mobileScenario(),
 		},
 	}
 }
 
-func fillCell(trials []Trial, s Stratum, direct int, outcome Outcome, failure FailureClass, other int) []Trial {
+func fillCell(trials []Trial, s Scenario, direct int, outcome Outcome, failure FailureClass, other int) []Trial {
 	operators := []string{opA, opB, opC}
 	for index := 0; index < direct; index++ {
 		trials = append(trials, directPair(s, operators[index%len(operators)], uint64(100+index))...)
@@ -223,21 +280,28 @@ func TestPolicyRejectsSmokeTests(t *testing.T) {
 			p.DirectViableRate = 0.9
 			p.TunnelViableRate = 0.5
 		},
-		"no strata": func(p *Policy) { p.RequiredStrata = nil },
+		"no scenarios": func(p *Policy) { p.RequiredScenarios = nil },
 		"public pairs only": func(p *Policy) {
-			p.RequiredStrata = []Stratum{publicStratum()}
+			p.RequiredScenarios = []Scenario{publicScenario()}
 		},
-		"duplicate stratum": func(p *Policy) {
-			p.RequiredStrata = append(p.RequiredStrata, p.RequiredStrata[0])
+		"matched pairs only": func(p *Policy) {
+			matched := Scenario{
+				Initiator: mapped(CarrierConsumerISP, ClassDesktop),
+				Responder: mapped(CarrierConsumerISP, ClassDesktop),
+			}
+			p.RequiredScenarios = []Scenario{matched}
+		},
+		"duplicate scenario": func(p *Policy) {
+			p.RequiredScenarios = append(p.RequiredScenarios, p.RequiredScenarios[0])
 		},
 		"no carrier grade nat": func(p *Policy) {
-			p.RequiredStrata = []Stratum{stratum(CarrierConsumerISP, ClassEdgeARM), stratum(CarrierMobile, ClassMobile)}
+			p.RequiredScenarios = []Scenario{scenario(CarrierConsumerISP, ClassEdgeARM), mobileScenario()}
 		},
 		"no low cost endpoint": func(p *Policy) {
-			p.RequiredStrata[1] = stratum(CarrierCarrierGrade, ClassServer)
+			p.RequiredScenarios[1] = scenario(CarrierCarrierGrade, ClassServer)
 		},
 		"single address family": func(p *Policy) {
-			p.RequiredStrata[2] = stratum(CarrierMobile, ClassMobile)
+			p.RequiredScenarios[2] = mobileScenarioOn(FamilyIPv4)
 		},
 	}
 	for name, mutate := range cases {
@@ -264,13 +328,13 @@ func TestPolicyDigestIsOrderIndependentAndThresholdSensitive(t *testing.T) {
 		t.Fatalf("digest: %v", err)
 	}
 	reordered := testPolicy()
-	reordered.RequiredStrata[0], reordered.RequiredStrata[2] = reordered.RequiredStrata[2], reordered.RequiredStrata[0]
+	reordered.RequiredScenarios[0], reordered.RequiredScenarios[2] = reordered.RequiredScenarios[2], reordered.RequiredScenarios[0]
 	reorderedDigest, err := reordered.Digest()
 	if err != nil {
 		t.Fatalf("digest: %v", err)
 	}
 	if digest != reorderedDigest {
-		t.Fatal("stratum ordering changed the policy identity")
+		t.Fatal("scenario ordering changed the policy identity")
 	}
 	for name, mutate := range map[string]func(*Policy){
 		"samples": func(p *Policy) { p.MinSamplesPerCell = 5 },
@@ -285,7 +349,9 @@ func TestPolicyDigestIsOrderIndependentAndThresholdSensitive(t *testing.T) {
 		},
 		"direct rate": func(p *Policy) { p.DirectViableRate = 0.74 },
 		"tunnel rate": func(p *Policy) { p.TunnelViableRate = 0.95 },
-		"strata":      func(p *Policy) { p.RequiredStrata = append(p.RequiredStrata, stratum(CarrierMobile, ClassEdgeRISC)) },
+		"scenarios": func(p *Policy) {
+			p.RequiredScenarios = append(p.RequiredScenarios, scenario(CarrierMobile, ClassEdgeRISC))
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			mutated := testPolicy()
@@ -301,10 +367,10 @@ func TestPolicyDigestIsOrderIndependentAndThresholdSensitive(t *testing.T) {
 	}
 }
 
-func TestMissingRequiredStratumYieldsNoDecision(t *testing.T) {
+func TestMissingRequiredScenarioYieldsNoDecision(t *testing.T) {
 	policy := testPolicy()
 	var trials []Trial
-	trials = fillCell(trials, policy.RequiredStrata[0], 4, OutcomeFailed, FailureHandshake, 0)
+	trials = fillCell(trials, policy.RequiredScenarios[0], 4, OutcomeFailed, FailureHandshake, 0)
 	report, err := Aggregate(policy, trials, ProbeUDP)
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
@@ -317,23 +383,21 @@ func TestMissingRequiredStratumYieldsNoDecision(t *testing.T) {
 	}
 }
 
-func TestUnderSampledStratumYieldsNoDecision(t *testing.T) {
+func TestUnderSampledScenarioYieldsNoDecision(t *testing.T) {
 	policy := testPolicy()
+	single := policy.RequiredScenarios[1]
 	var trials []Trial
-	for _, required := range policy.RequiredStrata {
+	for index, required := range policy.RequiredScenarios {
+		if index == 1 {
+			// Enough samples, all of them from one operator on one site.
+			for attempt := 0; attempt < 4; attempt++ {
+				trials = append(trials, fallbackPair(required, opA, OutcomeFailed, FailureHandshake)...)
+			}
+			continue
+		}
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
-	// Enough samples, but all of them from one operator.
-	single := policy.RequiredStrata[1]
-	filtered := trials[:0]
-	for _, trial := range trials {
-		if trial.Stratum.Key() == single.Key() {
-			trial.OperatorID = opA
-			trial = resign(trial)
-		}
-		filtered = append(filtered, trial)
-	}
-	report, err := Aggregate(policy, filtered, ProbeUDP)
+	report, err := Aggregate(policy, trials, ProbeUDP)
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
@@ -362,7 +426,7 @@ func TestDecisionFollowsMeasurement(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			var trials []Trial
-			for index, required := range policy.RequiredStrata {
+			for index, required := range policy.RequiredScenarios {
 				direct := testCase.direct[index]
 				proxy := testCase.proxy[index]
 				trials = fillCell(trials, required, direct, OutcomeProxyFallback, FailureHandshake, proxy)
@@ -372,8 +436,7 @@ func TestDecisionFollowsMeasurement(t *testing.T) {
 				}
 			}
 			for index := range trials {
-				trials[index].Probe = ProbeADNL
-				trials[index] = resign(trials[index])
+				trials[index] = switchProbe(trials[index], ProbeADNL)
 			}
 			report, err := Aggregate(policy, trials, ProbeADNL)
 			if err != nil {
@@ -395,10 +458,10 @@ func TestDecisionFollowsMeasurement(t *testing.T) {
 func TestReportKeepsUnrequiredEvidence(t *testing.T) {
 	policy := testPolicy()
 	var trials []Trial
-	for _, required := range policy.RequiredStrata {
+	for _, required := range policy.RequiredScenarios {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
-	trials = fillCell(trials, publicStratum(), 4, OutcomeFailed, FailureHandshake, 0)
+	trials = fillCell(trials, publicScenario(), 4, OutcomeFailed, FailureHandshake, 0)
 	report, err := Aggregate(policy, trials, ProbeUDP)
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
@@ -414,12 +477,11 @@ func TestReportKeepsUnrequiredEvidence(t *testing.T) {
 func TestProbeKindsAreNotMixed(t *testing.T) {
 	policy := testPolicy()
 	var trials []Trial
-	for _, required := range policy.RequiredStrata {
+	for _, required := range policy.RequiredScenarios {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
-	for _, half := range directPair(policy.RequiredStrata[0], opA, 50) {
-		half.Probe = ProbeADNL
-		trials = append(trials, resign(half))
+	for _, half := range directPair(policy.RequiredScenarios[0], opA, 50) {
+		trials = append(trials, switchProbe(half, ProbeADNL))
 	}
 
 	report, err := Aggregate(policy, trials, ProbeUDP)
@@ -428,7 +490,7 @@ func TestProbeKindsAreNotMixed(t *testing.T) {
 	}
 	for _, cell := range report.Cells {
 		if cell.Samples != 4 {
-			t.Fatalf("a different probe leaked into cell %s: %d samples", cell.StratumKey, cell.Samples)
+			t.Fatalf("a different probe leaked into cell %s: %d samples", cell.ScenarioKey, cell.Samples)
 		}
 	}
 	if _, err := Aggregate(policy, trials, ProbeADNL); err != nil {
@@ -438,14 +500,14 @@ func TestProbeKindsAreNotMixed(t *testing.T) {
 
 func TestPercentilesUseMeasuredSessionsOnly(t *testing.T) {
 	policy := testPolicy()
-	target := policy.RequiredStrata[0]
+	target := policy.RequiredScenarios[0]
 	var trials []Trial
 	trials = append(trials, directPair(target, opA, 10)...)
 	trials = append(trials, directPair(target, opB, 20)...)
 	trials = append(trials, directPair(target, opA, 30)...)
 	trials = append(trials, directPair(target, opB, 400)...)
 	trials = append(trials, fallbackPair(target, opC, OutcomeRelayFallback, FailureHandshake)...)
-	for _, required := range policy.RequiredStrata[1:] {
+	for _, required := range policy.RequiredScenarios[1:] {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
 	report, err := Aggregate(policy, trials, ProbeUDP)
@@ -454,7 +516,7 @@ func TestPercentilesUseMeasuredSessionsOnly(t *testing.T) {
 	}
 	var cell CellReport
 	for _, candidate := range report.Cells {
-		if candidate.StratumKey == target.Key() {
+		if candidate.ScenarioKey == target.Key() {
 			cell = candidate
 		}
 	}
@@ -483,7 +545,7 @@ func TestPercentilesUseMeasuredSessionsOnly(t *testing.T) {
 }
 
 func TestTrialValidationRejectsIncoherentRecords(t *testing.T) {
-	base := directTrial(stratum(CarrierConsumerISP, ClassDesktop), opA, 100)
+	base := directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100)
 	cases := map[string]func(*Trial){
 		"direct with failure":    func(t *Trial) { t.Failure = FailureHandshake },
 		"direct without latency": func(t *Trial) { t.EstablishMillis = 0 },
@@ -507,11 +569,11 @@ func TestTrialValidationRejectsIncoherentRecords(t *testing.T) {
 		"no start time":       func(t *Trial) { t.StartedAtUnix = 0 },
 		"short commit":        func(t *Trial) { t.LocalCommit = "abc" },
 		"missing peer commit": func(t *Trial) { t.PeerCommit = "" },
-		"nat on public pair": func(t *Trial) {
-			t.Stratum.Reachability = BothPublic
+		"nat on a public endpoint": func(t *Trial) {
+			t.Local.Reachability = PublicAddress
 		},
-		"no nat behind nat": func(t *Trial) { t.Stratum.NATBehavior = NATNone },
-		"unknown carrier":   func(t *Trial) { t.Stratum.Carrier = "satellite" },
+		"no nat behind nat": func(t *Trial) { t.Local.NATBehavior = NATNone },
+		"unknown carrier":   func(t *Trial) { t.Local.Carrier = "satellite" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -528,7 +590,7 @@ func TestTrialValidationRejectsIncoherentRecords(t *testing.T) {
 }
 
 func TestTrialLogRefusesDuplicatesAndGarbage(t *testing.T) {
-	trial := directTrial(stratum(CarrierConsumerISP, ClassDesktop), opA, 100)
+	trial := directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100)
 	encoded, err := EncodeTrialJSON(trial)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
@@ -620,7 +682,7 @@ func TestOperatorIDIsStableAndOpaque(t *testing.T) {
 func TestUDPEvidenceNeverYieldsARouteDecision(t *testing.T) {
 	policy := testPolicy()
 	var trials []Trial
-	for _, required := range policy.RequiredStrata {
+	for _, required := range policy.RequiredScenarios {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
 	report, err := Aggregate(policy, trials, ProbeUDP)
@@ -646,7 +708,7 @@ func TestUDPEvidenceNeverYieldsARouteDecision(t *testing.T) {
 func TestUnreachableUDPPathIsReportedAsSuch(t *testing.T) {
 	policy := testPolicy()
 	var trials []Trial
-	for _, required := range policy.RequiredStrata {
+	for _, required := range policy.RequiredScenarios {
 		trials = fillCell(trials, required, 0, OutcomeFailed, FailureHandshake, 4)
 	}
 	report, err := Aggregate(policy, trials, ProbeUDP)
@@ -676,7 +738,7 @@ func TestRelayIsRequiredNotAccepted(t *testing.T) {
 // everyone else measured a handful of times.
 func TestOneOperatorCannotDominateACell(t *testing.T) {
 	policy := testPolicy()
-	target := policy.RequiredStrata[0]
+	target := policy.RequiredScenarios[0]
 
 	var trials []Trial
 	// A prolific operator succeeds every time.
@@ -688,7 +750,7 @@ func TestOneOperatorCannotDominateACell(t *testing.T) {
 		trials = append(trials, fallbackPair(target, opB, OutcomeFailed, FailureHandshake)...)
 		trials = append(trials, fallbackPair(target, opC, OutcomeFailed, FailureHandshake)...)
 	}
-	for _, required := range policy.RequiredStrata[1:] {
+	for _, required := range policy.RequiredScenarios[1:] {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
 	report, err := Aggregate(policy, trials, ProbeUDP)
@@ -697,7 +759,7 @@ func TestOneOperatorCannotDominateACell(t *testing.T) {
 	}
 	var cell CellReport
 	for _, candidate := range report.Cells {
-		if candidate.StratumKey == target.Key() {
+		if candidate.ScenarioKey == target.Key() {
 			cell = candidate
 		}
 	}
@@ -719,7 +781,7 @@ func TestOneOperatorCannotDominateACell(t *testing.T) {
 func TestConcentratedEvidenceIsUnderSampled(t *testing.T) {
 	policy := testPolicy()
 	var trials []Trial
-	for _, required := range policy.RequiredStrata {
+	for _, required := range policy.RequiredScenarios {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
 	// Every operator now reports from the same network.
@@ -734,13 +796,13 @@ func TestConcentratedEvidenceIsUnderSampled(t *testing.T) {
 	if report.Finding != FindingInsufficient {
 		t.Fatalf("evidence from one network produced %q", report.Finding)
 	}
-	if len(report.Missing) != len(policy.RequiredStrata) {
+	if len(report.Missing) != len(policy.RequiredScenarios) {
 		t.Fatalf("expected every cell to be under-sampled, got %d", len(report.Missing))
 	}
 }
 
 func TestPairAndSiteIdentityAreRequired(t *testing.T) {
-	base := directTrial(stratum(CarrierConsumerISP, ClassDesktop), opA, 100)
+	base := directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100)
 	for name, mutate := range map[string]func(*Trial){
 		"no pair":  func(t *Trial) { t.PairID = "" },
 		"bad pair": func(t *Trial) { t.PairID = "pair_bad" },
@@ -781,7 +843,7 @@ func TestPairAndSiteIdentityAreRequired(t *testing.T) {
 func TestAlteredTrialsAreNotCounted(t *testing.T) {
 	policy := testPolicy()
 	var trials []Trial
-	for _, required := range policy.RequiredStrata {
+	for _, required := range policy.RequiredScenarios {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
 	// Someone improves one result after the fact.
@@ -804,7 +866,7 @@ func TestUnpredeclaredCoordinatorIsNotEvidence(t *testing.T) {
 	stranger := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x99}, ed25519.SeedSize))
 
 	var trials []Trial
-	for _, required := range policy.RequiredStrata {
+	for _, required := range policy.RequiredScenarios {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
 	for index := range trials {
@@ -824,14 +886,14 @@ func TestUnpredeclaredCoordinatorIsNotEvidence(t *testing.T) {
 // minimum by itself. The signing key is what gives that away.
 func TestOneKeyUnderSeveralOperatorsIsExcluded(t *testing.T) {
 	policy := testPolicy()
-	target := policy.RequiredStrata[0]
+	target := policy.RequiredScenarios[0]
 
 	var trials []Trial
 	for _, operator := range []string{opA, opB, opC} {
 		session := nextSession()
 		for _, role := range []Role{RoleA, RoleB} {
 			trial := rawTrial(target, session, role, operator, OutcomeDirect, FailureNone, 20)
-			trial.Observation = attest(session, role, "no")
+			trial.Observation = attest(session, role, "one-host", "no")
 			// Every "operator" signs with the same key.
 			signed, err := SignTrial(trial, endpointKeyFor("one-host", RoleA))
 			if err != nil {
@@ -840,7 +902,7 @@ func TestOneKeyUnderSeveralOperatorsIsExcluded(t *testing.T) {
 			trials = append(trials, signed)
 		}
 	}
-	for _, required := range policy.RequiredStrata[1:] {
+	for _, required := range policy.RequiredScenarios[1:] {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
 
@@ -852,7 +914,7 @@ func TestOneKeyUnderSeveralOperatorsIsExcluded(t *testing.T) {
 		t.Fatalf("the shared key was not reported: %+v", report.SharedEndpointKeys)
 	}
 	for _, cell := range report.Cells {
-		if cell.StratumKey == target.Key() {
+		if cell.ScenarioKey == target.Key() {
 			t.Fatalf("a cell built from one host under three names survived: %+v", cell)
 		}
 	}
@@ -866,7 +928,7 @@ func TestOneKeyUnderSeveralOperatorsIsExcluded(t *testing.T) {
 // move a threshold.
 func TestHalfAMeasurementIsNotEvidence(t *testing.T) {
 	policy := testPolicy()
-	target := policy.RequiredStrata[0]
+	target := policy.RequiredScenarios[0]
 
 	var trials []Trial
 	for index := 0; index < 4; index++ {
@@ -876,7 +938,7 @@ func TestHalfAMeasurementIsNotEvidence(t *testing.T) {
 		}
 		trials = append(trials, pair...)
 	}
-	for _, required := range policy.RequiredStrata[1:] {
+	for _, required := range policy.RequiredScenarios[1:] {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
 
@@ -888,7 +950,7 @@ func TestHalfAMeasurementIsNotEvidence(t *testing.T) {
 		t.Fatalf("an unpaired half was not reported: %+v", report)
 	}
 	for _, cell := range report.Cells {
-		if cell.StratumKey == target.Key() && cell.Samples != 3 {
+		if cell.ScenarioKey == target.Key() && cell.Samples != 3 {
 			t.Fatalf("an unpaired half was counted as a measurement: %+v", cell)
 		}
 	}
@@ -899,7 +961,7 @@ func TestHalfAMeasurementIsNotEvidence(t *testing.T) {
 // minimum is counting.
 func TestContradictingHalvesAreDiscarded(t *testing.T) {
 	policy := testPolicy()
-	target := policy.RequiredStrata[0]
+	target := policy.RequiredScenarios[0]
 
 	cases := map[string]func([]Trial) []Trial{
 		"outcome": func(pair []Trial) []Trial {
@@ -914,11 +976,6 @@ func TestContradictingHalvesAreDiscarded(t *testing.T) {
 			pair[1] = resign(pair[1])
 			return pair
 		},
-		"cell": func(pair []Trial) []Trial {
-			pair[1].Stratum.Carrier = CarrierMobile
-			pair[1] = resign(pair[1])
-			return pair
-		},
 		"one key twice": func(pair []Trial) []Trial {
 			signed, err := SignTrial(pair[1], endpointKeyFor(pair[0].OperatorID, RoleA))
 			if err != nil {
@@ -928,7 +985,7 @@ func TestContradictingHalvesAreDiscarded(t *testing.T) {
 		},
 		"both in one role": func(pair []Trial) []Trial {
 			pair[1].Role = RoleA
-			pair[1].Observation = attest(pair[1].SessionID, RoleA, "no")
+			pair[1].Observation = attest(pair[1].SessionID, RoleA, pair[1].OperatorID, "no")
 			pair[1] = resign(pair[1])
 			return pair
 		},
@@ -943,7 +1000,7 @@ func TestContradictingHalvesAreDiscarded(t *testing.T) {
 				}
 				trials = append(trials, pair...)
 			}
-			for _, required := range policy.RequiredStrata[1:] {
+			for _, required := range policy.RequiredScenarios[1:] {
 				trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 			}
 			report, err := Aggregate(policy, trials, ProbeUDP)
@@ -954,7 +1011,7 @@ func TestContradictingHalvesAreDiscarded(t *testing.T) {
 				t.Fatalf("contradicting halves were aggregated anyway: %+v", report)
 			}
 			for _, cell := range report.Cells {
-				if cell.StratumKey == target.Key() && cell.Samples > 3 {
+				if cell.ScenarioKey == target.Key() && cell.Samples > 3 {
 					t.Fatalf("a contradicted measurement was counted: %+v", cell)
 				}
 			}
@@ -965,7 +1022,7 @@ func TestContradictingHalvesAreDiscarded(t *testing.T) {
 // The pair identifier is derived from the session, so it cannot be chosen to
 // glue together two halves that were never the same attempt.
 func TestPairIdentifierMustBeDerivedFromItsSession(t *testing.T) {
-	trial := directTrial(stratum(CarrierConsumerISP, ClassDesktop), opA, 100)
+	trial := directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100)
 	other, err := PairID("some-other-session")
 	if err != nil {
 		t.Fatalf("pair: %v", err)
@@ -980,7 +1037,7 @@ func TestPairIdentifierMustBeDerivedFromItsSession(t *testing.T) {
 // order, or an operator chooses their own sample by choosing when to send.
 func TestCapTruncatesTheSameSetWhateverTheOrder(t *testing.T) {
 	policy := testPolicy()
-	target := policy.RequiredStrata[0]
+	target := policy.RequiredScenarios[0]
 
 	var trials []Trial
 	for index := 0; index < 20; index++ {
@@ -990,7 +1047,7 @@ func TestCapTruncatesTheSameSetWhateverTheOrder(t *testing.T) {
 		}
 		trials = append(trials, measurement(target, opA, outcome, failure, map[bool]uint64{true: 0, false: 40}[index%2 == 0])...)
 	}
-	for _, required := range policy.RequiredStrata {
+	for _, required := range policy.RequiredScenarios {
 		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
 	}
 
@@ -1015,5 +1072,129 @@ func TestCapTruncatesTheSameSetWhateverTheOrder(t *testing.T) {
 	}
 	if forward.Finding != backward.Finding {
 		t.Fatalf("the finding depended on arrival order: %q vs %q", forward.Finding, backward.Finding)
+	}
+}
+
+// The two halves describe different situations by definition, and that is the
+// measurement rather than a disagreement. A home node against a datacenter
+// Agent is the case the study exists to answer; a model that required both
+// ends to declare the same labels could not express it at all.
+func TestAsymmetricPairsAreMeasurable(t *testing.T) {
+	policy := testPolicy()
+	target := Scenario{
+		Initiator: mapped(CarrierCarrierGrade, ClassEdgeRISC),
+		Responder: publicEndpoint(),
+	}
+	if !target.Asymmetric() {
+		t.Fatal("the fixture is not actually asymmetric")
+	}
+
+	var trials []Trial
+	for index := 0; index < 4; index++ {
+		trials = append(trials, directPair(target, []string{opA, opB, opC}[index%3], uint64(100+index))...)
+	}
+	for _, required := range policy.RequiredScenarios {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.IncompletePairs != 0 {
+		t.Fatalf("an asymmetric pair was discarded: %+v", report)
+	}
+	var cell CellReport
+	for _, candidate := range report.Cells {
+		if candidate.ScenarioKey == target.Key() {
+			cell = candidate
+		}
+	}
+	if cell.Samples != 4 {
+		t.Fatalf("the asymmetric cell was not measured: %+v", cell)
+	}
+	// The joint label is derived from the two ends rather than declared by
+	// either, and neither end could have observed it.
+	if cell.PairReachability != "one-public" {
+		t.Fatalf("unexpected derived reachability: %q", cell.PairReachability)
+	}
+	if cell.Scenario.Initiator.EndpointClass != ClassEdgeRISC ||
+		cell.Scenario.Responder.EndpointClass != ClassServer {
+		t.Fatalf("the cell lost which side was which: %+v", cell.Scenario)
+	}
+}
+
+// Which side opened the session is kept. A phone calling a server and a server
+// calling a phone are two measurements: whether a mapping exists when the first
+// packet arrives depends on who sent it.
+func TestInitiatingDirectionIsPartOfTheCell(t *testing.T) {
+	forward := Scenario{Initiator: mapped(CarrierMobile, ClassMobile), Responder: publicEndpoint()}
+	backward := Scenario{Initiator: publicEndpoint(), Responder: mapped(CarrierMobile, ClassMobile)}
+	if forward.Key() == backward.Key() {
+		t.Fatal("the initiating direction was normalised away")
+	}
+	if forward.PairReachability() != backward.PairReachability() {
+		t.Fatal("the derived joint label depended on direction")
+	}
+}
+
+// An attestation names the endpoint it is about. A bystander who copied a
+// published one cannot wear it, so they cannot add a third half to somebody
+// else's pair and have the pair discarded as malformed.
+func TestCopiedAttestationCannotBeWorn(t *testing.T) {
+	pair := directPair(scenario(CarrierConsumerISP, ClassDesktop), opA, 100)
+	stranger := pair[0]
+	// A different key, everything else copied verbatim.
+	signed, err := SignTrial(stranger, endpointKeyFor("bystander", RoleA))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if err := VerifyTrial(testPolicy(), signed); err == nil {
+		t.Fatal("a copied attestation was worn by another key")
+	}
+	// And the attestation cannot be moved to another probe either.
+	moved := pair[0]
+	moved.Probe = ProbeADNL
+	if err := VerifyTrial(testPolicy(), resign(moved)); err == nil {
+		t.Fatal("an attestation from one probe stood in for another")
+	}
+}
+
+// Session survival needs both halves. A zero from one side means "not
+// measured", and reporting the other side's number as the pair's would
+// describe one endpoint's session as if it were the pair's.
+func TestSurvivalNeedsBothHalves(t *testing.T) {
+	policy := testPolicy()
+	target := policy.RequiredScenarios[0]
+
+	var trials []Trial
+	for index := 0; index < 4; index++ {
+		pair := directPair(target, []string{opA, opB, opC}[index%3], uint64(100+index))
+		pair[0].SurvivalSeconds = 600
+		pair[0] = resign(pair[0])
+		if index == 0 {
+			pair[1].SurvivalSeconds = 300
+			pair[1] = resign(pair[1])
+		}
+		trials = append(trials, pair...)
+	}
+	for _, required := range policy.RequiredScenarios[1:] {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	for _, cell := range report.Cells {
+		if cell.ScenarioKey != target.Key() {
+			continue
+		}
+		if cell.SurvivalSamples != 1 {
+			t.Fatalf("one-sided survival was counted: %+v", cell)
+		}
+		if cell.SurvivalP50 != 300 {
+			t.Fatalf("survival did not take the shorter half: %+v", cell)
+		}
 	}
 }

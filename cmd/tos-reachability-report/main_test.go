@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,8 +23,8 @@ func TestExamplePolicyIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("example policy is invalid: %v", err)
 	}
-	if len(policy.RequiredStrata) < 4 {
-		t.Fatalf("example policy requires too little coverage: %d strata", len(policy.RequiredStrata))
+	if len(policy.RequiredScenarios) < 4 {
+		t.Fatalf("example policy requires too little coverage: %d scenarios", len(policy.RequiredScenarios))
 	}
 }
 
@@ -72,19 +73,25 @@ func TestBuildReportsInsufficientEvidence(t *testing.T) {
 	coordinatorKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x11}, ed25519.SeedSize))
 	endpointKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x22}, ed25519.SeedSize))
 
+	endpointPublic, ok := endpointKey.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected endpoint key type")
+	}
 	observation, err := reachability.SignObservation(reachability.Observation{
-		SessionID:  "ses_0123456789abcdef0123456789abcdef",
-		Role:       "a",
-		Observed:   "203.0.113.7:41234",
-		PeerPublic: "no",
-		AtUnix:     1_800_000_000,
+		SessionID:            "ses_0123456789abcdef0123456789abcdef",
+		Role:                 "a",
+		EndpointPublicKeyHex: hex.EncodeToString(endpointPublic),
+		Probe:                string(reachability.ProbeUDP),
+		Observed:             "203.0.113.7:41234",
+		PeerPublic:           "no",
+		AtUnix:               1_800_000_000,
 	}, coordinatorKey)
 	if err != nil {
 		t.Fatalf("attest: %v", err)
 	}
 	trial := reachability.Trial{
-		Stratum: reachability.Stratum{
-			Family: reachability.FamilyIPv4, Reachability: reachability.NeitherPublic,
+		Local: reachability.EndpointStratum{
+			Family: reachability.FamilyIPv4, Reachability: reachability.BehindNAT,
 			NATBehavior: reachability.NATEndpointIndependent, Carrier: reachability.CarrierConsumerISP,
 			UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
 			EndpointClass: reachability.ClassDesktop, Assistance: reachability.AssistanceNone,

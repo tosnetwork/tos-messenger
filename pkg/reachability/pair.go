@@ -16,7 +16,7 @@ import (
 // as half a pair, or as two halves that contradict each other, is dropped and
 // counted rather than averaged in.
 type pairResult struct {
-	stratum Stratum
+	scenario Scenario
 	// digest orders pairs independently of arrival, so a per-operator cap
 	// truncates the same set whatever order the trials were submitted in.
 	digest    string
@@ -32,15 +32,23 @@ type pairResult struct {
 	// reverse.
 	establish uint64
 	reconnect uint64
-	survival  uint64
+	// survival is only set when both halves measured it. A zero from one side
+	// means "not measured", not "the other side's number speaks for both", and
+	// treating it as the latter would report one endpoint's session lifetime
+	// as a pair's.
+	survival         uint64
+	survivalMeasured bool
 }
 
 // combine folds the two halves of a measurement into one sample.
 //
-// The halves must agree on everything the decision depends on: the cell, the
-// probe, the outcome, and which commits were running on each side. They must
-// also come from two different keys in the two different roles, because a
-// "pair" one host produced by itself is a single assertion wearing two hats.
+// The halves must agree on everything the decision depends on: the probe, the
+// outcome, and which commits were running on each side. They must also come
+// from two different keys in the two different roles, because a "pair" one
+// host produced by itself is a single assertion wearing two hats.
+//
+// They are deliberately not required to agree on the cell. Each half describes
+// only its own end, and the cell is the ordered pair of those descriptions.
 func combine(halves []Trial) (pairResult, error) {
 	if len(halves) != 2 {
 		return pairResult{}, errors.New("a measurement needs exactly two halves")
@@ -57,9 +65,6 @@ func combine(halves []Trial) (pairResult, error) {
 	}
 	if a.SessionID != b.SessionID || a.Probe != b.Probe {
 		return pairResult{}, errors.New("the halves describe different sessions")
-	}
-	if a.Stratum.Key() != b.Stratum.Key() {
-		return pairResult{}, errors.New("the halves disagree about which cell they measured")
 	}
 	if a.Outcome != b.Outcome {
 		return pairResult{}, errors.New("the halves disagree about the outcome")
@@ -78,7 +83,10 @@ func combine(halves []Trial) (pairResult, error) {
 	}
 
 	result := pairResult{
-		stratum:   a.Stratum,
+		// The cell is built from the two halves rather than agreed between
+		// them. Each endpoint describes only itself, which is the only thing
+		// it can describe honestly.
+		scenario:  Scenario{Initiator: a.Local, Responder: b.Local},
 		digest:    canonPairDigest(digestA, digestB),
 		operators: distinct(a.OperatorID, b.OperatorID),
 		sites:     distinct(a.SiteID, b.SiteID),
@@ -92,13 +100,9 @@ func combine(halves []Trial) (pairResult, error) {
 	if b.Failure != FailureNone && b.Failure != a.Failure {
 		result.failures = append(result.failures, b.Failure)
 	}
-	switch {
-	case a.SurvivalSeconds == 0:
-		result.survival = b.SurvivalSeconds
-	case b.SurvivalSeconds == 0:
-		result.survival = a.SurvivalSeconds
-	default:
+	if a.SurvivalSeconds != 0 && b.SurvivalSeconds != 0 {
 		result.survival = minOf(a.SurvivalSeconds, b.SurvivalSeconds)
+		result.survivalMeasured = true
 	}
 	return result, nil
 }
@@ -107,7 +111,7 @@ func canonPairDigest(a, b string) string {
 	if b < a {
 		a, b = b, a
 	}
-	buffer := bytes.NewBufferString(canon.DomainReachabilityPair)
+	buffer := bytes.NewBufferString(canon.DomainReachabilityPairResult)
 	canon.Text(buffer, a)
 	canon.Text(buffer, b)
 	return canon.Digest(buffer.Bytes())

@@ -139,7 +139,14 @@ func TestEveryUsedSeparatorIsRegistered(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "domains.go") {
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		// domains.go is where the constants live, and it is checked separately
+		// against the registry rather than skipped: a constant defined there
+		// and left out of the list was invisible to this walk, which is
+		// exactly the case that happened.
+		if strings.HasSuffix(path, "domains.go") {
 			return nil
 		}
 		content, err := os.ReadFile(path)
@@ -155,5 +162,41 @@ func TestEveryUsedSeparatorIsRegistered(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walk: %v", err)
+	}
+}
+
+// Every separator declared in domains.go must be in the registry.
+//
+// The walk above deliberately skips that file, because the constants there are
+// declarations rather than uses. That left a gap: a constant could be declared,
+// referenced everywhere by name, and never registered, and nothing would
+// notice. This closes it by reading the declarations themselves.
+func TestEveryDeclaredSeparatorIsRegistered(t *testing.T) {
+	source, err := os.ReadFile("domains.go")
+	if err != nil {
+		t.Fatalf("read domains.go: %v", err)
+	}
+	declaration := regexp.MustCompile(`(?m)^\s*(Domain[A-Za-z0-9]+)\s*=\s*"(tos\.messaging\.[a-z0-9.-]+)\\x00"`)
+	matches := declaration.FindAllStringSubmatch(string(source), -1)
+	if len(matches) == 0 {
+		t.Fatal("no domain separator declarations were found")
+	}
+
+	registered := make(map[string]struct{}, len(Domains))
+	for _, domain := range Domains {
+		registered[strings.TrimSuffix(domain, "\x00")] = struct{}{}
+	}
+	listing := string(source[strings.Index(string(source), "var Domains"):])
+	for _, match := range matches {
+		name, value := match[1], match[2]
+		if _, found := registered[value]; !found {
+			t.Fatalf("domain separator %s (%q) is declared but not registered", name, value)
+		}
+		if !strings.Contains(listing, name) {
+			t.Fatalf("domain separator %s is not listed in the registry by name", name)
+		}
+	}
+	if len(matches) != len(Domains) {
+		t.Fatalf("%d separators are declared and %d are registered", len(matches), len(Domains))
 	}
 }

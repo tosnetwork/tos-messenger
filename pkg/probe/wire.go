@@ -22,6 +22,8 @@ import (
 	"net/netip"
 	"regexp"
 	"strings"
+
+	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 )
 
 const (
@@ -77,6 +79,7 @@ const (
 var (
 	sessionPattern      = regexp.MustCompile(`^ses_[0-9a-f]{32}$`)
 	noncePattern        = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	endpointKeyPattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	serverPattern       = regexp.MustCompile(`^srv_[0-9a-f]{16}$`)
 	paddingPattern      = regexp.MustCompile(`^p*$`)
 	commitPattern       = regexp.MustCompile(`^[0-9a-f]{40}$|^[0-9a-f]{64}$`)
@@ -102,11 +105,17 @@ type Message struct {
 	Commit     string   `json:"commit,omitempty"`
 	PeerCommit string   `json:"peer_commit,omitempty"`
 	PeerPublic string   `json:"peer_public,omitempty"`
-	ObservedAt uint64   `json:"observed_at,omitempty"`
-	SignerKey  string   `json:"coordinator_public_key,omitempty"`
-	Signature  string   `json:"coordinator_signature,omitempty"`
-	Reason     string   `json:"reason,omitempty"`
-	Padding    string   `json:"padding,omitempty"`
+	// EndpointKey is the key the endpoint will sign its trial with, presented
+	// so the coordinator can attest to a party rather than only to a session.
+	EndpointKey string `json:"endpoint_key,omitempty"`
+	// Probe names what is being measured, so an attestation from one probe
+	// cannot stand in for another.
+	Probe      string `json:"probe,omitempty"`
+	ObservedAt uint64 `json:"observed_at,omitempty"`
+	SignerKey  string `json:"coordinator_public_key,omitempty"`
+	Signature  string `json:"coordinator_signature,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Padding    string `json:"padding,omitempty"`
 }
 
 // Peer returns the other role.
@@ -220,6 +229,23 @@ func Validate(message Message) error {
 	}
 	if message.PeerPublic != "" && message.PeerPublic != PeerPublicYes && message.PeerPublic != PeerPublicNo {
 		return errors.New("invalid peer reachability")
+	}
+	if message.EndpointKey != "" && !endpointKeyPattern.MatchString(message.EndpointKey) {
+		return errors.New("invalid endpoint key")
+	}
+	if message.Probe != "" && message.Probe != string(reachability.ProbeUDP) &&
+		message.Probe != string(reachability.ProbeADNL) {
+		return errors.New("invalid probe kind")
+	}
+	// A pairing request is what the coordinator attests to, so it has to say
+	// which endpoint and which probe it is asking about.
+	if message.Kind == KindPair {
+		if message.EndpointKey == "" {
+			return errors.New("a pairing request must present the endpoint key it will sign with")
+		}
+		if message.Probe == "" {
+			return errors.New("a pairing request must say what it is measuring")
+		}
 	}
 	if message.Commit != "" && !commitPattern.MatchString(message.Commit) {
 		return errors.New("invalid probe commit")

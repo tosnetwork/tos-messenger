@@ -106,14 +106,21 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 	if err != nil {
 		return reachability.Trial{}, err
 	}
+	endpointPublic, ok := endpointKey.Public().(ed25519.PublicKey)
+	if !ok {
+		return reachability.Trial{}, errors.New("unexpected endpoint key type")
+	}
+	endpointPublicHex := hex.EncodeToString(endpointPublic)
 	result, err := probe.Run(ctx, probe.Config{
-		Coordinators: addresses,
-		SessionID:    session,
-		Role:         probe.Role(role),
-		ListenAddr:   listen,
-		PairTimeout:  pairTimeout,
-		PunchTimeout: punchTimeout,
-		Commit:       commit,
+		Coordinators:   addresses,
+		SessionID:      session,
+		Role:           probe.Role(role),
+		ListenAddr:     listen,
+		PairTimeout:    pairTimeout,
+		PunchTimeout:   punchTimeout,
+		Commit:         commit,
+		EndpointKeyHex: endpointPublicHex,
+		Probe:          reachability.ProbeUDP,
 	})
 	if err != nil {
 		return reachability.Trial{}, err
@@ -122,16 +129,19 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		return reachability.Trial{}, errors.New("the peer's commit was never learned, so the trial cannot name what it measured")
 	}
 	if result.Reachability == "" {
-		return reachability.Trial{}, errors.New("the pair's public reachability was never established")
+		return reachability.Trial{}, errors.New("this endpoint's own public reachability was never established")
 	}
-	// Without a verified attestation the stratum would be this endpoint's own
-	// claim about where its result should count, so no record is written.
+	// Without a verified attestation the endpoint's declared situation would be
+	// its own unchecked claim about where its result counts, so no record is
+	// written.
 	if result.Observation.SignatureHex == "" {
 		return reachability.Trial{}, errors.New("no coordinator attested to this measurement")
 	}
 
 	trial := reachability.Trial{
-		Stratum: reachability.Stratum{
+		// Only this endpoint's own situation. The peer describes its own, and
+		// the cell is the ordered pair of the two.
+		Local: reachability.EndpointStratum{
 			Family:        result.AddressFamily,
 			Reachability:  result.Reachability,
 			NATBehavior:   result.Mapping,

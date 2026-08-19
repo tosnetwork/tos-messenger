@@ -52,8 +52,14 @@ const (
 	DomainReachabilityOperator = "tos.messaging.reachability-operator.v1\x00"
 	// DomainReachabilitySite namespaces the opaque site derivation.
 	DomainReachabilitySite = "tos.messaging.reachability-site.v1\x00"
-	// DomainReachabilityPair namespaces the paired-measurement derivation.
-	DomainReachabilityPair = "tos.messaging.reachability-pair.v1\x00"
+	// DomainReachabilityPairID namespaces the pair identifier derived from a
+	// session. It is separate from the digest over a completed pair because
+	// one domain must carry one meaning: reusing a separator across two object
+	// kinds is signature confusion waiting for the field widths to change.
+	DomainReachabilityPairID = "tos.messaging.reachability-pair-id.v1\x00"
+	// DomainReachabilityPairResult namespaces the digest over the two halves
+	// of one completed measurement.
+	DomainReachabilityPairResult = "tos.messaging.reachability-pair-result.v1\x00"
 	// DomainReachabilityCoordinator namespaces the coordinator identifier.
 	DomainReachabilityCoordinator = "tos.messaging.reachability-coordinator.v1\x00"
 	// DomainReachabilityObservation namespaces a coordinator attestation.
@@ -77,7 +83,12 @@ var Domains = []string{
 	DomainReachabilityPolicy,
 	DomainReachabilityOperator,
 	DomainReachabilitySite,
-	DomainReachabilityPair,
+	DomainReachabilityPairID,
+	DomainReachabilityPairResult,
 	DomainReachabilityCoordinator,
 	DomainReachabilityObservation,
+	DomainPayload,
+	DomainInboxPolicy,
+	DomainMandate,
+	DomainAgentAction,
 }

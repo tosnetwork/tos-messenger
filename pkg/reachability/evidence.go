@@ -35,11 +35,21 @@ type Observation struct {
 	CoordinatorID string `json:"coordinator_id"`
 	SessionID     string `json:"session_id"`
 	Role          string `json:"role"`
-	Observed      string `json:"observed"`
-	PeerPublic    string `json:"peer_public"`
-	AtUnix        uint64 `json:"at_unix"`
-	PublicKeyHex  string `json:"coordinator_public_key_hex"`
-	SignatureHex  string `json:"coordinator_signature_hex"`
+	// EndpointPublicKeyHex is the key of the endpoint this attestation is
+	// about. Without it an attestation is a statement about a session rather
+	// than about a party, and a bystander could copy a published one and sign
+	// a third trial for the same pair under a key of their own. Three halves
+	// is not a measurement, so the honest pair would be discarded: the
+	// attestation would have become a way to delete somebody else's evidence.
+	EndpointPublicKeyHex string `json:"endpoint_public_key_hex"`
+	// Probe is what was being measured. An attestation from a datagram probe
+	// must not stand in for one from a session probe.
+	Probe        string `json:"probe"`
+	Observed     string `json:"observed"`
+	PeerPublic   string `json:"peer_public"`
+	AtUnix       uint64 `json:"at_unix"`
+	PublicKeyHex string `json:"coordinator_public_key_hex"`
+	SignatureHex string `json:"coordinator_signature_hex"`
 }
 
 // CoordinatorID derives a coordinator's identifier from its key, so a
@@ -65,6 +75,8 @@ func ObservationSigningBytes(observation Observation) ([]byte, error) {
 	canon.Text(buffer, observation.CoordinatorID)
 	canon.Text(buffer, observation.SessionID)
 	canon.Text(buffer, observation.Role)
+	canon.Text(buffer, observation.EndpointPublicKeyHex)
+	canon.Text(buffer, observation.Probe)
 	canon.Text(buffer, observation.Observed)
 	canon.Text(buffer, observation.PeerPublic)
 	canon.Uint64(buffer, observation.AtUnix)
@@ -134,6 +146,12 @@ func validateObservationShape(observation Observation, signed bool) error {
 	}
 	if observation.Role != "a" && observation.Role != "b" {
 		return errors.New("invalid observation role")
+	}
+	if !keyPattern.MatchString(observation.EndpointPublicKeyHex) {
+		return errors.New("invalid attested endpoint public key")
+	}
+	if !member(probes, ProbeKind(observation.Probe)) {
+		return errors.New("invalid attested probe")
 	}
 	if _, err := netip.ParseAddrPort(observation.Observed); err != nil {
 		return errors.New("invalid observed address")
@@ -212,6 +230,14 @@ func VerifyTrial(policy Policy, trial Trial) error {
 	}
 	if trial.Observation.SessionID != trial.SessionID {
 		return errors.New("observation describes another session")
+	}
+	// The attestation is about this endpoint, in this probe. A copied one
+	// names somebody else's key and cannot be worn.
+	if trial.Observation.EndpointPublicKeyHex != trial.EndpointPublicKeyHex {
+		return errors.New("observation attests to another endpoint")
+	}
+	if trial.Observation.Probe != string(trial.Probe) {
+		return errors.New("observation attests to another probe")
 	}
 	return nil
 }

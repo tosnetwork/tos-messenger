@@ -28,6 +28,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
@@ -287,15 +288,29 @@ func build(t *testing.T) []Vector {
 	}
 	add("e2ee-binding", bindingBytes, bindingBytes, "")
 
-	// Messaging event.
+	// Messaging event. The body is a real typed payload, because an event
+	// whose content does not parse under its own kind is one the dispatcher
+	// refuses to send and the gate refuses to admit. Freezing such an event
+	// would publish a vector for a message the protocol's main path rejects.
+	textBody, err := payload.Encode(payload.Text{
+		MediaType: "text/plain; charset=utf-8", Body: "hello",
+	})
+	if err != nil {
+		t.Fatalf("payload: %v", err)
+	}
 	event, err := envelope.NewEvent(envelope.Event{
 		Network: del.Network, ConversationID: convoID,
 		SenderAgentID: del.AgentID, SenderEndpointID: del.EndpointID, SenderDeviceID: deviceOne,
-		CreatedAtUnix: baseUnix + 10, Kind: "text", Content: []byte("hello"),
+		CreatedAtUnix: baseUnix + 10, Kind: "text", Content: textBody,
 		Rendering: "hello",
 	})
 	if err != nil {
 		t.Fatalf("event: %v", err)
+	}
+	// The frozen event has to survive the checks the protocol actually runs,
+	// not only the ones the encoder runs.
+	if err := payload.Validate(event.Kind, event.Content); err != nil {
+		t.Fatalf("the frozen event carries a body its own kind rejects: %v", err)
 	}
 	eventWire, err := envelope.EncodeEventJSON(event)
 	if err != nil {
@@ -342,24 +357,48 @@ func build(t *testing.T) []Vector {
 		MinSamplesPerCell: 30, MinOperatorsPerCell: 3, MinSitesPerCell: 3,
 		MaxTrialsPerOperatorPerCell: 20, DirectViableRate: 0.8, TunnelViableRate: 0.95,
 		Coordinators: []string{coordinatorID},
-		RequiredStrata: []reachability.Stratum{
+		RequiredScenarios: []reachability.Scenario{
 			{
-				Family: reachability.FamilyIPv4, Reachability: reachability.NeitherPublic,
-				NATBehavior: reachability.NATEndpointIndependent, Carrier: reachability.CarrierConsumerISP,
-				UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
-				EndpointClass: reachability.ClassDesktop, Assistance: reachability.AssistanceNone,
+				Initiator: reachability.EndpointStratum{
+					Family: reachability.FamilyIPv4, Reachability: reachability.BehindNAT,
+					NATBehavior: reachability.NATEndpointIndependent, Carrier: reachability.CarrierConsumerISP,
+					UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
+					EndpointClass: reachability.ClassDesktop, Assistance: reachability.AssistanceNone,
+				},
+				Responder: reachability.EndpointStratum{
+					Family: reachability.FamilyIPv4, Reachability: reachability.PublicAddress,
+					NATBehavior: reachability.NATNone, Carrier: reachability.CarrierDatacenter,
+					UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
+					EndpointClass: reachability.ClassServer, Assistance: reachability.AssistanceNone,
+				},
 			},
 			{
-				Family: reachability.FamilyIPv6, Reachability: reachability.NeitherPublic,
-				NATBehavior: reachability.NATSymmetric, Carrier: reachability.CarrierCarrierGrade,
-				UDPPolicy: reachability.UDPRateLimited, Mobility: reachability.MobilityStationary,
-				EndpointClass: reachability.ClassEdgeARM, Assistance: reachability.AssistanceNone,
+				Initiator: reachability.EndpointStratum{
+					Family: reachability.FamilyIPv6, Reachability: reachability.BehindNAT,
+					NATBehavior: reachability.NATSymmetric, Carrier: reachability.CarrierCarrierGrade,
+					UDPPolicy: reachability.UDPRateLimited, Mobility: reachability.MobilityStationary,
+					EndpointClass: reachability.ClassEdgeARM, Assistance: reachability.AssistanceNone,
+				},
+				Responder: reachability.EndpointStratum{
+					Family: reachability.FamilyIPv6, Reachability: reachability.BehindNAT,
+					NATBehavior: reachability.NATAddressPortDependent, Carrier: reachability.CarrierConsumerISP,
+					UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
+					EndpointClass: reachability.ClassDesktop, Assistance: reachability.AssistanceNone,
+				},
 			},
 			{
-				Family: reachability.FamilyIPv4, Reachability: reachability.OnePublic,
-				NATBehavior: reachability.NATUndetermined, Carrier: reachability.CarrierMobile,
-				UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityWiFiToMobile,
-				EndpointClass: reachability.ClassMobile, Assistance: reachability.AssistanceNone,
+				Initiator: reachability.EndpointStratum{
+					Family: reachability.FamilyIPv4, Reachability: reachability.BehindNAT,
+					NATBehavior: reachability.NATAddressDependent, Carrier: reachability.CarrierMobile,
+					UDPPolicy: reachability.UDPRateLimited, Mobility: reachability.MobilityWiFiToMobile,
+					EndpointClass: reachability.ClassMobile, Assistance: reachability.AssistanceNone,
+				},
+				Responder: reachability.EndpointStratum{
+					Family: reachability.FamilyIPv4, Reachability: reachability.PublicAddress,
+					NATBehavior: reachability.NATNone, Carrier: reachability.CarrierDatacenter,
+					UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
+					EndpointClass: reachability.ClassServer, Assistance: reachability.AssistanceNone,
+				},
 			},
 		},
 	}

@@ -81,8 +81,8 @@ type Policy struct {
 	// Coordinators predeclares whose attestations count. Without it a signed
 	// observation proves only that somebody signed something, since anyone can
 	// run a coordinator and attest to whatever an operator wants.
-	Coordinators   []string  `json:"coordinators"`
-	RequiredStrata []Stratum `json:"required_strata"`
+	Coordinators      []string   `json:"coordinators"`
+	RequiredScenarios []Scenario `json:"required_scenarios"`
 }
 
 type wirePolicy struct {
@@ -90,36 +90,43 @@ type wirePolicy struct {
 	Policy
 }
 
-// CellReport is the aggregate for one stratum.
+// CellReport is the aggregate for one scenario.
 //
 // The rates are means over operators rather than over trials. Pooling trials
 // would let one operator who ran thousands of attempts decide a cell that
 // everyone else measured a handful of times, and the point of requiring
 // several operators is that no single one of them decides anything.
 type CellReport struct {
-	Stratum    Stratum `json:"stratum"`
-	StratumKey string  `json:"stratum_key"`
-	Samples    int     `json:"samples"`
+	Scenario    Scenario `json:"scenario"`
+	ScenarioKey string   `json:"scenario_key"`
+	// PairReachability is the joint label, derived from the two endpoints
+	// rather than declared by either.
+	PairReachability string `json:"pair_reachability"`
+	Samples          int    `json:"samples"`
 	// Operators counts distinct self-declared operator identifiers whose
 	// endpoint keys did not overlap. Nothing in the study proves that two
 	// identifiers are two independent parties; the count is the floor the
 	// evidence supports, not a claim of independence.
-	Operators         int                  `json:"operators"`
-	Sites             int                  `json:"sites"`
-	DroppedOverCap    int                  `json:"dropped_over_cap"`
-	DirectRate        float64              `json:"direct_rate"`
-	DirectOrProxyRate float64              `json:"direct_or_proxy_rate"`
-	ProxyShare        float64              `json:"proxy_share"`
-	RelayShare        float64              `json:"relay_share"`
-	HTTPSShare        float64              `json:"https_share"`
-	FailureShare      float64              `json:"failure_share"`
-	EstablishP50      uint64               `json:"establish_p50_millis"`
-	EstablishP95      uint64               `json:"establish_p95_millis"`
-	ReconnectP50      uint64               `json:"reconnect_p50_millis"`
-	ReconnectP95      uint64               `json:"reconnect_p95_millis"`
-	SurvivalP50       uint64               `json:"survival_p50_seconds"`
-	FailureCounts     map[FailureClass]int `json:"failure_counts"`
-	Qualifying        bool                 `json:"qualifying"`
+	Operators         int     `json:"operators"`
+	Sites             int     `json:"sites"`
+	DroppedOverCap    int     `json:"dropped_over_cap"`
+	DirectRate        float64 `json:"direct_rate"`
+	DirectOrProxyRate float64 `json:"direct_or_proxy_rate"`
+	ProxyShare        float64 `json:"proxy_share"`
+	RelayShare        float64 `json:"relay_share"`
+	HTTPSShare        float64 `json:"https_share"`
+	FailureShare      float64 `json:"failure_share"`
+	EstablishP50      uint64  `json:"establish_p50_millis"`
+	EstablishP95      uint64  `json:"establish_p95_millis"`
+	ReconnectP50      uint64  `json:"reconnect_p50_millis"`
+	ReconnectP95      uint64  `json:"reconnect_p95_millis"`
+	SurvivalP50       uint64  `json:"survival_p50_seconds"`
+	// SurvivalSamples counts the pairs where both halves measured survival. A
+	// percentile over one-sided data would describe one endpoint's session,
+	// not the pair's.
+	SurvivalSamples int                  `json:"survival_samples"`
+	FailureCounts   map[FailureClass]int `json:"failure_counts"`
+	Qualifying      bool                 `json:"qualifying"`
 }
 
 // Report is the published study result.
@@ -194,46 +201,59 @@ func (p Policy) Validate() error {
 	if p.TunnelViableRate < p.DirectViableRate {
 		return errors.New("the tunnel bar cannot be lower than the direct bar")
 	}
-	if len(p.RequiredStrata) == 0 || len(p.RequiredStrata) > MaxStrataPerPolicy {
-		return errors.New("a policy must predeclare its required strata")
+	if len(p.RequiredScenarios) == 0 || len(p.RequiredScenarios) > MaxScenariosPerPolicy {
+		return errors.New("a policy must predeclare its required scenarios")
 	}
-	keys := make(map[string]struct{}, len(p.RequiredStrata))
+	keys := make(map[string]struct{}, len(p.RequiredScenarios))
 	coverage := struct {
-		behindNAT   bool
-		carriers    map[Carrier]struct{}
-		families    map[AddressFamily]struct{}
-		udpPolicies map[UDPPolicy]struct{}
-		lowCost     bool
-		mobile      bool
+		neitherPublic bool
+		asymmetric    bool
+		carriers      map[Carrier]struct{}
+		families      map[AddressFamily]struct{}
+		udpPolicies   map[UDPPolicy]struct{}
+		lowCost       bool
+		mobile        bool
 	}{
 		carriers:    map[Carrier]struct{}{},
 		families:    map[AddressFamily]struct{}{},
 		udpPolicies: map[UDPPolicy]struct{}{},
 	}
-	for _, stratum := range p.RequiredStrata {
-		if err := stratum.Validate(); err != nil {
+	for _, scenario := range p.RequiredScenarios {
+		if err := scenario.Validate(); err != nil {
 			return err
 		}
-		key := stratum.Key()
+		key := scenario.Key()
 		if _, duplicate := keys[key]; duplicate {
-			return errors.New("a policy cannot require the same stratum twice")
+			return errors.New("a policy cannot require the same scenario twice")
 		}
 		keys[key] = struct{}{}
-		if stratum.Reachability != BothPublic {
-			coverage.behindNAT = true
+		if scenario.PairReachability() == "neither-public" {
+			coverage.neitherPublic = true
 		}
-		coverage.carriers[stratum.Carrier] = struct{}{}
-		coverage.families[stratum.Family] = struct{}{}
-		coverage.udpPolicies[stratum.UDPPolicy] = struct{}{}
-		if stratum.EndpointClass == ClassEdgeARM || stratum.EndpointClass == ClassEdgeRISC {
-			coverage.lowCost = true
+		if scenario.Asymmetric() {
+			coverage.asymmetric = true
 		}
-		if stratum.EndpointClass == ClassMobile || stratum.Carrier == CarrierMobile {
-			coverage.mobile = true
+		for _, endpoint := range []EndpointStratum{scenario.Initiator, scenario.Responder} {
+			coverage.carriers[endpoint.Carrier] = struct{}{}
+			coverage.families[endpoint.Family] = struct{}{}
+			coverage.udpPolicies[endpoint.UDPPolicy] = struct{}{}
+			if endpoint.EndpointClass == ClassEdgeARM || endpoint.EndpointClass == ClassEdgeRISC {
+				coverage.lowCost = true
+			}
+			if endpoint.EndpointClass == ClassMobile || endpoint.Carrier == CarrierMobile {
+				coverage.mobile = true
+			}
 		}
 	}
-	if !coverage.behindNAT {
-		return errors.New("a policy of publicly addressable pairs only is a smoke test")
+	if !coverage.neitherPublic {
+		return errors.New("a policy that never puts two endpoints behind NAT is a smoke test")
+	}
+	// The deployments this architecture is about are asymmetric: a home node
+	// against a datacenter Agent, a phone against a machine behind
+	// carrier-grade NAT. A matrix of matched pairs would answer an easier
+	// question than the one being asked.
+	if !coverage.asymmetric {
+		return errors.New("a policy of matched pairs only has not measured the deployments in question")
 	}
 	for _, required := range []Carrier{CarrierConsumerISP, CarrierCarrierGrade, CarrierMobile} {
 		if _, found := coverage.carriers[required]; !found {
@@ -260,9 +280,9 @@ func (p Policy) CanonicalBytes() ([]byte, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	keys := make([]string, 0, len(p.RequiredStrata))
-	for _, stratum := range p.RequiredStrata {
-		keys = append(keys, stratum.Key())
+	keys := make([]string, 0, len(p.RequiredScenarios))
+	for _, scenario := range p.RequiredScenarios {
+		keys = append(keys, scenario.Key())
 	}
 	sort.Strings(keys)
 	buffer := bytes.NewBufferString(canon.DomainReachabilityPolicy)
@@ -405,7 +425,7 @@ func Aggregate(policy Policy, trials []Trial, probe ProbeKind) (Report, error) {
 	}
 
 	grouped := make(map[string][]pairResult)
-	strata := make(map[string]Stratum)
+	scenarios := make(map[string]Scenario)
 	incomplete := 0
 	for _, both := range halves {
 		result, err := combine(both)
@@ -413,20 +433,20 @@ func Aggregate(policy Policy, trials []Trial, probe ProbeKind) (Report, error) {
 			incomplete++
 			continue
 		}
-		key := result.stratum.Key()
+		key := result.scenario.Key()
 		grouped[key] = append(grouped[key], result)
-		strata[key] = result.stratum
+		scenarios[key] = result.scenario
 	}
 	// A study with nothing complete in it is not an error. It is a study that
 	// concluded nothing, and saying so is the useful answer: every required
-	// stratum comes back missing rather than the caller getting a failure they
+	// scenario comes back missing rather than the caller getting a failure they
 	// might mistake for a tooling problem.
 
 	cells := make([]CellReport, 0, len(grouped))
 	for key, group := range grouped {
-		cells = append(cells, summarize(policy, strata[key], key, group))
+		cells = append(cells, summarize(policy, scenarios[key], key, group))
 	}
-	sort.Slice(cells, func(i, j int) bool { return cells[i].StratumKey < cells[j].StratumKey })
+	sort.Slice(cells, func(i, j int) bool { return cells[i].ScenarioKey < cells[j].ScenarioKey })
 
 	sharedKeys := make([]string, 0, len(shared))
 	for key := range shared {
@@ -443,11 +463,12 @@ func Aggregate(policy Policy, trials []Trial, probe ProbeKind) (Report, error) {
 	return report, nil
 }
 
-func summarize(policy Policy, stratum Stratum, key string, group []pairResult) CellReport {
+func summarize(policy Policy, scenario Scenario, key string, group []pairResult) CellReport {
 	cell := CellReport{
-		Stratum:       stratum,
-		StratumKey:    key,
-		FailureCounts: map[FailureClass]int{},
+		Scenario:         scenario,
+		ScenarioKey:      key,
+		PairReachability: scenario.PairReachability(),
+		FailureCounts:    map[FailureClass]int{},
 	}
 
 	// The cap is applied in digest order, not arrival order, so the same set of
@@ -495,7 +516,7 @@ func summarize(policy Policy, stratum Stratum, key string, group []pairResult) C
 			if pair.reconnect != 0 {
 				reconnect = append(reconnect, pair.reconnect)
 			}
-			if pair.survival != 0 {
+			if pair.survivalMeasured {
 				survival = append(survival, pair.survival)
 			}
 		case OutcomeProxyFallback:
@@ -545,6 +566,7 @@ func summarize(policy Policy, stratum Stratum, key string, group []pairResult) C
 	cell.ReconnectP50 = percentile(reconnect, 50)
 	cell.ReconnectP95 = percentile(reconnect, 95)
 	cell.SurvivalP50 = percentile(survival, 50)
+	cell.SurvivalSamples = len(survival)
 	cell.Qualifying = cell.Samples >= policy.MinSamplesPerCell &&
 		cell.Operators >= policy.MinOperatorsPerCell &&
 		cell.Sites >= policy.MinSitesPerCell
@@ -581,22 +603,22 @@ func kindFor(probe ProbeKind) Kind {
 func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []string, []string) {
 	byKey := make(map[string]CellReport, len(cells))
 	for _, cell := range cells {
-		byKey[cell.StratumKey] = cell
+		byKey[cell.ScenarioKey] = cell
 	}
 	var missing []string
 	var reasons []string
 	directViable, tunnelViable, evaluated := 0, 0, 0
-	for _, stratum := range policy.RequiredStrata {
-		key := stratum.Key()
+	for _, scenario := range policy.RequiredScenarios {
+		key := scenario.Key()
 		cell, found := byKey[key]
 		if !found {
 			missing = append(missing, key)
-			reasons = append(reasons, "required stratum was never measured: "+key)
+			reasons = append(reasons, "required scenario was never measured: "+key)
 			continue
 		}
 		if !cell.Qualifying {
 			missing = append(missing, key)
-			reasons = append(reasons, "required stratum is under-sampled: "+key)
+			reasons = append(reasons, "required scenario is under-sampled: "+key)
 			continue
 		}
 		evaluated++
@@ -614,10 +636,10 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 
 	if probe != ProbeADNL {
 		if directViable == evaluated {
-			reasons = append(reasons, "a direct datagram path reached the required rate in every required stratum; this is an input to a route decision, not one")
+			reasons = append(reasons, "a direct datagram path reached the required rate in every required scenario; this is an input to a route decision, not one")
 			return FindingUDPDirectViable, nil, reasons
 		}
-		reasons = append(reasons, "a direct datagram path did not reach the required rate in every required stratum")
+		reasons = append(reasons, "a direct datagram path did not reach the required rate in every required scenario")
 		return FindingUDPDirectNotViable, nil, reasons
 	}
 

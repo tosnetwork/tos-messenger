@@ -38,6 +38,12 @@ type Config struct {
 	PollInterval time.Duration
 	LingerWindow time.Duration
 	Commit       string
+	// EndpointKeyHex is the public key this endpoint will sign its trial with.
+	// It is presented to the coordinator so the attestation names a party, not
+	// only a session.
+	EndpointKeyHex string
+	// Probe names what is being measured.
+	Probe reachability.ProbeKind
 }
 
 // Result is what one endpoint measured.
@@ -172,6 +178,15 @@ func validateConfig(config *Config) error {
 	if config.Role != RoleA && config.Role != RoleB {
 		return errors.New("invalid probe role")
 	}
+	// The coordinator attests to a party, so the party has to be named. A run
+	// that could not say which key would sign its trial would be collecting an
+	// attestation anybody could wear.
+	if !endpointKeyPattern.MatchString(config.EndpointKeyHex) {
+		return errors.New("a probe must present the endpoint key it will sign with")
+	}
+	if config.Probe != reachability.ProbeUDP && config.Probe != reachability.ProbeADNL {
+		return errors.New("a probe must say what it is measuring")
+	}
 	if config.ListenAddr == "" {
 		config.ListenAddr = ":0"
 	}
@@ -277,24 +292,21 @@ func mustKey(encoded string) []byte {
 	return raw
 }
 
-// classifyPair combines what this endpoint measured with what the coordinator
-// reported about the peer.
+// classifySelf records what this endpoint measured about its own situation.
 //
-// When this endpoint is public and the peer is mapped, the peer's NAT class is
-// simply not observable from here, so it is reported as undetermined instead
-// of being borrowed from this side's own measurement.
-func (r *runner) classifyPair(peerPublic string) {
-	switch {
-	case r.selfPublic && peerPublic == PeerPublicYes:
-		r.result.Reachability = reachability.BothPublic
+// It deliberately says nothing about the peer. Whether the far side was
+// publicly addressable is the peer's own fact to report, and the joint label a
+// route decision reads is derived when the two halves are paired. An endpoint
+// that filled in its peer's side would be reporting a cell it cannot observe.
+func (r *runner) classifySelf() {
+	if r.selfPublic {
+		r.result.Reachability = reachability.PublicAddress
 		r.result.Mapping = reachability.NATNone
-	case r.selfPublic:
-		r.result.Reachability = reachability.OnePublic
+		return
+	}
+	r.result.Reachability = reachability.BehindNAT
+	if r.result.Mapping == "" {
 		r.result.Mapping = reachability.NATUndetermined
-	case peerPublic == PeerPublicYes:
-		r.result.Reachability = reachability.OnePublic
-	default:
-		r.result.Reachability = reachability.NeitherPublic
 	}
 }
 
@@ -386,6 +398,7 @@ func (r *runner) exchange(ctx context.Context) ([]netip.AddrPort, error) {
 		request, err := EncodeRequest(Message{
 			Kind: KindPair, SessionID: r.config.SessionID, Role: r.config.Role,
 			Nonce: nonce, Candidates: candidates, Commit: r.config.Commit,
+			EndpointKey: r.config.EndpointKeyHex, Probe: string(r.config.Probe),
 		})
 		if err != nil {
 			return nil, err
@@ -404,7 +417,7 @@ func (r *runner) exchange(ctx context.Context) ([]netip.AddrPort, error) {
 				break
 			}
 			if reply.Kind == KindPairOK && reply.Nonce == nonce && len(reply.Candidates) > 0 {
-				r.classifyPair(reply.PeerPublic)
+				r.classifySelf()
 				r.result.PeerCommit = reply.PeerCommit
 				r.recordObservation(reply)
 				peers := make([]netip.AddrPort, 0, len(reply.Candidates)+len(r.learned))

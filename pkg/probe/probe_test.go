@@ -158,12 +158,23 @@ func TestCoordinatorReportsObservedAddress(t *testing.T) {
 	}
 }
 
+// testEndpointKey is the key an endpoint tells the coordinator it will sign
+// with. The attestation names it, so a test that omitted it would be
+// exercising a pairing the coordinator now refuses.
+func testEndpointKey(role Role) string {
+	if role == RoleB {
+		return strings.Repeat("b", 64)
+	}
+	return strings.Repeat("a", 64)
+}
+
 func TestCoordinatorExchangesCandidates(t *testing.T) {
 	coordinator := testCoordinator(t)
 	pair := func(role Role, from string, candidates []string) Message {
 		t.Helper()
 		request, err := EncodeRequest(Message{
 			Kind: KindPair, SessionID: testSession, Role: role, Nonce: testNonce, Candidates: candidates,
+			EndpointKey: testEndpointKey(role), Probe: string(reachability.ProbeUDP),
 		})
 		if err != nil {
 			t.Fatalf("encode: %v", err)
@@ -239,7 +250,8 @@ func TestCoordinatorRateLimitsAndExpires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("coordinator: %v", err)
 	}
-	request, err := EncodeRequest(Message{Kind: KindPair, SessionID: testSession, Role: RoleA, Nonce: testNonce})
+	request, err := EncodeRequest(Message{Kind: KindPair, SessionID: testSession, Role: RoleA,
+		Nonce: testNonce, EndpointKey: testEndpointKey(RoleA), Probe: string(reachability.ProbeUDP)})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -315,6 +327,7 @@ func TestEndToEndDirectEstablishment(t *testing.T) {
 		t.Fatalf("session: %v", err)
 	}
 	config := Config{
+		EndpointKeyHex: testEndpointKey(RoleA), Probe: reachability.ProbeUDP,
 		Coordinators: []string{address},
 		SessionID:    session,
 		ListenAddr:   "127.0.0.1:0",
@@ -386,6 +399,7 @@ func TestProbeClassifiesAnUnreachableCoordinator(t *testing.T) {
 	// A closed port on loopback answers nothing, which is what a blocked UDP
 	// path looks like to the probe.
 	result, err := Run(ctx, Config{
+		EndpointKeyHex: testEndpointKey(RoleA), Probe: reachability.ProbeUDP,
 		Coordinators: []string{"127.0.0.1:9"},
 		SessionID:    testSession,
 		Role:         RoleA,
@@ -418,6 +432,7 @@ func TestCoordinatorReportsWhetherThePeerIsPublic(t *testing.T) {
 		t.Helper()
 		request, err := EncodeRequest(Message{
 			Kind: KindPair, SessionID: testSession, Role: role, Nonce: testNonce, Candidates: candidates,
+			EndpointKey: testEndpointKey(role), Probe: string(reachability.ProbeUDP),
 		})
 		if err != nil {
 			t.Fatalf("encode: %v", err)
@@ -448,44 +463,44 @@ func TestCoordinatorReportsWhetherThePeerIsPublic(t *testing.T) {
 	}
 }
 
-func TestPairClassificationNeverBorrowsTheLocalMeasurement(t *testing.T) {
+func TestEndpointClassifiesOnlyItself(t *testing.T) {
 	cases := []struct {
 		name         string
 		selfPublic   bool
 		selfMapping  reachability.NATBehavior
-		peerPublic   string
 		reachability reachability.Reachability
 		mapping      reachability.NATBehavior
 	}{
-		{"both public", true, reachability.NATNone, PeerPublicYes, reachability.BothPublic, reachability.NATNone},
-		{"self public, peer mapped", true, reachability.NATNone, PeerPublicNo, reachability.OnePublic, reachability.NATUndetermined},
-		{"self mapped, peer public", false, reachability.NATEndpointIndependent, PeerPublicYes, reachability.OnePublic, reachability.NATEndpointIndependent},
-		{"neither public", false, reachability.NATAddressPortDependent, PeerPublicNo, reachability.NeitherPublic, reachability.NATAddressPortDependent},
+		{"public", true, reachability.NATNone, reachability.PublicAddress, reachability.NATNone},
+		{"mapped, class known", false, reachability.NATEndpointIndependent,
+			reachability.BehindNAT, reachability.NATEndpointIndependent},
+		{"mapped, class unknown", false, "", reachability.BehindNAT, reachability.NATUndetermined},
+		{"public despite a stale mapping guess", true, reachability.NATSymmetric,
+			reachability.PublicAddress, reachability.NATNone},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			instance := &runner{selfPublic: testCase.selfPublic}
 			instance.result.Mapping = testCase.selfMapping
-			instance.classifyPair(testCase.peerPublic)
+			instance.classifySelf()
 			if instance.result.Reachability != testCase.reachability {
 				t.Fatalf("expected %q, got %q", testCase.reachability, instance.result.Reachability)
 			}
 			if instance.result.Mapping != testCase.mapping {
 				t.Fatalf("expected mapping %q, got %q", testCase.mapping, instance.result.Mapping)
 			}
-			stratum := reachability.Stratum{
+			endpoint := reachability.EndpointStratum{
 				Family: reachability.FamilyIPv4, Reachability: instance.result.Reachability,
 				NATBehavior: instance.result.Mapping, Carrier: reachability.CarrierConsumerISP,
 				UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
 				EndpointClass: reachability.ClassDesktop, Assistance: reachability.AssistanceNone,
 			}
-			if err := stratum.Validate(); err != nil {
-				t.Fatalf("classification produced an invalid stratum: %v", err)
+			if err := endpoint.Validate(); err != nil {
+				t.Fatalf("classification produced an invalid endpoint stratum: %v", err)
 			}
 		})
 	}
 }
-
 func TestAddressFamilyIsMeasured(t *testing.T) {
 	four := []netip.AddrPort{source(t, "203.0.113.7:1")}
 	six := []netip.AddrPort{source(t, "[2001:db8::1]:1")}
@@ -514,6 +529,7 @@ func TestSlowPeerIsNotStranded(t *testing.T) {
 		t.Fatalf("session: %v", err)
 	}
 	base := Config{
+		EndpointKeyHex: testEndpointKey(RoleA), Probe: reachability.ProbeUDP,
 		Coordinators: []string{listener.LocalAddr().String()},
 		SessionID:    session,
 		ListenAddr:   "127.0.0.1:0",
@@ -595,6 +611,7 @@ func TestPollingIsPacedNotFlooded(t *testing.T) {
 	const interval = 20 * time.Millisecond
 	const window = 600 * time.Millisecond
 	_, err = Run(context.Background(), Config{
+		EndpointKeyHex: testEndpointKey(RoleA), Probe: reachability.ProbeUDP,
 		Coordinators: []string{listener.LocalAddr().String()},
 		SessionID:    session,
 		Role:         RoleA,

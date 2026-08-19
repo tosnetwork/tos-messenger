@@ -198,11 +198,16 @@ func (c *Coordinator) Handle(request []byte, from netip.AddrPort) []byte {
 // towards.
 func (c *Coordinator) attest(message Message, from netip.AddrPort, peerPublic string) (reachability.Observation, error) {
 	return reachability.SignObservation(reachability.Observation{
-		SessionID:  message.SessionID,
-		Role:       string(message.Role),
-		Observed:   from.String(),
-		PeerPublic: peerPublic,
-		AtUnix:     uint64(c.now().Unix()),
+		SessionID: message.SessionID,
+		Role:      string(message.Role),
+		// The attestation names the party as well as the session. A bystander
+		// who copied it would be presenting a statement about somebody else's
+		// key, which is not a statement they can wear.
+		EndpointPublicKeyHex: message.EndpointKey,
+		Probe:                message.Probe,
+		Observed:             from.String(),
+		PeerPublic:           peerPublic,
+		AtUnix:               uint64(c.now().Unix()),
 	}, c.key)
 }
 

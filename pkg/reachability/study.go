@@ -32,14 +32,19 @@ const (
 	// PolicySchema is the strict acceptance-policy schema identifier.
 	PolicySchema = "tos.messaging.reachability-policy.v1"
 
-	// MaxStrataPerPolicy bounds a predeclared stratum set.
-	MaxStrataPerPolicy = 128
+	// MaxScenariosPerPolicy bounds a predeclared scenario set.
+	MaxScenariosPerPolicy = 128
 )
 
 // AddressFamily is the address family a trial ran over.
 type AddressFamily string
 
-// Reachability is how many endpoints held a publicly reachable address.
+// Reachability is whether one endpoint held a publicly reachable address.
+//
+// It is a property of an endpoint, not of a pair. The joint label a route
+// decision reads -- both public, one public, neither -- is derived from the two
+// endpoints rather than declared, because neither endpoint can observe it and
+// asking both to agree on it is asking them to agree about the other's network.
 type Reachability string
 
 // NATBehavior is the observed mapping and filtering behavior.
@@ -87,9 +92,11 @@ const (
 	FamilyIPv6 AddressFamily = "ipv6"
 	FamilyDual AddressFamily = "dual"
 
-	BothPublic    Reachability = "both-public"
-	OnePublic     Reachability = "one-public"
-	NeitherPublic Reachability = "neither-public"
+	// PublicAddress means this endpoint held an address a peer could reach
+	// without traversal.
+	PublicAddress Reachability = "public"
+	// BehindNAT means it did not.
+	BehindNAT Reachability = "behind-nat"
 
 	NATNone                 NATBehavior = "none"
 	NATEndpointIndependent  NATBehavior = "endpoint-independent"
@@ -144,7 +151,7 @@ const (
 
 var (
 	families      = set(FamilyIPv4, FamilyIPv6, FamilyDual)
-	reachabilties = set(BothPublic, OnePublic, NeitherPublic)
+	reachabilties = set(PublicAddress, BehindNAT)
 	behaviors     = set(NATNone, NATEndpointIndependent, NATAddressDependent, NATAddressPortDependent, NATSymmetric, NATUndetermined)
 	carriers      = set(CarrierDatacenter, CarrierConsumerISP, CarrierCarrierGrade, CarrierMobile)
 	udpPolicies   = set(UDPAllowed, UDPRateLimited, UDPBlocked)
@@ -169,8 +176,17 @@ func set[T ~string](values ...T) map[T]struct{} {
 	return membership
 }
 
-// Stratum is one cell of the measurement matrix.
-type Stratum struct {
+// EndpointStratum is what one endpoint declares about itself.
+//
+// Every field here is local knowledge: an endpoint knows its own carrier, its
+// own hardware, what its own network does to UDP, and what mapping assistance
+// it has. It knows none of that about its peer, which is why the measurement
+// matrix is built from two of these rather than from one label both sides have
+// to agree on. Requiring agreement would have made the interesting pairs -- a
+// home node against a datacenter Agent, a phone against a machine behind
+// carrier-grade NAT -- impossible to express, because those pairs differ on
+// every field by definition.
+type EndpointStratum struct {
 	Family        AddressFamily `json:"address_family"`
 	Reachability  Reachability  `json:"public_reachability"`
 	NATBehavior   NATBehavior   `json:"nat_behavior"`
@@ -181,35 +197,93 @@ type Stratum struct {
 	Assistance    Assistance    `json:"mapping_assistance"`
 }
 
-// Key is the stable identity of a cell.
-func (s Stratum) Key() string {
+// Key is the stable identity of one endpoint's situation.
+func (e EndpointStratum) Key() string {
 	buffer := &bytes.Buffer{}
-	canon.Text(buffer, string(s.Family))
-	canon.Text(buffer, string(s.Reachability))
-	canon.Text(buffer, string(s.NATBehavior))
-	canon.Text(buffer, string(s.Carrier))
-	canon.Text(buffer, string(s.UDPPolicy))
-	canon.Text(buffer, string(s.Mobility))
-	canon.Text(buffer, string(s.EndpointClass))
-	canon.Text(buffer, string(s.Assistance))
+	e.canonical(buffer)
 	return canon.Digest(buffer.Bytes())
 }
 
+func (e EndpointStratum) canonical(buffer *bytes.Buffer) {
+	canon.Text(buffer, string(e.Family))
+	canon.Text(buffer, string(e.Reachability))
+	canon.Text(buffer, string(e.NATBehavior))
+	canon.Text(buffer, string(e.Carrier))
+	canon.Text(buffer, string(e.UDPPolicy))
+	canon.Text(buffer, string(e.Mobility))
+	canon.Text(buffer, string(e.EndpointClass))
+	canon.Text(buffer, string(e.Assistance))
+}
+
 // Validate enforces the closed dimension vocabulary.
-func (s Stratum) Validate() error {
-	if !member(families, s.Family) || !member(reachabilties, s.Reachability) ||
-		!member(behaviors, s.NATBehavior) || !member(carriers, s.Carrier) ||
-		!member(udpPolicies, s.UDPPolicy) || !member(mobilities, s.Mobility) ||
-		!member(classes, s.EndpointClass) || !member(assistances, s.Assistance) {
-		return errors.New("invalid reachability stratum")
+func (e EndpointStratum) Validate() error {
+	if !member(families, e.Family) || !member(reachabilties, e.Reachability) ||
+		!member(behaviors, e.NATBehavior) || !member(carriers, e.Carrier) ||
+		!member(udpPolicies, e.UDPPolicy) || !member(mobilities, e.Mobility) ||
+		!member(classes, e.EndpointClass) || !member(assistances, e.Assistance) {
+		return errors.New("invalid endpoint stratum")
 	}
-	if s.Reachability == BothPublic && s.NATBehavior != NATNone {
-		return errors.New("a stratum with two public endpoints cannot also describe NAT behavior")
+	if e.Reachability == PublicAddress && e.NATBehavior != NATNone {
+		return errors.New("a publicly addressable endpoint cannot also describe NAT behavior")
 	}
-	if s.Reachability != BothPublic && s.NATBehavior == NATNone {
-		return errors.New("a stratum behind NAT must describe its NAT behavior")
+	if e.Reachability == BehindNAT && e.NATBehavior == NATNone {
+		return errors.New("an endpoint behind NAT must describe its NAT behavior")
 	}
 	return nil
+}
+
+// Scenario is one cell of the measurement matrix: an ordered pair of endpoint
+// situations.
+//
+// The order is the initiating direction, and it is kept rather than
+// normalised. Which side opens the session decides whether a mapping exists
+// when the first packet arrives, so a phone calling a server and a server
+// calling a phone are two measurements, not one measured twice.
+type Scenario struct {
+	Initiator EndpointStratum `json:"initiator"`
+	Responder EndpointStratum `json:"responder"`
+}
+
+// Key is the stable identity of a cell.
+func (s Scenario) Key() string {
+	buffer := &bytes.Buffer{}
+	s.Initiator.canonical(buffer)
+	s.Responder.canonical(buffer)
+	return canon.Digest(buffer.Bytes())
+}
+
+// Validate enforces the vocabulary on both sides.
+func (s Scenario) Validate() error {
+	if err := s.Initiator.Validate(); err != nil {
+		return err
+	}
+	return s.Responder.Validate()
+}
+
+// PairReachability is the joint label, derived rather than declared.
+func (s Scenario) PairReachability() string {
+	public := 0
+	if s.Initiator.Reachability == PublicAddress {
+		public++
+	}
+	if s.Responder.Reachability == PublicAddress {
+		public++
+	}
+	switch public {
+	case 2:
+		return "both-public"
+	case 1:
+		return "one-public"
+	default:
+		return "neither-public"
+	}
+}
+
+// Asymmetric reports whether the two sides differ at all. A study made
+// entirely of matched pairs has not measured the deployments the architecture
+// is actually about.
+func (s Scenario) Asymmetric() bool {
+	return s.Initiator.Key() != s.Responder.Key()
 }
 
 func member[T ~string](membership map[T]struct{}, value T) bool {
@@ -217,9 +291,11 @@ func member[T ~string](membership map[T]struct{}, value T) bool {
 	return found
 }
 
-// Trial is one measured attempt.
+// Trial is one measured attempt, from one side.
 type Trial struct {
-	Stratum Stratum `json:"stratum"`
+	// Local is what this endpoint declares about itself, and nothing about its
+	// peer. The cell a measurement lands in is built by pairing the two halves.
+	Local EndpointStratum `json:"endpoint"`
 	// PairID is shared by the two endpoints of one measurement, so the two
 	// halves of an attempt can be recognised as one attempt rather than
 	// counted as two independent successes.
@@ -262,7 +338,7 @@ type wireTrial struct {
 // fallback without naming what it fell back from, is not a weak data point --
 // it is an unusable one, and averaging it would quietly move the decision.
 func (t Trial) Validate() error {
-	if err := t.Stratum.Validate(); err != nil {
+	if err := t.Local.Validate(); err != nil {
 		return err
 	}
 	if !operatorPattern.MatchString(t.OperatorID) {
@@ -329,7 +405,7 @@ func (t Trial) CanonicalBytes() ([]byte, error) {
 	}
 	buffer := bytes.NewBufferString(canon.DomainReachabilityTrial)
 	canon.Text(buffer, TrialSchema)
-	canon.Text(buffer, t.Stratum.Key())
+	canon.Text(buffer, t.Local.Key())
 	canon.Text(buffer, t.PairID)
 	canon.Text(buffer, t.SiteID)
 	canon.Text(buffer, t.OperatorID)
@@ -466,7 +542,7 @@ func SiteID(name string) (string, error) {
 
 // PairID derives the identifier the two endpoints of one measurement share.
 func PairID(session string) (string, error) {
-	digest, err := opaque(canon.DomainReachabilityPair, session)
+	digest, err := opaque(canon.DomainReachabilityPairID, session)
 	if err != nil {
 		return "", errors.New("invalid pair session")
 	}

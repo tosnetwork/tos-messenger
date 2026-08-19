@@ -42,15 +42,41 @@ sample only when the halves agree on the cell, the probe, the outcome, and
 which commit each side was running, and only when they come from two different
 keys in the two different roles. Latency takes the slower half and session
 survival the shorter one, because a session exists only while both ends have
-it. A half whose peer never reported, and a pair whose halves contradict each
-other, are dropped and counted in `incomplete_pairs`. Improving a result
+it. A half whose peer never reported, and a pair whose halves contradict each other
+about the probe, the outcome or the commits, are dropped and counted in
+`incomplete_pairs`. Describing different situations is not a contradiction: it
+is the measurement. Improving a result
 therefore takes both keys, and the keys are what the operator minimum counts.
 
-The stratum is a property of the attempt, not of one endpoint, so both halves
-must declare the same cell. A pair of endpoints in different hardware classes
-has to agree on how the cell is declared before measuring; the vocabulary
-cannot express an asymmetric one, and a disagreement is discarded rather than
-resolved.
+Each half describes **only its own end**. An endpoint knows its own carrier,
+its own hardware, what its own network does to UDP and what mapping assistance
+it has; it knows none of that about its peer. A cell is therefore an ordered
+pair of endpoint situations, not a single label both sides have to agree on.
+Requiring agreement would have made the interesting deployments impossible to
+express -- a home node against a datacenter Agent, a phone against a machine
+behind carrier-grade NAT differ on every field by definition -- and a policy of
+matched pairs only is refused for that reason.
+
+The order is the initiating direction, and it is kept rather than normalised.
+Which side opens the session decides whether a mapping exists when the first
+packet arrives, so a phone calling a server and a server calling a phone are
+two measurements rather than one measured twice.
+
+The joint label a route decision reads -- both public, one public, neither -- is
+**derived** from the two ends rather than declared by either, because neither
+end can observe it.
+
+**An attestation names a party, not only a session.** The coordinator signs the
+endpoint key that will sign the trial and the probe being measured, alongside
+the address it observed. Without that, a published attestation could be copied
+and worn by a third key: a bystander could add a third half to somebody else's
+pair, and a pair is exactly two, so the honest measurement would be discarded.
+The attestation would have become a way to delete other people's evidence.
+
+**Session survival needs both halves.** A zero from one side means "not
+measured", not "the other side's number speaks for both", so a pair contributes
+to the survival percentile only when both ends measured it, and the report says
+how many did.
 
 **One host cannot answer to several names.** Endpoint keys are stable per host,
 and a key seen under more than one operator identifier has every one of its
