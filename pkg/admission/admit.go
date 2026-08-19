@@ -123,6 +123,14 @@ type Config struct {
 	// silently ran without revocation defence would be worse than one that
 	// refused to start.
 	Devices *eventlog.DeviceLedger
+	// Rooms is the per-room membership ledger. It is the membership overlay for
+	// room-addressed events: an event naming a room whose sender this
+	// installation does not hold as a member of that room is refused. It is
+	// optional, because not every installation is in rooms and an event that
+	// names none never consults it; when absent, room events pass the overlay
+	// unchecked, which is the honest state of an installation that tracks no
+	// rooms rather than a silent allow.
+	Rooms *eventlog.RoomLedger
 	// LocalDelegationJSON is this installation's own published delegation, as
 	// it was published. It is verified against finalized state at start, and
 	// it names the inbox policy digest this endpoint told the network it
@@ -267,6 +275,21 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 	}
 	if standing == eventlog.DeviceRevoked {
 		return g.refuse(inbound, fault.CodeDeviceRevoked, class), nil
+	}
+	// A room-addressed event whose sender this installation does not hold as a
+	// member of that room is refused, and only that: an unknown room is not a
+	// non-membership -- our view may simply be behind -- and refusing it would
+	// cut off a room we have not yet caught up to. Like the device ledger, this
+	// is an overlay on the delegation, keyed on the Agent because room members
+	// are Agents, and it runs only when a room ledger is configured.
+	if inbound.Event.RoomID != "" && g.config.Rooms != nil {
+		roomStanding, err := g.config.Rooms.JudgeMember(inbound.Event.RoomID, inbound.Event.SenderAgentID)
+		if err != nil {
+			return Decision{}, err
+		}
+		if roomStanding == eventlog.RoomNotMember {
+			return g.refuse(inbound, fault.CodeNotARoomMember, class), nil
+		}
 	}
 	if !identity.AllowsEventClass(delegation, class) {
 		return g.refuse(inbound, fault.CodeClassNotDelegated, class), nil

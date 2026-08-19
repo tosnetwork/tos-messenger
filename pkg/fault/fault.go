@@ -112,6 +112,13 @@ const (
 	CodeAdmissionRequired Code = "admission-required"
 	// CodeUnknownEventKind reports a kind this build does not recognise.
 	CodeUnknownEventKind Code = "unknown-event-kind"
+	// CodeNotARoomMember reports an event addressed to a room whose sender this
+	// installation does not hold as a member of that room at its current epoch.
+	// It is peer-visible and a refresh, not permanent: a sender removed since
+	// they last synchronised needs to learn it, and one this installation has
+	// simply not caught up to can be re-admitted once it has, so the remedy is
+	// to reconcile membership rather than to give up.
+	CodeNotARoomMember Code = "not-a-room-member"
 	// CodeContentTooLarge reports content beyond the accepted bound.
 	CodeContentTooLarge Code = "content-too-large"
 	// CodePayloadMalformed reports a body that is not what its own kind says
@@ -188,6 +195,7 @@ var registry = map[Code]spec{
 	CodeClassNotDelegated:  {Permanent, true, false},
 	CodeAdmissionRequired:  {Refresh, true, true},
 	CodeUnknownEventKind:   {Permanent, true, false},
+	CodeNotARoomMember:     {Refresh, true, false},
 	CodeContentTooLarge:    {Permanent, true, false},
 	CodePayloadMalformed:   {Permanent, true, false},
 	CodeEventOutsideWindow: {Permanent, true, false},

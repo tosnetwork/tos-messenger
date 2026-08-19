@@ -15,6 +15,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
+	"github.com/tosnetwork/tos-messenger/pkg/room"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -198,6 +199,15 @@ func localState(t *testing.T, policy ContactPolicy) (identity.Delegation, []byte
 
 func testGate(t *testing.T, policy ContactPolicy) (*Gate, *eventlog.Journal, identity.Delegation, []byte) {
 	t.Helper()
+	return newTestGate(t, policy, nil)
+}
+
+// newTestGate builds a gate, optionally with a room-membership overlay. seed is
+// nil for the common case that has nothing to do with rooms; otherwise it is
+// called with a room ledger on the gate's own journal, to seed memberships
+// before the gate judges against them.
+func newTestGate(t *testing.T, policy ContactPolicy, seed func(*testing.T, *eventlog.RoomLedger)) (*Gate, *eventlog.Journal, identity.Delegation, []byte) {
+	t.Helper()
 	delegation, encoded := testDelegation(t)
 	digest, err := identity.Digest(delegation)
 	if err != nil {
@@ -208,6 +218,15 @@ func testGate(t *testing.T, policy ContactPolicy) (*Gate, *eventlog.Journal, ide
 		t.Fatalf("journal: %v", err)
 	}
 	t.Cleanup(func() { _ = journal.Close() })
+
+	var rooms *eventlog.RoomLedger
+	if seed != nil {
+		rooms, err = journal.OpenRooms()
+		if err != nil {
+			t.Fatalf("rooms: %v", err)
+		}
+		seed(t, rooms)
+	}
 
 	local, localEncoded, localAgentState := localState(t, policy)
 	gate, err := New(Config{
@@ -223,6 +242,7 @@ func testGate(t *testing.T, policy ContactPolicy) (*Gate, *eventlog.Journal, ide
 		}},
 		Journal:             journal,
 		Devices:             mustDevices(t, journal),
+		Rooms:               rooms,
 		Policy:              policy,
 		LocalDelegationJSON: localEncoded,
 		LocalAgentID:        local.AgentID,
@@ -234,6 +254,90 @@ func testGate(t *testing.T, policy ContactPolicy) (*Gate, *eventlog.Journal, ide
 		t.Fatalf("gate: %v", err)
 	}
 	return gate, journal, delegation, encoded
+}
+
+var overlayRoom = "room_" + strings.Repeat("a", 64)
+
+func seedRoom(members ...string) func(*testing.T, *eventlog.RoomLedger) {
+	return func(t *testing.T, rooms *eventlog.RoomLedger) {
+		t.Helper()
+		membership, err := room.Found(overlayRoom, members)
+		if err != nil {
+			t.Fatalf("found room: %v", err)
+		}
+		if _, err := rooms.Advance(membership, time.Unix(int64(baseUnix)+5, 0)); err != nil {
+			t.Fatalf("advance room: %v", err)
+		}
+	}
+}
+
+// The room-membership overlay: an event addressed to a room whose sender this
+// installation does not hold as a member is refused, and only that. An unknown
+// room, or no overlay at all, is not a refusal -- the sender is judged only
+// where this installation actually knows the membership.
+func TestRoomMembershipOverlay(t *testing.T) {
+	otherMember := "agent_" + strings.Repeat("7", 64)
+	roomEvent := func(t *testing.T, delegation identity.Delegation) (envelope.Event, []byte) {
+		event := testEvent(t, delegation, func(e *envelope.Event) { e.RoomID = overlayRoom })
+		return event, nil
+	}
+
+	t.Run("member is admitted", func(t *testing.T) {
+		gate, _, delegation, encoded := newTestGate(t, OpenInbox(), seedRoom(senderID, otherMember))
+		event, _ := roomEvent(t, delegation)
+		decision, err := gate.Admit(inbound(event, encoded))
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if decision.Outcome != Accepted {
+			t.Fatalf("a room member was refused: %q (%s)", decision.Outcome, decision.Code)
+		}
+	})
+
+	t.Run("non-member is refused", func(t *testing.T) {
+		// The room exists in the ledger but does not contain the sender.
+		gate, _, delegation, encoded := newTestGate(t, OpenInbox(), seedRoom(otherMember))
+		event, _ := roomEvent(t, delegation)
+		decision, err := gate.Admit(inbound(event, encoded))
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if decision.Outcome != Rejected || decision.Code != fault.CodeNotARoomMember {
+			t.Fatalf("a non-member was not refused as such: %+v", decision)
+		}
+		if decision.Response.Code != fault.CodeNotARoomMember {
+			t.Fatal("a non-member was not told why")
+		}
+	})
+
+	t.Run("unknown room is admitted", func(t *testing.T) {
+		// A room ledger exists but holds a different room; the addressed room is
+		// unknown, which is not a non-membership.
+		other := "room_" + strings.Repeat("b", 64)
+		gate, _, delegation, encoded := newTestGate(t, OpenInbox(), seedRoom(otherMember))
+		event := testEvent(t, delegation, func(e *envelope.Event) { e.RoomID = other })
+		decision, err := gate.Admit(inbound(event, encoded))
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if decision.Outcome != Accepted {
+			t.Fatalf("an unknown room was refused rather than admitted: %+v", decision)
+		}
+	})
+
+	t.Run("no overlay admits room events", func(t *testing.T) {
+		// No room ledger configured: the overlay is off, and a room event passes
+		// unchecked rather than being blocked.
+		gate, _, delegation, encoded := testGate(t, OpenInbox())
+		event, _ := roomEvent(t, delegation)
+		decision, err := gate.Admit(inbound(event, encoded))
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if decision.Outcome != Accepted {
+			t.Fatalf("a room event was blocked with no overlay configured: %+v", decision)
+		}
+	})
 }
 
 func inbound(event envelope.Event, delegationJSON []byte) Inbound {

@@ -216,6 +216,46 @@ func (l *RoomLedger) Judge(roomID string, epoch uint64, agentID string) (RoomSta
 	return RoomNotMember, nil
 }
 
+// JudgeMember classifies whether an Agent is a member of a room at the epoch
+// this installation currently holds, without a claimed epoch.
+//
+// It is the overlay an admission gate consults for a room-addressed event: the
+// gate knows the room from the envelope but not the sender's claimed epoch, and
+// the question it can answer is the one it can act on -- is this sender a member
+// of the room as we currently know it. A room with no record is RoomUnknown,
+// which the gate treats as "our view may be behind", not as a refusal, exactly
+// as an unknown device is not a revoked one.
+func (l *RoomLedger) JudgeMember(roomID, agentID string) (RoomStanding, error) {
+	if l == nil {
+		return "", errors.New("no room ledger")
+	}
+	if err := l.journal.usable(); err != nil {
+		return "", err
+	}
+	if !ids.Room.MatchString(roomID) {
+		return "", errors.New("invalid room identifier")
+	}
+	if !ids.Agent.MatchString(agentID) {
+		return "", errors.New("invalid member identifier")
+	}
+	l.journal.mutex.Lock()
+	defer l.journal.mutex.Unlock()
+
+	record, found, err := l.read(roomID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return RoomUnknown, nil
+	}
+	for _, m := range record.Members {
+		if m == agentID {
+			return RoomMember, nil
+		}
+	}
+	return RoomNotMember, nil
+}
+
 // Current returns the membership on record for one room, reconstructed as a
 // room.Membership so a caller can derive the next epoch from it.
 func (l *RoomLedger) Current(roomID string) (room.Membership, bool, error) {
