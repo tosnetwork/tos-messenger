@@ -29,6 +29,21 @@ type stubResolver struct {
 	states map[string]*nativev1.NativeStateV1
 }
 
+// stubLocator stands in for the registry's addressing rules. The account it
+// returns is the one the finalized state in these tests claims to come from,
+// so the binding is exercised rather than bypassed.
+var testAccount = "0:" + strings.Repeat("d", 64)
+
+type stubLocator struct{ accounts map[string]string }
+
+func (s stubLocator) Locate(codeHash, _ string) (string, error) {
+	account, known := s.accounts[codeHash]
+	if !known {
+		return "", errors.New("no registry code configured")
+	}
+	return account, nil
+}
+
 func (s stubResolver) ResolveAgent(id string) (*nativev1.NativeStateV1, bool, error) {
 	state, found := s.states[id]
 	return state, found, nil
@@ -37,7 +52,10 @@ func (s stubResolver) ResolveAgent(id string) (*nativev1.NativeStateV1, bool, er
 const testRegistryCode = "tvm-cell-sha256:" + "abababababababababababababababababababababababababababababababab"
 
 func testChain() identity.ChainPolicy {
-	return identity.ChainPolicy{RegistryCodeHashes: []string{testRegistryCode}}
+	return identity.ChainPolicy{
+		RegistryCodeHashes: []string{testRegistryCode},
+		Locator:            stubLocator{accounts: map[string]string{testRegistryCode: testAccount}},
+	}
 }
 
 // A finalized native state shaped the way a correct resolver returns one.
@@ -46,7 +64,7 @@ func nativeState(agent *nativev1.AgentStateV1) *nativev1.NativeStateV1 {
 		Network:      testNetwork(),
 		TvmStateHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
 		Reference: &nativev1.ChainReference{
-			Workchain: 0, Account: "0:" + strings.Repeat("d", 64),
+			Workchain: 0, Account: testAccount,
 			LogicalTime: 42, TransactionHash: "sha256:" + strings.Repeat("e", 64),
 			ContractCodeHash: testRegistryCode, FinalizedCheckpoint: 100,
 		},

@@ -18,6 +18,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
+	"github.com/tosnetwork/tos-messenger/pkg/tosaddr"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -64,9 +65,12 @@ type Config struct {
 	GenesisRootHash string `json:"genesis_root_hash"`
 	GenesisFileHash string `json:"genesis_file_hash"`
 
-	// RegistryCodeHashes are the registry contracts whose finalized state this
-	// installation accepts.
-	RegistryCodeHashes []string `json:"registry_code_hashes"`
+	// Registries are the registry contracts whose finalized state this
+	// installation accepts. Each carries its code as well as its hash, because
+	// an account address is recomputed from the code: pinning only the hash
+	// would leave the installation unable to check that a resolver's answer
+	// came from the account it must come from.
+	Registries []RegistryConfig `json:"registries"`
 	// MinFinalizedCheckpoint refuses state older than a point the operator
 	// already knows about.
 	MinFinalizedCheckpoint uint64 `json:"min_finalized_checkpoint,omitempty"`
@@ -101,12 +105,44 @@ func (c Config) Identity() dispatch.Identity {
 	return dispatch.Identity{AgentID: c.AgentID, EndpointID: c.EndpointID, DeviceID: c.DeviceID}
 }
 
-// Chain returns the configured acceptance rules for finalized state.
-func (c Config) Chain() identity.ChainPolicy {
-	return identity.ChainPolicy{
-		RegistryCodeHashes:     c.RegistryCodeHashes,
+// RegistryConfig is one registry contract and everything needed to address
+// objects under it.
+type RegistryConfig struct {
+	CodeHash string `json:"code_hash"`
+	// CodeBOC is the contract code itself, base64 BOC. It must hash to
+	// CodeHash, so a mismatched pair is a configuration error rather than a
+	// quiet acceptance of whatever code was supplied.
+	CodeBOC   string `json:"code_boc"`
+	Workchain int32  `json:"workchain"`
+}
+
+// Chain returns the configured acceptance rules for finalized state, including
+// the locator that recomputes account addresses.
+func (c Config) Chain() (identity.ChainPolicy, error) {
+	hashes := make([]string, 0, len(c.Registries))
+	registries := make([]tosaddr.Registry, 0, len(c.Registries))
+	for _, registry := range c.Registries {
+		hashes = append(hashes, registry.CodeHash)
+		registries = append(registries, tosaddr.Registry{
+			CodeHash: registry.CodeHash, CodeBOC: registry.CodeBOC, Workchain: registry.Workchain,
+		})
+	}
+	policy := identity.ChainPolicy{
+		RegistryCodeHashes:     hashes,
 		MinFinalizedCheckpoint: c.MinFinalizedCheckpoint,
 	}
+	// The policy is checked before the locator is built, so an operator with a
+	// malformed registry list is told about the list rather than about a
+	// derived failure further down.
+	if err := policy.Validate(); err != nil && len(hashes) == 0 {
+		return identity.ChainPolicy{}, err
+	}
+	locator, err := tosaddr.New(c.Network(), registries)
+	if err != nil {
+		return identity.ChainPolicy{}, err
+	}
+	policy.Locator = locator
+	return policy, nil
 }
 
 // SweepInterval is how often queued events are attempted.
@@ -160,7 +196,11 @@ func (c Config) Validate() error {
 		!canon.HashPattern.MatchString(c.GenesisFileHash) {
 		return errors.New("invalid network domain")
 	}
-	if err := c.Chain().Validate(); err != nil {
+	chain, err := c.Chain()
+	if err != nil {
+		return err
+	}
+	if err := chain.Validate(); err != nil {
 		return err
 	}
 	if err := c.Identity().Validate(); err != nil {

@@ -27,8 +27,15 @@ Nothing about acceptance has a default, because a default here is a decision
 nobody made:
 
 - the **network tuple** the installation belongs to;
-- the **registry code hashes** whose finalized state it accepts, since typed
-  TVM state is only meaningful under the contract that produced it; and
+- the **registries** whose finalized state it accepts, since typed TVM state is
+  only meaningful under the contract that produced it. Each entry carries the
+  contract's code as well as its hash, because an Agent's account address is
+  recomputed from the code: a resolver could otherwise return the right Agent
+  record read from an account of its own choosing. The code must hash to the
+  pinned digest, and the example file's value is a placeholder rather than a
+  deployed registry;
+- **who this installation speaks for** — its Agent, endpoint and device — since
+  an outbound event must say it came from here; and
 - the **transport**, which today can only be `"none"`.
 
 An unknown key in the configuration is refused rather than ignored. A

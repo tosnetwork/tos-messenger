@@ -3,6 +3,7 @@ package identity
 import (
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,21 @@ type stubResolver struct {
 	err    error
 }
 
+// stubLocator stands in for the registry's addressing rules. The account it
+// returns is the one the finalized state in these tests claims to come from,
+// so the binding is exercised rather than bypassed.
+var testAccount = "0:" + strings.Repeat("d", 64)
+
+type stubLocator struct{ accounts map[string]string }
+
+func (s stubLocator) Locate(codeHash, _ string) (string, error) {
+	account, known := s.accounts[codeHash]
+	if !known {
+		return "", errors.New("no registry code configured")
+	}
+	return account, nil
+}
+
 func (s stubResolver) ResolveAgent(agentID string) (*nativev1.NativeStateV1, bool, error) {
 	if s.err != nil {
 		return nil, false, s.err
@@ -27,7 +43,10 @@ func (s stubResolver) ResolveAgent(agentID string) (*nativev1.NativeStateV1, boo
 const testRegistryCode = "tvm-cell-sha256:" + "abababababababababababababababababababababababababababababababab"
 
 func testChain() ChainPolicy {
-	return ChainPolicy{RegistryCodeHashes: []string{testRegistryCode}}
+	return ChainPolicy{
+		RegistryCodeHashes: []string{testRegistryCode},
+		Locator:            stubLocator{accounts: map[string]string{testRegistryCode: testAccount}},
+	}
 }
 
 // A finalized native state shaped the way a correct resolver returns one.
@@ -36,7 +55,7 @@ func nativeState(agent *nativev1.AgentStateV1) *nativev1.NativeStateV1 {
 		Network:      testNetwork(),
 		TvmStateHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
 		Reference: &nativev1.ChainReference{
-			Workchain: 0, Account: "0:" + strings.Repeat("d", 64),
+			Workchain: 0, Account: testAccount,
 			LogicalTime: 42, TransactionHash: "sha256:" + strings.Repeat("e", 64),
 			ContractCodeHash: testRegistryCode, FinalizedCheckpoint: 100,
 		},
@@ -537,5 +556,40 @@ func TestChainPolicyMustNameARegistry(t *testing.T) {
 	}
 	if err := testChain().Validate(); err != nil {
 		t.Fatalf("a policy naming one registry was refused: %v", err)
+	}
+}
+
+// A resolver that returned the right Agent record read from an account of its
+// own choosing would pass every other check. Recomputing the address is what
+// closes that.
+func TestAgentStateMustComeFromTheAgentAccount(t *testing.T) {
+	delegation := testDelegation(t)
+	agentID := delegation.AgentID
+	agent := &nativev1.AgentStateV1{AgentId: agentID, Policy: &nativev1.ControllerPolicyV1{Threshold: 1}}
+	policy := testChain()
+
+	state := nativeState(agent)
+	if _, err := CheckState(policy, testNetwork(), agentID, state); err != nil {
+		t.Fatalf("correct state was refused: %v", err)
+	}
+
+	elsewhere := nativeState(agent)
+	elsewhere.Reference.Account = "0:" + strings.Repeat("e", 64)
+	if _, err := CheckState(policy, testNetwork(), agentID, elsewhere); err == nil {
+		t.Fatal("Agent state read from another account was accepted")
+	}
+
+	// A registry the locator cannot address is an error, never a pass.
+	unaddressable := ChainPolicy{
+		RegistryCodeHashes: []string{testRegistryCode},
+		Locator:            stubLocator{accounts: map[string]string{}},
+	}
+	if _, err := CheckState(unaddressable, testNetwork(), agentID, nativeState(agent)); err == nil {
+		t.Fatal("state under an unaddressable registry was accepted")
+	}
+
+	// A policy with no locator cannot decide anything at all.
+	if err := (ChainPolicy{RegistryCodeHashes: []string{testRegistryCode}}).Validate(); err == nil {
+		t.Fatal("a chain policy with no locator was accepted")
 	}
 }

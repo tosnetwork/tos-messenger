@@ -21,24 +21,30 @@ import (
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
-const registryCode = "tvm-cell-sha256:" + "abababababababababababababababababababababababababababababababab"
+// A real, if trivial, contract code cell. The account binding is recomputed
+// from the code, so a test using an invented hash would be testing a
+// configuration the daemon now refuses.
+const (
+	registryBOC  = "te6cckEBAQEABwAACk1FU0cB2RT7gA=="
+	registryCode = "tvm-cell-sha256:c42a36d160f60ec70926f63cb06d7429306e332b2e3752b275971ad628c0c9f1"
+)
 
 func testConfig(t *testing.T) Config {
 	t.Helper()
 	root := t.TempDir()
 	return Config{
-		Schema:             ConfigSchema,
-		StateDir:           filepath.Join(root, "state"),
-		SocketPath:         filepath.Join(root, "run", "runtime.sock"),
-		OwnerSocketPath:    filepath.Join(root, "run", "owner.sock"),
-		NetworkID:          "tos-local",
-		GenesisRootHash:    strings.Repeat("a", 64),
-		GenesisFileHash:    strings.Repeat("b", 64),
-		RegistryCodeHashes: []string{registryCode},
-		AgentID:            "agent_" + strings.Repeat("2", 64),
-		EndpointID:         "mep_" + strings.Repeat("3", 64),
-		DeviceID:           "dev_" + strings.Repeat("4", 64),
-		Transport:          TransportNone,
+		Schema:          ConfigSchema,
+		StateDir:        filepath.Join(root, "state"),
+		SocketPath:      filepath.Join(root, "run", "runtime.sock"),
+		OwnerSocketPath: filepath.Join(root, "run", "owner.sock"),
+		NetworkID:       "tos-local",
+		GenesisRootHash: strings.Repeat("a", 64),
+		GenesisFileHash: strings.Repeat("b", 64),
+		Registries:      []RegistryConfig{{CodeHash: registryCode, CodeBOC: registryBOC, Workchain: 0}},
+		AgentID:         "agent_" + strings.Repeat("2", 64),
+		EndpointID:      "mep_" + strings.Repeat("3", 64),
+		DeviceID:        "dev_" + strings.Repeat("4", 64),
+		Transport:       TransportNone,
 	}
 }
 
@@ -278,16 +284,23 @@ func TestConfigurationMustBeStated(t *testing.T) {
 		"socket in state":   func(c *Config) { c.SocketPath = filepath.Join(c.StateDir, "messenger.sock") },
 		"no network":        func(c *Config) { c.NetworkID = "" },
 		"bad genesis":       func(c *Config) { c.GenesisRootHash = "zz" },
-		"no registry":       func(c *Config) { c.RegistryCodeHashes = nil },
-		"bad registry":      func(c *Config) { c.RegistryCodeHashes = []string{"sha256:" + strings.Repeat("a", 64)} },
-		"no transport":      func(c *Config) { c.Transport = "" },
-		"unknown transport": func(c *Config) { c.Transport = "adnl" },
-		"fast sweep":        func(c *Config) { c.SweepIntervalSeconds = 0; c.SweepIntervalSeconds = 0 },
-		"short retention":   func(c *Config) { c.RetentionSeconds = 60 },
+		"no registry":       func(c *Config) { c.Registries = nil },
+		"bad registry hash": func(c *Config) { c.Registries[0].CodeHash = "sha256:" + strings.Repeat("a", 64) },
+		"registry code that does not hash to its pin": func(c *Config) {
+			c.Registries[0].CodeHash = "tvm-cell-sha256:" + strings.Repeat("a", 64)
+		},
+		"registry with no code": func(c *Config) { c.Registries[0].CodeBOC = "" },
+		"no transport":          func(c *Config) { c.Transport = "" },
+		"unknown transport":     func(c *Config) { c.Transport = "adnl" },
+		"fast sweep":            func(c *Config) { c.SweepIntervalSeconds = 0; c.SweepIntervalSeconds = 0 },
+		"short retention":       func(c *Config) { c.RetentionSeconds = 60 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
 			config := base
+			// The registry list is a slice, so a mutation would otherwise
+			// reach through every later case and the completeness check.
+			config.Registries = append([]RegistryConfig(nil), base.Registries...)
 			mutate(&config)
 			if name == "fast sweep" {
 				return
@@ -313,7 +326,7 @@ func TestUnknownConfigurationKeysAreRefused(t *testing.T) {
 		"network_id": "tos-local",
 		"genesis_root_hash": "` + strings.Repeat("a", 64) + `",
 		"genesis_file_hash": "` + strings.Repeat("b", 64) + `",
-		"registry_code_hashes": ["` + registryCode + `"],
+		"registries": [{"code_hash": "` + registryCode + `", "code_boc": "` + registryBOC + `", "workchain": 0}],
 		"agent_id": "agent_` + strings.Repeat("2", 64) + `",
 		"endpoint_id": "mep_` + strings.Repeat("3", 64) + `",
 		"device_id": "dev_` + strings.Repeat("4", 64) + `",

@@ -76,6 +76,8 @@ than silently forking two implementations.
 | Payload typing | every event kind has a codec in `pkg/payload`; a body that does not parse under its kind is refused inbound and cannot be queued outbound | `payload.Decode`, `admission.Gate.Admit`, `dispatch.Dispatcher.Queue` |
 | Payload encoding | canonical binary, domain-separated by the payload's own schema; JSON stays a transport encoding | `payload.Encode` |
 | Foreign protocols | a2a and mcp bodies are typed only as a wrapper naming protocol and version; the body stays opaque and untrusted | `payload.Foreign` |
+| Account binding | the account a finalized Agent record came from is recomputed from the network, object identifier, registry code and workchain, and compared; a chain policy without a locator cannot validate | `identity.ChainPolicy.Locator`, `tosaddr.Locator` |
+| Addressing rules | called through the protocol SDK rather than reimplemented, because a second implementation of an addressing rule can drift and a drifted check refuses correct state | `tosaddr` |
 | Inbox policy binding | the gate refuses to start unless the policy in memory answers to the digest the endpoint published in its delegation; the digest commits the rule, not the roster | `admission.New`, `admission.ContactPolicy.Digest` |
 | Unit of evidence | one measurement is a matched pair of signed halves that agree on cell, probe, outcome and commits; unmatched or contradicting halves are dropped and counted | `reachability.combine` |
 | Operator weighting | rates are means over operators, with a per-operator cap on how much of a cell one may contribute, applied in digest order so submission order cannot choose the sample, and drops reported rather than silently truncated | `reachability.summarize` |
@@ -102,13 +104,11 @@ than silently forking two implementations.
 
 ## Named but not established
 
-`identity.AccountBindingUnchecked` records the one binding this boundary does
-not make. An Agent account address is deterministic from the network, object
-identifier, registry code, and workchain, so it could be recomputed and
-compared against the chain reference. That derivation lives with the registry
-addressing rules and is not reachable from here, so the account is checked for
-shape and not for identity: a resolver returning the right Agent record under
-the wrong account would not be caught by this package.
+The genesis hashes in a network domain are carried here as bare hex and by the
+protocol SDK with a `sha256:` prefix. Both describe the same 32 bytes, and
+`tosaddr.normalize` converts at the boundary rather than reinterpreting either
+side's field. Which form the protocol freezes on is open, and settling it is a
+prerequisite for freezing the network domain's canonical preimage.
 
 ## Not proposed here
 

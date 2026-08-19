@@ -29,6 +29,20 @@ type AgentResolver interface {
 	ResolveAgent(string) (*nativev1.NativeStateV1, bool, error)
 }
 
+// AccountLocator recomputes the deterministic account address an object must
+// live at under a given registry contract.
+//
+// It is an interface here rather than a derivation because the addressing
+// rules belong to the registry, not to the Messenger. Reimplementing them
+// would create a second implementation that can silently drift from the one
+// the chain actually uses, and a drifted address check is worse than none: it
+// would refuse correct state.
+type AccountLocator interface {
+	// Locate returns the account address for an object under one registry code
+	// hash. An unknown code hash is an error, never a pass.
+	Locate(registryCodeHash, objectID string) (string, error)
+}
+
 // ChainPolicy is what a caller predeclares about the finalized state it will
 // accept.
 //
@@ -43,6 +57,11 @@ type ChainPolicy struct {
 	// MinFinalizedCheckpoint refuses state finalized before a point the
 	// operator already knows about. Zero accepts any finalized state.
 	MinFinalizedCheckpoint uint64
+	// Locator recomputes the account address an object must live at. It is
+	// required: without it a resolver could return the right Agent record read
+	// from the wrong account, and every check downstream would pass. An
+	// optional binding is a binding an operator can forget to make.
+	Locator AccountLocator
 }
 
 // Validate enforces that a chain policy can decide anything.
@@ -59,6 +78,9 @@ func (c ChainPolicy) Validate() error {
 			return errors.New("a chain policy cannot name the same registry code twice")
 		}
 		seen[hash] = struct{}{}
+	}
+	if c.Locator == nil {
+		return errors.New("a chain policy must be able to recompute account addresses")
 	}
 	return nil
 }
@@ -122,6 +144,16 @@ func CheckState(policy ChainPolicy, network *nativev1.NetworkDomain, agentID str
 	if !chainDigestPattern.MatchString(reference.TransactionHash) {
 		return nil, errors.New("resolver returned state with no transaction hash")
 	}
+	// The account is deterministic from the object and the registry that
+	// produced it. Recomputing it is what stops a resolver from handing back a
+	// genuine Agent record it read from an account of its own choosing.
+	expected, err := policy.Locator.Locate(reference.ContractCodeHash, agentID)
+	if err != nil {
+		return nil, errors.New("could not recompute the Agent account address: " + err.Error())
+	}
+	if expected != reference.Account {
+		return nil, errors.New("resolver returned Agent state from the wrong account")
+	}
 	agent := state.GetAgent()
 	if agent == nil {
 		return nil, errors.New("resolver returned state that is not an Agent")
@@ -134,13 +166,3 @@ func CheckState(policy ChainPolicy, network *nativev1.NetworkDomain, agentID str
 	}
 	return agent, nil
 }
-
-// AccountBindingUnchecked records what this boundary does not establish.
-//
-// An Agent account address is deterministic from the network, the object
-// identifier, the registry code, and the workchain, so the account in a chain
-// reference could be recomputed and compared. That derivation lives with the
-// registry addressing rules and is not available here, so the account is
-// checked for shape and not for identity. A resolver that returned the right
-// Agent record under the wrong account would not be caught by this package.
-const AccountBindingUnchecked = "agent account address is not recomputed at this boundary"

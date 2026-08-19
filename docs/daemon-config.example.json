@@ -9,8 +9,12 @@
   "genesis_root_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "genesis_file_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 
-  "registry_code_hashes": [
-    "tvm-cell-sha256:abababababababababababababababababababababababababababababababab"
+  "registries": [
+    {
+      "code_hash": "tvm-cell-sha256:c42a36d160f60ec70926f63cb06d7429306e332b2e3752b275971ad628c0c9f1",
+      "code_boc": "te6cckEBAQEABwAACk1FU0cB2RT7gA==",
+      "workchain": 0
+    }
   ],
   "min_finalized_checkpoint": 0,
 
