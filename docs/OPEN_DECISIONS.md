@@ -27,6 +27,12 @@ than silently forking two implementations.
 | Study acceptance policy | content-addressed, and required to cover NAT, consumer ISP, carrier-grade NAT, mobile, two address families, two UDP-policy environments, a low-cost class, and a mobile endpoint | `reachability.Policy.Validate` |
 | Route decision rule | every required stratum viable direct → direct-first; none viable but all lifted by a proxy → tunnel-first; some viable → hybrid; otherwise relay-first | `reachability.decide` |
 | Operator identity | opaque `op_` prefix over a digest of a local operator name, so diversity is counted without collecting identity | `reachability.OperatorID` |
+| Suite identifier form | `tos.messaging.e2ee.<name>.v<n>`, so a suite can be negotiated, deprecated, and upgraded | `e2ee.AlgorithmPattern` |
+| Ciphertext binding | network tuple, suite, conversation, and both sides' Agent, endpoint, and device identifiers, with direction included | `e2ee.Binding` |
+| Ciphertext expansion bound | at most 512 bytes over the plaintext | `e2ee.MaxCiphertextOverheadBytes` |
+| Prekey bundle bounds | material at most 4 KiB, lifetime at most 30 days, at most 16 devices per published set | `pkg/e2ee` constants |
+| Descriptor prekey commitment | digest over the sorted per-device bundle digests, so adding or removing a device changes the descriptor | `e2ee.SetDigest` |
+| Snapshot contract | key material only, excluding replay bookkeeping, so a compromise check cannot be dodged by retaining a seen-list | `e2ee.Session.Snapshot` |
 | Probe amplification floor | requests padded to 512 bytes; a response larger than its request is never sent | `probe.MinRequestBytes`, `probe.CheckNoAmplification` |
 | Coordinator limits | 5 minute pairing TTL, 4096 pairings, 600 requests per source address per minute | `probe.CoordinatorOptions` defaults |
 
@@ -36,7 +42,9 @@ These remain entirely open, and this repository deliberately contains no
 implementation of them:
 
 - the one-to-one end-to-end encryption suite and library, and the hybrid
-  post-quantum migration schedule;
+  post-quantum migration schedule. `pkg/e2ee` fixes what a candidate must
+  provide and how it is refuted; it selects nothing and implements no
+  cryptography;
 - the group key-management protocol, where MLS (RFC 9420) is the recorded
   default candidate that an alternative must be justified against;
 - private-room transport, beyond the per-device fan-out default;

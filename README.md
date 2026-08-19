@@ -28,9 +28,12 @@ decision:
 | `pkg/directory` | Signed Messaging Contact Descriptor, bounded DHT locator, and the discovery half of the resolution algorithm |
 | `pkg/envelope` | Outer Relay Envelope and inner typed Messaging Event, including content-addressed Event IDs |
 | `pkg/eventlog` | Single-writer durable claim and delivery-state journal |
+| `pkg/e2ee` | The contract a candidate encryption suite must satisfy, message bindings, and published prekey bundles |
+| `pkg/e2ee/conformance` | Refutes a candidate suite: ten properties a black-box run can disprove |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
 | `pkg/probe` | M0-R measurement transport: rendezvous coordinator and UDP establishment probe |
 | `internal/canon` | Domain-separated length-prefixed canonical encoding shared by every signed object |
+| `internal/ids` | Every identifier pattern, defined once |
 | `internal/dirlock` | Exclusive process ownership of one private state directory |
 
 The measurement side is deliberately separate from the protocol side. Nothing
@@ -48,8 +51,9 @@ Commands:
 
 Deliberately absent, with the reason:
 
-- **application end-to-end encryption** — the cryptographic suite is an M0 freeze
-  decision, and this repository must not invent one;
+- **any cryptographic construction** — the suite is a protocol-freeze decision
+  and the architecture forbids inventing one, so `pkg/e2ee` defines the contract
+  a candidate must satisfy and the harness that refutes it, and stops there;
 - **any transport** — direct, tunnel, Relay, and HTTPS ordering is frozen only
   after the reachability study, which is why the study tooling is here and the
   transport is not;
@@ -72,6 +76,8 @@ Deliberately absent, with the reason:
 - The journal reports a claim as fresh only after it is durably on disk.
 - Evidence is judged against thresholds that were fixed before it was
   collected, and a study that misses its own minimums produces no decision.
+- A conformance run can only refute. Passing every check clears a floor; it
+  does not approve a construction.
 
 ## Build and test
 

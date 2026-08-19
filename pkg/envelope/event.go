@@ -3,13 +3,13 @@ package envelope
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"regexp"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
@@ -29,11 +29,11 @@ const (
 )
 
 var (
-	conversationPattern = regexp.MustCompile(`^conv_[0-9a-f]{64}$`)
-	eventPattern        = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
-	devicePattern       = regexp.MustCompile(`^dev_[0-9a-f]{64}$`)
-	roomPattern         = regexp.MustCompile(`^room_[0-9a-f]{64}$`)
-	threadPattern       = regexp.MustCompile(`^thr_[0-9a-f]{64}$`)
+	conversationPattern = ids.Conversation
+	eventPattern        = ids.Event
+	devicePattern       = ids.Device
+	roomPattern         = ids.Room
+	threadPattern       = ids.Thread
 	idempotencyPattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	bindingPattern      = regexp.MustCompile(`^(?:sha256|tvm-cell-sha256):[0-9a-f]{64}$`)
 )
@@ -432,16 +432,10 @@ func validateAttachments(references []string) error {
 
 // ConversationID formats a conversation identifier.
 func ConversationID(raw []byte) (string, error) {
-	if len(raw) != 32 || canon.IsZero(raw) {
-		return "", errors.New("invalid conversation identifier")
-	}
-	return "conv_" + hex.EncodeToString(raw), nil
+	return ids.Format("conv_", raw)
 }
 
 // DeviceID formats a device identifier.
 func DeviceID(raw []byte) (string, error) {
-	if len(raw) != 32 || canon.IsZero(raw) {
-		return "", errors.New("invalid device identifier")
-	}
-	return "dev_" + hex.EncodeToString(raw), nil
+	return ids.Format("dev_", raw)
 }

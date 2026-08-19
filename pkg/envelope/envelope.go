@@ -15,7 +15,6 @@ package envelope
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -23,6 +22,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/ids"
 )
 
 const (
@@ -41,8 +41,8 @@ const (
 )
 
 var (
-	mailboxPattern      = regexp.MustCompile(`^mbx_[0-9a-f]{64}$`)
-	messagePattern      = regexp.MustCompile(`^msg_[0-9a-f]{64}$`)
+	mailboxPattern      = ids.Mailbox
+	messagePattern      = ids.RelayMessage
 	storageTokenPattern = regexp.MustCompile(`^[0-9a-zA-Z._~-]+$`)
 )
 
@@ -178,18 +178,12 @@ func AcceptedForStorage(relayEnvelope RelayEnvelope, now time.Time, maxRetention
 // MailboxID formats a recipient-generated opaque mailbox identifier. The
 // recipient chooses the bytes; the Relay only ever sees the formatted value.
 func MailboxID(raw []byte) (string, error) {
-	if len(raw) != 32 || canon.IsZero(raw) {
-		return "", errors.New("invalid opaque mailbox identifier")
-	}
-	return "mbx_" + hex.EncodeToString(raw), nil
+	return ids.Format("mbx_", raw)
 }
 
 // MessageID formats a per-envelope identifier used for Relay-level
 // deduplication. It is not the application Event ID and must never be treated
 // as one: a Relay can forge it, an Event ID it cannot.
 func MessageID(raw []byte) (string, error) {
-	if len(raw) != 32 || canon.IsZero(raw) {
-		return "", errors.New("invalid relay message identifier")
-	}
-	return "msg_" + hex.EncodeToString(raw), nil
+	return ids.Format("msg_", raw)
 }

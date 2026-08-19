@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/ids"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -50,16 +51,15 @@ const (
 	MaxSessionLifetimeSeconds = 30 * 24 * 60 * 60
 )
 
-// Identifier patterns are exported because discovery and event objects must
-// apply exactly the same rules; a second, slightly different pattern elsewhere
-// is how identifier confusion gets in.
+// Identifier patterns are re-exported from the single definition in
+// internal/ids so discovery and event objects apply exactly the same rules.
 var (
 	// AgentPattern matches a finalized Agent identifier.
-	AgentPattern = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
+	AgentPattern = ids.Agent
 	// EndpointPattern matches a Messaging Endpoint identifier.
-	EndpointPattern = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
+	EndpointPattern = ids.Endpoint
 	// ADNLPattern matches an ADNL identity commitment.
-	ADNLPattern = regexp.MustCompile(`^adnl:[0-9a-f]{64}$`)
+	ADNLPattern = ids.ADNL
 
 	eventClassPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$`)
 )
