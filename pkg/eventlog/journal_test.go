@@ -817,3 +817,71 @@ func TestClosedJournalRefusesDeliveryWork(t *testing.T) {
 		t.Fatal("a closed journal pruned records")
 	}
 }
+
+// Without an attempt nothing settles an outbound event, so an install with no
+// transport would accumulate records past their expiry that are never swept
+// and never pruned.
+func TestExpiredDeliveriesAreSettledWithoutAnAttempt(t *testing.T) {
+	journal, _ := openJournal(t)
+	now := time.Unix(int64(acceptAt), 0)
+
+	short := outbound(eventA)
+	short.ExpiresAtUnix = acceptAt + 60
+	if _, _, err := journal.Enqueue(short); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	long := outbound(eventB)
+	if _, _, err := journal.Enqueue(long); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if expired, err := journal.ExpireDeliveries(now); err != nil || expired != 0 {
+		t.Fatalf("a live delivery was expired: %d %v", expired, err)
+	}
+
+	past := time.Unix(int64(short.ExpiresAtUnix)+1, 0)
+	expired, err := journal.ExpireDeliveries(past)
+	if err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if expired != 1 {
+		t.Fatalf("expected one expiry, got %d", expired)
+	}
+	settled, found, err := journal.LookupDelivery(eventA)
+	if err != nil || !found {
+		t.Fatalf("lookup: found=%v err=%v", found, err)
+	}
+	if settled.State != StateAbandoned || settled.SettledAtUnix == 0 || settled.LastCode == "" {
+		t.Fatalf("an expired delivery was not settled with a reason: %+v", settled)
+	}
+	if live, _, err := journal.LookupDelivery(eventB); err != nil || live.State != StatePending {
+		t.Fatalf("a live delivery was settled: %+v %v", live, err)
+	}
+
+	// And it can now be pruned, which it could not be while it sat pending.
+	report, err := journal.Prune(past.Add(MinClaimRetention+time.Hour), MinClaimRetention)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if report.DeliveriesRemoved != 1 {
+		t.Fatalf("the settled delivery was not pruned: %+v", report)
+	}
+}
+
+// A held delivery expires too. Waiting on a person is not a reason to wait
+// past the point the event itself said it stops mattering.
+func TestHeldDeliveriesAlsoExpire(t *testing.T) {
+	journal, _ := openJournal(t)
+	now := time.Unix(int64(acceptAt), 0)
+	request := outbound(eventA)
+	request.ExpiresAtUnix = acceptAt + 60
+	if _, _, err := journal.Enqueue(request); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := journal.Failed(eventA, fault.CodeApprovalRequired, now); err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+	if expired, err := journal.ExpireDeliveries(time.Unix(int64(request.ExpiresAtUnix)+1, 0)); err != nil || expired != 1 {
+		t.Fatalf("a held delivery outlived its expiry: %d %v", expired, err)
+	}
+}

@@ -32,6 +32,7 @@ decision:
 | `pkg/admission` | The lower half of the context firewall: authority, scope, window, inbox policy, and the durable claim |
 | `pkg/dispatch` | The outbound half: seal once, send, and apply the retry disposition of whatever came back |
 | `pkg/localapi` | The owner-private socket an Agent runtime drives, and the only place an owner approval exists |
+| `pkg/daemon` | Assembly: one state directory, one socket, one schedule |
 | `pkg/e2ee` | The contract a candidate encryption suite must satisfy as a pure state transition, message bindings, and published prekey bundles |
 | `pkg/e2ee/conformance` | Refutes a candidate suite: ten properties a black-box run can disprove |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
@@ -53,6 +54,7 @@ Commands:
 | `cmd/tos-reachability-coordinator` | Rendezvous service for a measured pair |
 | `cmd/tos-reachability` | Runs one endpoint of one pair and appends a trial record |
 | `cmd/tos-reachability-report` | Aggregates a study log against a predeclared policy; exits non-zero when the study supports no decision |
+| `cmd/tos-messengerd` | Runs one installation. See [`docs/RUNNING.md`](docs/RUNNING.md) |
 
 Deliberately absent, with the reason:
 
@@ -86,6 +88,9 @@ Deliberately absent, with the reason:
   outbound never reuses a key.
 - A retry sends the message that was already sealed. Sealing per attempt would
   spend a message key on every lost packet.
+- An installation with no transport queues durably and says so. It does not
+  seal for a route that does not exist, and it does not read as one that is
+  delivering.
 - Evidence is judged against thresholds that were fixed before it was
   collected, and a study that misses its own minimums produces no decision.
 - A conformance run can only refute. Passing every check clears a floor; it

@@ -54,6 +54,10 @@ than silently forking two implementations.
 | Local boundary | a unix socket in a private directory, narrowed to the owner, with the caller's credentials checked where the platform allows it | `localapi.Listen`, `localapi.verifyPeer` |
 | Owner authority | expressible on the local socket only; the matching event kinds are refused on every network route | `localapi.OpApprove`, `envelope.LocalOnly` |
 | Submission validation | the runtime submits an encoded event which the daemon decodes and validates, because the daemon owns what goes on the wire | `localapi.Server.queue` |
+| Transport statement | no default; an installation states `"none"` deliberately, because a daemon that quietly carried nothing would look like a working one | `daemon.Config.Transport` |
+| Queue without send | a dispatcher may have a journal and no transport, which is the state this project is in; the sending half is all or nothing | `dispatch.New`, `dispatch.ErrNoTransport` |
+| Outbound expiry | applied on a schedule rather than only on an attempt, or an install with no transport would accumulate records that never sweep and never prune | `eventlog.ExpireDeliveries` |
+| Unknown configuration keys | refused, because a misspelled setting that is dropped is one an operator believes is in force | `daemon.DecodeConfig` |
 | Decision record contents | event identifier, outcome, code, route, class, and a salted per-install sender reference; no Agent, endpoint, conversation, or device identifier | `admission.Record` |
 | Inbox policy interface | the mechanism is fixed and always consulted; what an unknown sender must present is not | `admission.ContactPolicy` |
 | Study acceptance policy | content-addressed, and required to cover NAT, consumer ISP, carrier-grade NAT, mobile, two address families, two UDP-policy environments, a low-cost class, and a mobile endpoint | `reachability.Policy.Validate` |

@@ -448,3 +448,55 @@ func readDelivery(path string) (Delivery, error) {
 	}
 	return delivery, nil
 }
+
+// ExpireDeliveries settles outbound events that outlived their own expiry.
+//
+// Without it a delivery only settles when an attempt is made, so an install
+// with no transport, or one whose peer never becomes reachable, accumulates
+// records that are past their expiry, never swept because they are not due,
+// and never pruned because pruning refuses to remove work nobody finished.
+// Expiry is a decision the event itself already made; this applies it.
+func (j *Journal) ExpireDeliveries(now time.Time) (int, error) {
+	if err := j.usable(); err != nil {
+		return 0, err
+	}
+	if now.IsZero() || now.Unix() < 0 {
+		return 0, errors.New("invalid delivery expiry time")
+	}
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+
+	entries, err := os.ReadDir(j.outboundRoot())
+	if err != nil {
+		return 0, errors.New("read delivery journal")
+	}
+	seconds := uint64(now.Unix())
+	expired := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := j.deliveryPathForFile(entry.Name())
+		delivery, err := readDelivery(path)
+		if err != nil {
+			continue
+		}
+		if delivery.State != StatePending && delivery.State != StateHeld {
+			continue
+		}
+		if delivery.ExpiresAtUnix > seconds {
+			continue
+		}
+		delivery.State = StateAbandoned
+		delivery.NextAttemptAtUnix = 0
+		delivery.SettledAtUnix = seconds
+		if delivery.LastCode == "" {
+			delivery.LastCode = fault.CodeTimeout
+		}
+		if _, err := j.commitDelivery(path, delivery); err != nil {
+			return expired, err
+		}
+		expired++
+	}
+	return expired, nil
+}

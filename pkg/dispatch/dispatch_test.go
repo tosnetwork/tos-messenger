@@ -409,10 +409,10 @@ func TestDispatcherRequiresEveryDependency(t *testing.T) {
 	complete := Config{Journal: journal, Suite: countingSuite{seals: &seals},
 		Sender: &fakeSender{}, Bindings: bindings{}}
 	for name, mutate := range map[string]func(*Config){
-		"no journal":  func(c *Config) { c.Journal = nil },
-		"no suite":    func(c *Config) { c.Suite = nil },
-		"no sender":   func(c *Config) { c.Sender = nil },
-		"no bindings": func(c *Config) { c.Bindings = nil },
+		"no journal":           func(c *Config) { c.Journal = nil },
+		"suite without sender": func(c *Config) { c.Sender = nil },
+		"sender without suite": func(c *Config) { c.Suite = nil },
+		"no bindings":          func(c *Config) { c.Bindings = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := complete
@@ -443,5 +443,51 @@ func TestSweepStopsOnACancelledContext(t *testing.T) {
 	}
 	if len(h.sender.sent) != 0 {
 		t.Fatal("a cancelled sweep still sent")
+	}
+}
+
+// An installation with no transport can queue safely and must not read as one
+// that is delivering.
+func TestQueueWithoutATransport(t *testing.T) {
+	journal, err := eventlog.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("journal: %v", err)
+	}
+	defer journal.Close()
+	clock := time.Unix(int64(baseUnix), 0)
+	dispatcher, err := New(Config{Journal: journal, Now: func() time.Time { return clock }})
+	if err != nil {
+		t.Fatalf("dispatcher: %v", err)
+	}
+	if dispatcher.CanSend() {
+		t.Fatal("a dispatcher with no transport claims it can send")
+	}
+
+	event, err := envelope.NewEvent(envelope.Event{
+		Network: &nativev1.NetworkDomain{NetworkId: "tos-local",
+			GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)},
+		ConversationID: convoID, SenderAgentID: senderID, SenderEndpointID: senderMEP,
+		SenderDeviceID: senderDev, CreatedAtUnix: baseUnix + 1, Kind: "text", Content: []byte("queued"),
+	})
+	if err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	fresh, _, err := dispatcher.Queue(event, sessionID, peerMEP, baseUnix+3600)
+	if err != nil || !fresh {
+		t.Fatalf("queue: fresh=%v err=%v", fresh, err)
+	}
+	if _, err := dispatcher.Sweep(context.Background(), 0); !errors.Is(err, ErrNoTransport) {
+		t.Fatalf("expected a sweep without a transport to say so, got %v", err)
+	}
+	// The event is still there, unsealed, waiting for a transport to exist.
+	delivery, found, err := journal.LookupDelivery(event.EventID)
+	if err != nil || !found {
+		t.Fatalf("lookup: found=%v err=%v", found, err)
+	}
+	if delivery.State != eventlog.StatePending {
+		t.Fatalf("a queued event was settled without a transport: %+v", delivery)
+	}
+	if ciphertext, err := delivery.Ciphertext(); err != nil || ciphertext != nil {
+		t.Fatalf("an event was sealed with nothing to carry it: %v", err)
 	}
 }

@@ -53,6 +53,12 @@ type BindingResolver interface {
 }
 
 // Config wires one dispatcher.
+//
+// The journal is required and the sending half is not. Queueing an event needs
+// somewhere durable to put it; sealing and sending need a frozen suite and a
+// chosen route, and neither exists yet. An installation without them can
+// accumulate outbound events safely and cannot pretend to deliver them, which
+// is exactly the state this project is in.
 type Config struct {
 	Journal  *eventlog.Journal
 	Suite    e2ee.Suite
@@ -81,26 +87,35 @@ type Summary struct {
 	Abandoned int
 }
 
-// New builds a dispatcher. Every dependency is required: a dispatcher without
-// a suite would have nothing to seal with, and one without a binding resolver
-// would have to invent the context a ciphertext is bound to.
+// ErrNoTransport reports a dispatcher that can queue but not send.
+var ErrNoTransport = errors.New("no transport is configured")
+
+// New builds a dispatcher.
+//
+// The sending half is all or nothing: a dispatcher with a suite but no sender
+// would seal messages nothing can carry, advancing a ratchet for nothing.
 func New(config Config) (*Dispatcher, error) {
 	if config.Journal == nil {
 		return nil, errors.New("dispatch requires a durable journal")
 	}
-	if config.Suite == nil {
-		return nil, errors.New("dispatch requires an encryption suite")
+	present := 0
+	for _, dependency := range []bool{config.Suite != nil, config.Sender != nil, config.Bindings != nil} {
+		if dependency {
+			present++
+		}
 	}
-	if config.Sender == nil {
-		return nil, errors.New("dispatch requires a sender")
-	}
-	if config.Bindings == nil {
-		return nil, errors.New("dispatch requires a binding resolver")
+	if present != 0 && present != 3 {
+		return nil, errors.New("a sending dispatcher needs a suite, a sender, and a binding resolver")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
 	return &Dispatcher{config: config}, nil
+}
+
+// CanSend reports whether this dispatcher has a transport.
+func (d *Dispatcher) CanSend() bool {
+	return d != nil && d.config.Suite != nil && d.config.Sender != nil && d.config.Bindings != nil
 }
 
 // Queue records an event for delivery.
@@ -141,6 +156,12 @@ func (d *Dispatcher) Queue(event envelope.Event, sessionID, recipientEndpointID 
 func (d *Dispatcher) Sweep(ctx context.Context, limit int) (Summary, error) {
 	if d == nil {
 		return Summary{}, errors.New("no dispatcher")
+	}
+	if !d.CanSend() {
+		// Queued events stay queued. Reporting an error here rather than
+		// sweeping nothing keeps an operator from reading a quiet daemon as a
+		// working one.
+		return Summary{}, ErrNoTransport
 	}
 	now := d.config.Now()
 	if now.IsZero() || now.Unix() < 0 {

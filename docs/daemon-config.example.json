@@ -1,0 +1,20 @@
+{
+  "schema": "tos.messaging.daemon-config.v1",
+
+  "state_dir": "/var/lib/tos-messengerd",
+  "socket_path": "/run/tos-messengerd/messenger.sock",
+
+  "network_id": "tos-local",
+  "genesis_root_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "genesis_file_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+
+  "registry_code_hashes": [
+    "tvm-cell-sha256:abababababababababababababababababababababababababababababababab"
+  ],
+  "min_finalized_checkpoint": 0,
+
+  "transport": "none",
+
+  "sweep_interval_seconds": 5,
+  "maintenance_interval_seconds": 3600
+}
