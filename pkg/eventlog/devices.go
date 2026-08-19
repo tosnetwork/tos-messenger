@@ -9,6 +9,7 @@ import (
 
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
+	"github.com/tosnetwork/tos-messenger/pkg/identity"
 )
 
 const (
@@ -133,6 +134,28 @@ func (l *DeviceLedger) AcceptSet(endpointID string, bundles []e2ee.Bundle, now t
 		return e2ee.Succession{}, err
 	}
 	return succession, nil
+}
+
+// AdmitPublishedSet is the descriptor-fetch populate path: it takes a peer's
+// published prekey set, checks it belongs to the delegated endpoint and
+// matches what the descriptor committed, and only then submits it to
+// succession.
+//
+// The three checks are one operation on purpose. Binding to the delegation
+// establishes the set is signed by the endpoint's own key; matching the
+// descriptor commitment establishes it is the set the peer actually published,
+// not one a DHT replayer substituted; succession establishes it is newer than
+// what is on record and free of revoked devices. Skipping any one of them
+// would let the ledger record a set the peer never stood behind.
+func (l *DeviceLedger) AdmitPublishedSet(delegation identity.Delegation, committedDigest string,
+	bundles []e2ee.Bundle, now time.Time) (e2ee.Succession, error) {
+	if l == nil {
+		return e2ee.Succession{}, errors.New("no device ledger")
+	}
+	if err := e2ee.BindBundleSet(delegation, bundles, committedDigest, now); err != nil {
+		return e2ee.Succession{}, err
+	}
+	return l.AcceptSet(delegation.EndpointID, bundles, now)
 }
 
 // Judge reports how an inbound claim of (endpoint, device) stands against the

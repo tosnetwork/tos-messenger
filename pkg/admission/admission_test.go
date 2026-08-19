@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
@@ -221,6 +222,7 @@ func testGate(t *testing.T, policy ContactPolicy) (*Gate, *eventlog.Journal, ide
 			localID: localAgentState,
 		}},
 		Journal:             journal,
+		Devices:             mustDevices(t, journal),
 		Policy:              policy,
 		LocalDelegationJSON: localEncoded,
 		LocalAgentID:        local.AgentID,
@@ -464,6 +466,7 @@ func TestContentAboveThePublishedBoundIsRefused(t *testing.T) {
 			localID: localAgentState,
 		}},
 		Journal:             journal,
+		Devices:             mustDevices(t, journal),
 		Policy:              OpenInbox(),
 		LocalDelegationJSON: localEncoded,
 		LocalAgentID:        local.AgentID,
@@ -596,7 +599,8 @@ func TestGateRequiresEveryDependency(t *testing.T) {
 	}}
 	complete := Config{
 		Network: testNetwork(), Chain: testChain(), Resolver: resolver, Journal: journal,
-		Policy: OpenInbox(), LocalDelegationJSON: localEncoded,
+		Devices: mustDevices(t, journal),
+		Policy:  OpenInbox(), LocalDelegationJSON: localEncoded,
 		LocalAgentID: local.AgentID, LocalEndpointID: local.EndpointID,
 		Now:         func() time.Time { return time.Unix(int64(baseUnix)+30, 0) },
 		InstallSalt: bytes.Repeat([]byte{1}, MinInstallSaltBytes),
@@ -606,6 +610,7 @@ func TestGateRequiresEveryDependency(t *testing.T) {
 		"bad network":              func(c *Config) { c.Network = &nativev1.NetworkDomain{NetworkId: "x"} },
 		"no resolver":              func(c *Config) { c.Resolver = nil },
 		"no journal":               func(c *Config) { c.Journal = nil },
+		"no device ledger":         func(c *Config) { c.Devices = nil },
 		"no policy":                func(c *Config) { c.Policy = ContactPolicy{} },
 		"no salt":                  func(c *Config) { c.InstallSalt = nil },
 		"short salt":               func(c *Config) { c.InstallSalt = bytes.Repeat([]byte{1}, MinInstallSaltBytes-1) },
@@ -882,6 +887,7 @@ func TestPolicyMustBeTheOnePublished(t *testing.T) {
 	config := Config{
 		Network: testNetwork(), Chain: testChain(), Journal: journal,
 		Resolver:            stubResolver{states: map[string]*nativev1.NativeStateV1{localID: localAgentState}},
+		Devices:             mustDevices(t, journal),
 		Policy:              running,
 		LocalDelegationJSON: localEncoded,
 		LocalAgentID:        local.AgentID,
@@ -978,4 +984,102 @@ func blockList(t *testing.T, blocked ...string) ContactPolicy {
 		t.Fatalf("policy: %v", err)
 	}
 	return policy
+}
+
+// mustDevices opens the device ledger the gate requires.
+func mustDevices(t *testing.T, journal *eventlog.Journal) *eventlog.DeviceLedger {
+	t.Helper()
+	devices, err := journal.OpenDevices()
+	if err != nil {
+		t.Fatalf("devices: %v", err)
+	}
+	return devices
+}
+
+// A device retired from its endpoint's published set is refused, and the
+// refusal is the peer-visible CodeDeviceRevoked so a well-behaved sender
+// learns its device was retired. A device the ledger has never seen still
+// passes: the ledger is a revocation overlay, not an allow list.
+func TestRevokedDeviceIsRefused(t *testing.T) {
+	gate, journal, delegation, encoded := testGate(t, OpenInbox())
+	devices := mustDevices(t, journal)
+
+	// The sender publishes two devices — the one its events name, and a
+	// second — then retires the first.
+	endpointKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x11}, ed25519.SeedSize))
+	full := deviceSet(t, delegation, endpointKey, map[string]uint64{
+		deviceID: baseUnix, otherDevice: baseUnix,
+	})
+	committed, err := e2ee.SetDigest(full)
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	if _, err := devices.AdmitPublishedSet(delegation, committed, full, time.Unix(int64(baseUnix)+1, 0)); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// While the sender's device is current, its event is admitted.
+	event := testEvent(t, delegation, nil)
+	if decision, err := gate.Admit(inbound(event, encoded)); err != nil {
+		t.Fatalf("admit: %v", err)
+	} else if decision.Outcome != Accepted {
+		t.Fatalf("a current device was refused: %+v", decision)
+	}
+
+	// The sender retires that device: same bundles minus it, watermark held.
+	retired := deviceSet(t, delegation, endpointKey, map[string]uint64{otherDevice: baseUnix})
+	retiredDigest, err := e2ee.SetDigest(retired)
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	if _, err := devices.AdmitPublishedSet(delegation, retiredDigest, retired, time.Unix(int64(baseUnix)+2, 0)); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+
+	// Now an event from the retired device is refused, and told why.
+	replay := testEvent(t, delegation, nil)
+	decision, err := gate.Admit(inbound(replay, encoded))
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	if decision.Code != fault.CodeDeviceRevoked {
+		t.Fatalf("a revoked device was not refused as such: %q", decision.Code)
+	}
+	if !fault.PeerVisible(fault.CodeDeviceRevoked) {
+		t.Fatal("a retired sender cannot learn its device was retired")
+	}
+
+	// A device the ledger never saw is not revoked: it passes.
+	unseen := testEvent(t, delegation, func(e *envelope.Event) { e.SenderDeviceID = otherDevice })
+	// otherDevice is current, so this admits; an entirely unknown device would
+	// too, which the delegation authority covers.
+	if decision, err := gate.Admit(inbound(unseen, encoded)); err != nil {
+		t.Fatalf("admit: %v", err)
+	} else if decision.Outcome != Accepted {
+		t.Fatalf("a current second device was refused: %+v", decision)
+	}
+}
+
+const otherDevice = "dev_" + "5555555555555555555555555555555555555555555555555555555555555555"
+
+// deviceSet builds a signed prekey set for the delegated endpoint.
+func deviceSet(t *testing.T, delegation identity.Delegation, endpointKey ed25519.PrivateKey,
+	issued map[string]uint64) []e2ee.Bundle {
+	t.Helper()
+	bundles := make([]e2ee.Bundle, 0, len(issued))
+	for device, at := range issued {
+		bundle := e2ee.Bundle{
+			Network: delegation.Network, AgentID: delegation.AgentID, EndpointID: delegation.EndpointID,
+			DeviceID: device, AlgorithmID: "tos.messaging.e2ee.example-suite.v1",
+			Material:      []byte(strings.Repeat("m", 32) + device[:8]),
+			IssuedAtUnix:  at,
+			ExpiresAtUnix: at + 86_400,
+		}
+		signed, err := e2ee.SignBundle(bundle, endpointKey)
+		if err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		bundles = append(bundles, signed)
+	}
+	return bundles
 }

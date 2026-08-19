@@ -115,6 +115,14 @@ type Config struct {
 	Resolver identity.AgentResolver
 	Journal  *eventlog.Journal
 	Policy   ContactPolicy
+	// Devices is the per-peer device ledger. It is the revocation overlay on
+	// top of the delegation: the delegation says the endpoint may speak, and
+	// the ledger says whether the specific sending device was retired from the
+	// endpoint's published set. It is required, because a gate without it
+	// cannot tell a revoked device from a current one, and a deployment that
+	// silently ran without revocation defence would be worse than one that
+	// refused to start.
+	Devices *eventlog.DeviceLedger
 	// LocalDelegationJSON is this installation's own published delegation, as
 	// it was published. It is verified against finalized state at start, and
 	// it names the inbox policy digest this endpoint told the network it
@@ -157,6 +165,9 @@ func New(config Config) (*Gate, error) {
 	}
 	if config.Journal == nil {
 		return nil, errors.New("admission requires a durable journal")
+	}
+	if config.Devices == nil {
+		return nil, errors.New("admission requires a device ledger to detect revoked devices")
 	}
 	if !config.Policy.Configured() {
 		return nil, errors.New("admission requires an inbox policy")
@@ -244,6 +255,18 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 	if inbound.Event.SenderAgentID != delegation.AgentID ||
 		inbound.Event.SenderEndpointID != delegation.EndpointID {
 		return g.refuse(inbound, fault.CodeSenderMismatch, class), nil
+	}
+	// A device retired from the endpoint's published set is refused, and only
+	// that: an unknown device is not revoked, and refusing it would cut off
+	// every device the peer legitimately added since this installation last
+	// fetched their set. The ledger is a revocation overlay, not an allow
+	// list -- the delegation is the authority that the endpoint may speak.
+	standing, err := g.config.Devices.Judge(delegation.EndpointID, inbound.Event.SenderDeviceID)
+	if err != nil {
+		return Decision{}, err
+	}
+	if standing == eventlog.DeviceRevoked {
+		return g.refuse(inbound, fault.CodeDeviceRevoked, class), nil
 	}
 	if !identity.AllowsEventClass(delegation, class) {
 		return g.refuse(inbound, fault.CodeClassNotDelegated, class), nil

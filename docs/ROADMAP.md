@@ -34,7 +34,7 @@ gate status: this repository carries none and consumes no gate capacity.
 | Messaging Endpoint delegation schema and verifier | ✅ | `pkg/identity`, `pkg/tosaddr` | — |
 | Messaging Contact Descriptor and DHT locator profile | 🟡 | `pkg/directory` | No integration test against a live TOS DHT encoder; the locator is checked against the encoding rules as read, not as run |
 | One-to-one application-layer E2EE | 🟡 | `pkg/e2ee`, `pkg/e2ee/conformance` | No suite, by design: the contract and the refutation harness exist, choosing a construction is a freeze decision |
-| Multi-device session and key-rotation model | 🟡 | `pkg/e2ee` (succession, sessions, fan-out), `pkg/eventlog` (durable device ledger) | The model exists and is durable: device-set succession with rollback and revocation defences, per-pair session derivation, per-event fan-out. **Not yet wired into admission** — a revoked device's event is refusable (`CodeDeviceRevoked`) but the gate consults the ledger only once the descriptor-fetch path populates it, which is the directory package's unfinished half |
+| Multi-device session and key-rotation model | 🟡 | `pkg/e2ee` (succession, sessions, fan-out), `pkg/eventlog` (durable device ledger, `AdmitPublishedSet`), `pkg/admission` | The model is durable and **enforced**: succession with rollback/revocation defences, per-pair session derivation, per-event fan-out, and the admission gate refuses a revoked device with `CodeDeviceRevoked`. Still 🟡 because the descriptor-fetch path that calls `AdmitPublishedSet` is driven only by tests — the daemon does not yet fetch peer descriptors on its own, since it has no live transport to fetch them over |
 | Durable local delivery, application and read state | ✅ | `pkg/eventlog` | — |
 | DeliveryAck and ApplicationAck payload codecs | ✅ | `pkg/payload` | — |
 | StoredAck Relay protocol | ⬜ | — | Needs a Mailbox Relay; the governing design has the Relay issue it |
@@ -82,11 +82,8 @@ repository, and one ✅ or one 🟡 would misstate both halves.
    refuses to bless anything less as a route decision. A single-operator dry
    run of the whole chain is scripted in
    [`M0R_PILOT_RUNBOOK.md`](M0R_PILOT_RUNBOOK.md).
-2. **Wire the device ledger into admission** — the model and its durable store
-   exist; what remains is the descriptor-fetch path populating the ledger so the
-   gate can refuse a revoked device with `CodeDeviceRevoked`.
-3. **The adversarial corpus.**
-4. **Membership epochs for rooms.**
+2. **The adversarial corpus.**
+3. **Membership epochs for rooms.**
 
-Items 2–4 do not require the study; none of the four settles the genesis-hash
+These do not require the study; none of them settles the genesis-hash
 representation, which blocks the freeze itself.
