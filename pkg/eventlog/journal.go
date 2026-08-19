@@ -26,7 +26,9 @@ const (
 	// Schema is the on-disk record schema identifier.
 	Schema = "tos.messaging.event-journal.v1"
 
-	lockName = ".messenger-event-journal.lock"
+	lockName    = ".messenger-event-journal.lock"
+	inboundDir  = "inbound"
+	outboundDir = "outbound"
 
 	// MaxRecordBytes bounds one on-disk record.
 	MaxRecordBytes = 32 << 10
@@ -101,6 +103,11 @@ func Open(root string) (*Journal, error) {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return nil, errors.New("event journal root must be a private directory")
 	}
+	for _, name := range []string{inboundDir, outboundDir} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			return nil, errors.New("create event journal directory")
+		}
+	}
 	ownership, err := dirlock.Acquire(root, lockName)
 	if err != nil {
 		return nil, err
@@ -141,7 +148,7 @@ func (j *Journal) Accept(entry Entry) (bool, Record, error) {
 		if err := writeAndSync(file, path, encoded); err != nil {
 			return false, Record{}, err
 		}
-		if err := syncDirectory(j.root); err != nil {
+		if err := syncDirectory(j.inboundRoot()); err != nil {
 			_ = os.Remove(path)
 			return false, Record{}, err
 		}
@@ -260,7 +267,7 @@ func (j *Journal) advance(eventID string, target State, atUnix uint64) (Record, 
 // replace commits a new record body through a temporary file and an atomic
 // rename, so a crash leaves either the old record or the new one.
 func (j *Journal) replace(path string, encoded []byte) error {
-	temporary, err := os.CreateTemp(j.root, ".transition-")
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".transition-")
 	if err != nil {
 		return errors.New("create event transition")
 	}
@@ -276,7 +283,7 @@ func (j *Journal) replace(path string, encoded []byte) error {
 	if err := os.Rename(name, path); err != nil {
 		return errors.New("commit event transition")
 	}
-	return syncDirectory(j.root)
+	return syncDirectory(filepath.Dir(path))
 }
 
 func (j *Journal) usable() error {
@@ -287,8 +294,15 @@ func (j *Journal) usable() error {
 }
 
 func (j *Journal) path(eventID string) string {
-	return filepath.Join(j.root, eventID[len("evt_"):]+".json")
+	return filepath.Join(j.root, inboundDir, eventID[len("evt_"):]+".json")
 }
+
+func (j *Journal) deliveryPath(eventID string) string {
+	return filepath.Join(j.root, outboundDir, eventID[len("evt_"):]+".json")
+}
+
+func (j *Journal) inboundRoot() string  { return filepath.Join(j.root, inboundDir) }
+func (j *Journal) outboundRoot() string { return filepath.Join(j.root, outboundDir) }
 
 // canAdvance encodes the forward-only state machine.
 func canAdvance(current, target State) bool {
@@ -348,18 +362,28 @@ func syncDirectory(path string) error {
 	return nil
 }
 
-func readRecord(path string) (Record, error) {
+// readRecordBytes applies the file-level checks every journal record shares: a
+// regular, private, bounded file that is not a symlink.
+func readRecordBytes(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return Record{}, err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 ||
 		info.Size() <= 0 || info.Size() > MaxRecordBytes {
-		return Record{}, errors.New("invalid event journal record")
+		return nil, errors.New("invalid event journal record")
 	}
 	value, err := os.ReadFile(path)
 	if err != nil {
-		return Record{}, errors.New("read event journal record")
+		return nil, errors.New("read event journal record")
+	}
+	return value, nil
+}
+
+func readRecord(path string) (Record, error) {
+	value, err := readRecordBytes(path)
+	if err != nil {
+		return Record{}, err
 	}
 	var record Record
 	if err := json.Unmarshal(value, &record); err != nil {
