@@ -161,6 +161,14 @@ The module builds standalone. `GOWORK=off` in the Makefile keeps a developer
 workspace file from silently changing which dependency versions are compiled,
 which is the same reason the sibling Go repositories set it.
 
+## Where this has got to
+
+[`docs/ROADMAP.md`](docs/ROADMAP.md) tracks every component in the governing
+architecture against the code that implements it, with the commit that carries
+each one. It is deliberately conservative: a component counts as done only when
+the behaviour it names is implemented and tested, and anything partial is
+listed with the gap named.
+
 ## Open decisions
 
 Several values here are proposals pending the M0 freeze. They are listed in
