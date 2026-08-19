@@ -12,16 +12,36 @@ import (
 )
 
 type stubResolver struct {
-	states map[string]*nativev1.AgentStateV1
+	states map[string]*nativev1.NativeStateV1
 	err    error
 }
 
-func (s stubResolver) ResolveAgent(agentID string) (*nativev1.AgentStateV1, bool, error) {
+func (s stubResolver) ResolveAgent(agentID string) (*nativev1.NativeStateV1, bool, error) {
 	if s.err != nil {
 		return nil, false, s.err
 	}
 	state, found := s.states[agentID]
 	return state, found, nil
+}
+
+const testRegistryCode = "tvm-cell-sha256:" + "abababababababababababababababababababababababababababababababab"
+
+func testChain() ChainPolicy {
+	return ChainPolicy{RegistryCodeHashes: []string{testRegistryCode}}
+}
+
+// A finalized native state shaped the way a correct resolver returns one.
+func nativeState(agent *nativev1.AgentStateV1) *nativev1.NativeStateV1 {
+	return &nativev1.NativeStateV1{
+		Network:      testNetwork(),
+		TvmStateHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
+		Reference: &nativev1.ChainReference{
+			Workchain: 0, Account: "0:" + strings.Repeat("d", 64),
+			LogicalTime: 42, TransactionHash: "sha256:" + strings.Repeat("e", 64),
+			ContractCodeHash: testRegistryCode, FinalizedCheckpoint: 100,
+		},
+		State: &nativev1.NativeStateV1_Agent{Agent: agent},
+	}
 }
 
 func testNetwork() *nativev1.NetworkDomain {
@@ -72,12 +92,12 @@ func liveAgent(t *testing.T, delegation Delegation) stubResolver {
 	if err != nil {
 		t.Fatalf("digest: %v", err)
 	}
-	return stubResolver{states: map[string]*nativev1.AgentStateV1{
-		delegation.AgentID: {
+	return stubResolver{states: map[string]*nativev1.NativeStateV1{
+		delegation.AgentID: nativeState(&nativev1.AgentStateV1{
 			AgentId:           delegation.AgentID,
 			Policy:            &nativev1.ControllerPolicyV1{Threshold: 1},
 			DelegationDigests: []string{"sha256:" + strings.Repeat("9", 64), digest},
-		},
+		}),
 	}}
 }
 
@@ -283,7 +303,7 @@ func TestVerifyAcceptsCommittedDelegation(t *testing.T) {
 	}
 	resolver := liveAgent(t, delegation)
 	now := time.Unix(int64(delegation.NotBeforeUnix)+1, 0)
-	verified, err := Verify(resolver, testNetwork(), raw, now)
+	verified, err := Verify(resolver, testNetwork(), testChain(), raw, now)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -302,13 +322,13 @@ func TestVerifyRejectsUnauthorizedDelegations(t *testing.T) {
 	live := liveAgent(t, delegation)
 
 	tombstoned := liveAgent(t, delegation)
-	tombstoned.states[delegation.AgentID].Tombstoned = true
+	tombstoned.states[delegation.AgentID].GetAgent().Tombstoned = true
 
 	uncommitted := liveAgent(t, delegation)
-	uncommitted.states[delegation.AgentID].DelegationDigests = []string{"sha256:" + strings.Repeat("9", 64)}
+	uncommitted.states[delegation.AgentID].GetAgent().DelegationDigests = []string{"sha256:" + strings.Repeat("9", 64)}
 
 	noPolicy := liveAgent(t, delegation)
-	noPolicy.states[delegation.AgentID].Policy = nil
+	noPolicy.states[delegation.AgentID].GetAgent().Policy = nil
 
 	otherNetwork := testNetwork()
 	otherNetwork.NetworkId = "tos-other"
@@ -322,7 +342,7 @@ func TestVerifyRejectsUnauthorizedDelegations(t *testing.T) {
 		{"tombstoned Agent", tombstoned, testNetwork(), inside},
 		{"digest not committed", uncommitted, testNetwork(), inside},
 		{"Agent without policy", noPolicy, testNetwork(), inside},
-		{"unknown Agent", stubResolver{states: map[string]*nativev1.AgentStateV1{}}, testNetwork(), inside},
+		{"unknown Agent", stubResolver{states: map[string]*nativev1.NativeStateV1{}}, testNetwork(), inside},
 		{"network mismatch", live, otherNetwork, inside},
 		{"before window", live, testNetwork(), time.Unix(int64(delegation.NotBeforeUnix)-1, 0)},
 		{"after window", live, testNetwork(), time.Unix(int64(delegation.ExpiresAtUnix), 0)},
@@ -331,7 +351,7 @@ func TestVerifyRejectsUnauthorizedDelegations(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if _, err := Verify(testCase.resolver, testCase.network, raw, testCase.now); err == nil {
+			if _, err := Verify(testCase.resolver, testCase.network, testChain(), raw, testCase.now); err == nil {
 				t.Fatalf("expected %q to be rejected", testCase.name)
 			}
 		})
@@ -345,7 +365,7 @@ func TestVerifyPropagatesResolverFailure(t *testing.T) {
 		t.Fatalf("encode: %v", err)
 	}
 	resolver := stubResolver{err: errChain}
-	if _, err := Verify(resolver, testNetwork(), raw, time.Unix(int64(delegation.NotBeforeUnix)+1, 0)); err == nil {
+	if _, err := Verify(resolver, testNetwork(), testChain(), raw, time.Unix(int64(delegation.NotBeforeUnix)+1, 0)); err == nil {
 		t.Fatal("expected a finalized-read failure to be surfaced, not swallowed")
 	}
 }
@@ -419,14 +439,103 @@ func TestVerifyRefusesStateForAnotherAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("digest: %v", err)
 	}
-	confused := stubResolver{states: map[string]*nativev1.AgentStateV1{
-		delegation.AgentID: {
+	confused := stubResolver{states: map[string]*nativev1.NativeStateV1{
+		delegation.AgentID: nativeState(&nativev1.AgentStateV1{
 			AgentId:           "agent_" + strings.Repeat("e", 64),
 			Policy:            &nativev1.ControllerPolicyV1{Threshold: 1},
 			DelegationDigests: []string{digest},
-		},
+		}),
 	}}
-	if _, err := Verify(confused, testNetwork(), raw, time.Unix(int64(delegation.NotBeforeUnix)+1, 0)); err == nil {
+	if _, err := Verify(confused, testNetwork(), testChain(), raw, time.Unix(int64(delegation.NotBeforeUnix)+1, 0)); err == nil {
 		t.Fatal("a delegation was authorized against another Agent's state")
+	}
+}
+
+// Every check the boundary repeats is one a correct resolver already made. The
+// point is what happens when the resolver is not correct.
+func TestChainStateIsReVerifiedAtTheBoundary(t *testing.T) {
+	delegation := testDelegation(t)
+	agent := &nativev1.AgentStateV1{
+		AgentId: delegation.AgentID,
+		Policy:  &nativev1.ControllerPolicyV1{Threshold: 1},
+	}
+	if _, err := CheckState(testChain(), testNetwork(), delegation.AgentID, nativeState(agent)); err != nil {
+		t.Fatalf("a well-formed finalized state was refused: %v", err)
+	}
+
+	cases := map[string]func(*nativev1.NativeStateV1){
+		"another network": func(s *nativev1.NativeStateV1) {
+			s.Network = &nativev1.NetworkDomain{NetworkId: "tos-other",
+				GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)}
+		},
+		"no network":    func(s *nativev1.NativeStateV1) { s.Network = nil },
+		"no state hash": func(s *nativev1.NativeStateV1) { s.TvmStateHash = "" },
+		"no reference":  func(s *nativev1.NativeStateV1) { s.Reference = nil },
+		"not finalized": func(s *nativev1.NativeStateV1) { s.Reference.FinalizedCheckpoint = 0 },
+		"foreign registry": func(s *nativev1.NativeStateV1) {
+			s.Reference.ContractCodeHash = "tvm-cell-sha256:" + strings.Repeat("9", 64)
+		},
+		"no account": func(s *nativev1.NativeStateV1) { s.Reference.Account = "" },
+		"no transaction": func(s *nativev1.NativeStateV1) {
+			s.Reference.TransactionHash = ""
+		},
+		"another Agent": func(s *nativev1.NativeStateV1) {
+			s.GetAgent().AgentId = "agent_" + strings.Repeat("e", 64)
+		},
+		"tombstoned":   func(s *nativev1.NativeStateV1) { s.GetAgent().Tombstoned = true },
+		"no policy":    func(s *nativev1.NativeStateV1) { s.GetAgent().Policy = nil },
+		"not an Agent": func(s *nativev1.NativeStateV1) { s.State = nil },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			state := nativeState(&nativev1.AgentStateV1{
+				AgentId: delegation.AgentID,
+				Policy:  &nativev1.ControllerPolicyV1{Threshold: 1},
+			})
+			mutate(state)
+			if _, err := CheckState(testChain(), testNetwork(), delegation.AgentID, state); err == nil {
+				t.Fatalf("expected %q to be refused", name)
+			}
+		})
+	}
+	if _, err := CheckState(testChain(), testNetwork(), delegation.AgentID, nil); err == nil {
+		t.Fatal("a missing state was accepted")
+	}
+}
+
+// State older than a checkpoint the operator already knows about is a rollback,
+// whatever it says about itself.
+func TestStateOlderThanAKnownCheckpointIsRefused(t *testing.T) {
+	delegation := testDelegation(t)
+	policy := testChain()
+	policy.MinFinalizedCheckpoint = 500
+	state := nativeState(&nativev1.AgentStateV1{
+		AgentId: delegation.AgentID,
+		Policy:  &nativev1.ControllerPolicyV1{Threshold: 1},
+	})
+	if _, err := CheckState(policy, testNetwork(), delegation.AgentID, state); err == nil {
+		t.Fatal("state finalized before the operator's known checkpoint was accepted")
+	}
+	state.Reference.FinalizedCheckpoint = 500
+	if _, err := CheckState(policy, testNetwork(), delegation.AgentID, state); err != nil {
+		t.Fatalf("state at the known checkpoint was refused: %v", err)
+	}
+}
+
+func TestChainPolicyMustNameARegistry(t *testing.T) {
+	for name, policy := range map[string]ChainPolicy{
+		"empty":     {},
+		"bad hash":  {RegistryCodeHashes: []string{"sha256:" + strings.Repeat("a", 64)}},
+		"duplicate": {RegistryCodeHashes: []string{testRegistryCode, testRegistryCode}},
+		"too many":  {RegistryCodeHashes: make([]string, MaxRegistryCodeHashes+1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := policy.Validate(); err == nil {
+				t.Fatalf("expected %q to be refused", name)
+			}
+		})
+	}
+	if err := testChain().Validate(); err != nil {
+		t.Fatalf("a policy naming one registry was refused: %v", err)
 	}
 }

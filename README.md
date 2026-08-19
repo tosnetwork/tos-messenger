@@ -97,6 +97,9 @@ Deliberately absent, with the reason:
 - A commitment nobody reads is worse than none, because it implies an
   enforcement that does not exist. The policy digests a delegation carries are
   checked against the documents they name.
+- Finalized state is re-verified where it is used: which network it came from,
+  that it is final, which registry produced it, and that it describes the Agent
+  that was asked about.
 - Every domain separator is registered in one list, because a reused separator
   is signature confusion rather than a merge conflict.
 

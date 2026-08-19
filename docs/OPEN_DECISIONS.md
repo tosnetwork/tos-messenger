@@ -13,6 +13,8 @@ than silently forking two implementations.
 |---|---|---|
 | Messaging Endpoint identifier derivation | `mep_` + SHA-256 over a domain-separated preimage of the network tuple, Agent ID, and endpoint public key | `identity.DeriveEndpointID` |
 | Delegation authenticity | No separate signature. A delegation is authentic when its canonical digest appears in the finalized Agent's committed delegation digests | `identity.Verify` |
+| Resolver contract | returns the outer native state, so the boundary can check network, finality, registry code, and Agent binding instead of trusting a resolver's implicit promise | `identity.AgentResolver` |
+| Predeclared registry code | typed TVM state means nothing outside the contract that produced it, so state from an unrecognised registry is a different object with a familiar shape | `identity.ChainPolicy` |
 | Delegation lifetime bound | at most 365 days; session lifetime within 60 seconds to 30 days and never longer than the delegation | `identity.validateWindowFields` |
 | Descriptor lifetime bound | at most 7 days, and never beyond the delegation expiry | `directory.ValidateDescriptor`, `directory.Bind` |
 | DHT key | not ours to choose: TOS Core refuses a key description whose identifier is not the short identifier of the publishing key, so it is `sha256` over the boxed `pub.ed25519`, with the protocol name `tos.messaging.locator` and index 0 | `directory.LocatorKey` |
@@ -71,6 +73,16 @@ than silently forking two implementations.
 | Stored ciphertext | a retry sends the committed ciphertext rather than sealing again, because sealing per network retry would consume a message key each time | `eventlog.Delivery.Ciphertext` |
 | Probe amplification floor | requests padded to 512 bytes; a response larger than its request is never sent | `probe.MinRequestBytes`, `probe.CheckNoAmplification` |
 | Coordinator limits | 5 minute pairing TTL, 4096 pairings, 600 requests per source address per minute | `probe.CoordinatorOptions` defaults |
+
+## Named but not established
+
+`identity.AccountBindingUnchecked` records the one binding this boundary does
+not make. An Agent account address is deterministic from the network, object
+identifier, registry code, and workchain, so it could be recomputed and
+compared against the chain reference. That derivation lives with the registry
+addressing rules and is not reachable from here, so the account is checked for
+shape and not for identity: a resolver returning the right Agent record under
+the wrong account would not be caught by this package.
 
 ## Not proposed here
 

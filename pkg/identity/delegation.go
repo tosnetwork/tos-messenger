@@ -61,13 +61,6 @@ var (
 	eventClassPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$`)
 )
 
-// AgentResolver reads finalized Agent state. It is satisfied by the resolver
-// already used for Agent Packet verification; the Messenger never introduces a
-// second authority for Agent identity.
-type AgentResolver interface {
-	ResolveAgent(string) (*nativev1.AgentStateV1, bool, error)
-}
-
 // Delegation is a Messaging Endpoint delegation document. Every field is part
 // of the canonical digest; none of them may be changed without a new on-chain
 // commitment.
@@ -248,7 +241,7 @@ func DecodeJSON(raw []byte) (Delegation, error) {
 // delegation was authorized under the live Agent policy: an Agent account only
 // accumulates a digest through a delegation action signed for that purpose, and
 // loses it when the commitment is withdrawn.
-func Verify(resolver AgentResolver, network *nativev1.NetworkDomain, raw []byte, now time.Time) (Delegation, error) {
+func Verify(resolver AgentResolver, network *nativev1.NetworkDomain, chain ChainPolicy, raw []byte, now time.Time) (Delegation, error) {
 	if resolver == nil || now.IsZero() {
 		return Delegation{}, errors.New("invalid delegation verification context")
 	}
@@ -268,22 +261,19 @@ func Verify(resolver AgentResolver, network *nativev1.NetworkDomain, raw []byte,
 	if err != nil {
 		return Delegation{}, err
 	}
-	if !found || state == nil || state.Tombstoned || state.Policy == nil {
-		return Delegation{}, errors.New("delegation Agent is not finalized and live")
+	if !found {
+		return Delegation{}, errors.New("delegation Agent is not finalized")
 	}
-	// The resolver was asked about one Agent and must have answered about that
-	// Agent. Checking it here costs nothing and keeps a mistaken adapter, a
-	// test double, or a later refactor from authorizing a delegation against
-	// somebody else's finalized state.
-	if state.AgentId != delegation.AgentID {
-		return Delegation{}, errors.New("resolver returned state for another Agent")
+	agent, err := CheckState(chain, network, delegation.AgentID, state)
+	if err != nil {
+		return Delegation{}, err
 	}
 	digest, err := Digest(delegation)
 	if err != nil {
 		return Delegation{}, err
 	}
 	committed := false
-	for _, candidate := range state.DelegationDigests {
+	for _, candidate := range agent.DelegationDigests {
 		if candidate == digest {
 			committed = true
 			break

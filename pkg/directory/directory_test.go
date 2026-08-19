@@ -20,12 +20,32 @@ const (
 )
 
 type stubResolver struct {
-	states map[string]*nativev1.AgentStateV1
+	states map[string]*nativev1.NativeStateV1
 }
 
-func (s stubResolver) ResolveAgent(id string) (*nativev1.AgentStateV1, bool, error) {
+func (s stubResolver) ResolveAgent(id string) (*nativev1.NativeStateV1, bool, error) {
 	state, found := s.states[id]
 	return state, found, nil
+}
+
+const testRegistryCode = "tvm-cell-sha256:" + "abababababababababababababababababababababababababababababababab"
+
+func testChain() identity.ChainPolicy {
+	return identity.ChainPolicy{RegistryCodeHashes: []string{testRegistryCode}}
+}
+
+// A finalized native state shaped the way a correct resolver returns one.
+func nativeState(agent *nativev1.AgentStateV1) *nativev1.NativeStateV1 {
+	return &nativev1.NativeStateV1{
+		Network:      testNetwork(),
+		TvmStateHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
+		Reference: &nativev1.ChainReference{
+			Workchain: 0, Account: "0:" + strings.Repeat("d", 64),
+			LogicalTime: 42, TransactionHash: "sha256:" + strings.Repeat("e", 64),
+			ContractCodeHash: testRegistryCode, FinalizedCheckpoint: 100,
+		},
+		State: &nativev1.NativeStateV1_Agent{Agent: agent},
+	}
 }
 
 func testNetwork() *nativev1.NetworkDomain {
@@ -132,12 +152,12 @@ func liveResolver(t *testing.T, delegation identity.Delegation) stubResolver {
 	if err != nil {
 		t.Fatalf("digest: %v", err)
 	}
-	return stubResolver{states: map[string]*nativev1.AgentStateV1{
-		delegation.AgentID: {
+	return stubResolver{states: map[string]*nativev1.NativeStateV1{
+		delegation.AgentID: nativeState(&nativev1.AgentStateV1{
 			AgentId:           delegation.AgentID,
 			Policy:            &nativev1.ControllerPolicyV1{Threshold: 1},
 			DelegationDigests: []string{digest},
-		},
+		}),
 	}}
 }
 
@@ -155,7 +175,7 @@ func TestResolveAdmitsDelegatedDescriptor(t *testing.T) {
 		t.Fatalf("encode descriptor: %v", err)
 	}
 	now := time.Unix(int64(baseUnix)+60, 0)
-	resolvedDelegation, resolvedDescriptor, err := Resolve(liveResolver(t, delegation), testNetwork(), delegationJSON, descriptorJSON, testPolicy(), now)
+	resolvedDelegation, resolvedDescriptor, err := Resolve(liveResolver(t, delegation), testNetwork(), testChain(), delegationJSON, descriptorJSON, testPolicy(), now)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}

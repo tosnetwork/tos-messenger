@@ -107,7 +107,10 @@ type Inbound struct {
 
 // Config wires one gate.
 type Config struct {
-	Network             *nativev1.NetworkDomain
+	Network *nativev1.NetworkDomain
+	// Chain is what this install accepts as finalized state: which registry
+	// contract produced it, and how far back a checkpoint may be.
+	Chain               identity.ChainPolicy
 	Resolver            identity.AgentResolver
 	Journal             *eventlog.Journal
 	Policy              ContactPolicy
@@ -132,6 +135,9 @@ func New(config Config) (*Gate, error) {
 	}
 	if config.Resolver == nil {
 		return nil, errors.New("admission requires a finalized state resolver")
+	}
+	if err := config.Chain.Validate(); err != nil {
+		return nil, err
 	}
 	if config.Journal == nil {
 		return nil, errors.New("admission requires a durable journal")
@@ -294,7 +300,7 @@ func (g *Gate) authority(inbound Inbound) (identity.Delegation, fault.Code) {
 	if err := identity.CheckWindow(delegation, now); err != nil {
 		return identity.Delegation{}, fault.CodeDelegationExpired
 	}
-	verified, err := identity.Verify(g.config.Resolver, g.config.Network, inbound.DelegationJSON, now)
+	verified, err := identity.Verify(g.config.Resolver, g.config.Network, g.config.Chain, inbound.DelegationJSON, now)
 	if err != nil {
 		return identity.Delegation{}, fault.CodeDelegationUncommitted
 	}

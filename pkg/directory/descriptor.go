@@ -315,8 +315,8 @@ func Bind(delegation identity.Delegation, descriptor Descriptor, policy Descript
 // Establishing a session is deliberately not part of this function. Route
 // selection is frozen only after the reachability study, and a prekey bundle
 // belongs to the encryption profile.
-func Resolve(resolver identity.AgentResolver, network *nativev1.NetworkDomain, delegationJSON, descriptorJSON []byte, policy DescriptorPolicy, now time.Time) (identity.Delegation, Descriptor, error) {
-	delegation, err := identity.Verify(resolver, network, delegationJSON, now)
+func Resolve(resolver identity.AgentResolver, network *nativev1.NetworkDomain, chain identity.ChainPolicy, delegationJSON, descriptorJSON []byte, policy DescriptorPolicy, now time.Time) (identity.Delegation, Descriptor, error) {
+	delegation, err := identity.Verify(resolver, network, chain, delegationJSON, now)
 	if err != nil {
 		return identity.Delegation{}, Descriptor{}, err
 	}
