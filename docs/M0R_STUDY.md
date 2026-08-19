@@ -103,6 +103,48 @@ carrier-grade NAT and mobile carriers, more than one address family, more than
 one UDP-policy environment, a low-cost endpoint class, and a mobile endpoint.
 Two publicly addressable servers cannot satisfy it.
 
+## The ADNL probe
+
+A UDP trial answers whether datagrams pass. Only an ADNL trial can feed a
+route decision, because the route is about sessions, not datagrams: a
+handshake is several packets in both directions with sizes and timing a
+middlebox may treat differently from a probe datagram. The ADNL collector
+reuses the coordinator rendezvous, then hands the rendezvous port to a real
+ADNL gateway (the `tonutils-go` implementation of the protocol TOS inherits).
+
+Three design decisions carry the correctness:
+
+**Exactly one session ever exists.** If both sides dialled, their handshakes
+would cross, and a crossed handshake leaves the two ends holding different
+channel states — packets pass one way and silently vanish the other, and which
+side suffers is a race. So the initiator dials with retries, and the responder
+never dials: its half of the NAT punch is a burst of raw datagrams sent from
+the rendezvous socket before the gateway takes the port. The responder's
+establishment is measured over the inbound session; a session has no preferred
+direction.
+
+**Establishment is a ping round trip.** ADNL answers pings at the protocol
+level, below any handler registration, so a completed round trip proves the
+handshake, the channel, and both directions of the path while requiring
+nothing from the peer beyond its gateway being up.
+
+**The done signal travels through the coordinator, not over the session under
+test.** Each endpoint holds its gateway open until the peer reports done or
+the window ends — closing early would strand the slower endpoint, and that
+error lands systematically on the slower side, which is exactly the bias a
+success rate must not carry. The signal is not carried over the measured ADNL
+session, because a layer must not carry its own test's control plane: "the
+session failed" and "the signalling failed" have to stay distinguishable.
+
+Two honest caveats. Establishment latency includes the rendezvous hand-off
+(the responder's punch burst and gateway rebind), so absolute latencies carry
+a small tooling offset that is identical across scenarios; comparisons between
+cells are unaffected. And the collector speaks the TON lineage of ADNL through
+`tonutils-go`; before a route decision frozen on this evidence is acted on,
+the trials should be cross-checked against the TOS node's own adnl stack —
+every trial records the commit of the collector that produced it, so the
+provenance survives.
+
 ## What is measured and what is declared
 
 The tool measures the address family, the pair's public reachability, the NAT

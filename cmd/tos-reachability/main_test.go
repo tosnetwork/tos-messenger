@@ -1,12 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tosnetwork/tos-messenger/pkg/probe"
+	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 )
 
 func TestSplitAddresses(t *testing.T) {
@@ -26,23 +32,23 @@ func TestMeasureRefusesUnusableInput(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	session := "ses_0123456789abcdef0123456789abcdef"
 
-	if _, err := measure(ctx, "", session, "a", ":0", commit, identityFile(t), time.Second, time.Second, labels); err == nil {
+	if _, err := measure(ctx, "", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, labels); err == nil {
 		t.Fatal("expected a missing coordinator to be refused")
 	}
 	blank := labels
 	blank.operator = ""
-	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), time.Second, time.Second, blank); err == nil {
+	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, blank); err == nil {
 		t.Fatal("expected a missing operator to be refused")
 	}
 	noSite := labels
 	noSite.site = ""
-	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), time.Second, time.Second, noSite); err == nil {
+	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, noSite); err == nil {
 		t.Fatal("expected a missing site to be refused")
 	}
-	if _, err := measure(ctx, "127.0.0.1:1", "ses_short", "a", ":0", commit, identityFile(t), time.Second, time.Second, labels); err == nil {
+	if _, err := measure(ctx, "127.0.0.1:1", "ses_short", "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, labels); err == nil {
 		t.Fatal("expected an invalid session to be refused")
 	}
-	if _, err := measure(ctx, "127.0.0.1:1", session, "c", ":0", commit, identityFile(t), time.Second, time.Second, labels); err == nil {
+	if _, err := measure(ctx, "127.0.0.1:1", session, "c", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, labels); err == nil {
 		t.Fatal("expected an invalid role to be refused")
 	}
 }
@@ -54,7 +60,8 @@ func TestMeasureRefusesToRecordAnUnclassifiedTrial(t *testing.T) {
 		mobility: "stationary", class: "desktop", assistance: "none"}
 	_, err := measure(context.Background(), "127.0.0.1:9",
 		"ses_0123456789abcdef0123456789abcdef", "a", "127.0.0.1:0",
-		strings.Repeat("a", 40), identityFile(t), 200*time.Millisecond, 200*time.Millisecond, labels)
+		strings.Repeat("a", 40), identityFile(t), reachability.ProbeUDP,
+		200*time.Millisecond, 200*time.Millisecond, labels)
 	if err == nil {
 		t.Fatal("expected an unclassified trial to be refused")
 	}
@@ -92,4 +99,89 @@ func TestIdentityIsStable(t *testing.T) {
 	if _, err := loadOrCreateKey(path); err == nil {
 		t.Fatal("a malformed identity file was accepted")
 	}
+}
+
+// The CLI produces a verifiable ADNL trial the same way it produces a UDP one:
+// same rendezvous, same attestation, different measured protocol.
+func TestADNLTrialEndToEnd(t *testing.T) {
+	if probe.RaceEnabled {
+		t.Skip("tonutils-go's TL serializer trips checkptr; the ADNL gateway cannot run under -race")
+	}
+	coordinatorAddress, coordinatorID := startCoordinator(t)
+	session := "ses_0123456789abcdef0123456789abcdef"
+	labels := declared{operator: "op-one", site: "site-one", carrier: "consumer-isp",
+		udpPolicy: "allowed", mobility: "stationary", class: "desktop", assistance: "none"}
+	peerLabels := declared{operator: "op-two", site: "site-two", carrier: "datacenter",
+		udpPolicy: "allowed", mobility: "stationary", class: "server", assistance: "none"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	type outcome struct {
+		trial reachability.Trial
+		err   error
+	}
+	results := make(chan outcome, 2)
+	go func() {
+		trial, err := measure(ctx, coordinatorAddress, session, "a", "127.0.0.1:0",
+			strings.Repeat("a", 40), identityFile(t), reachability.ProbeADNL,
+			8*time.Second, 10*time.Second, labels)
+		results <- outcome{trial: trial, err: err}
+	}()
+	go func() {
+		trial, err := measure(ctx, coordinatorAddress, session, "b", "127.0.0.1:0",
+			strings.Repeat("b", 40), identityFile(t), reachability.ProbeADNL,
+			8*time.Second, 10*time.Second, peerLabels)
+		results <- outcome{trial: trial, err: err}
+	}()
+	policy := testPolicyWith(coordinatorID)
+	for index := 0; index < 2; index++ {
+		received := <-results
+		if received.err != nil {
+			t.Fatalf("measure: %v", received.err)
+		}
+		if received.trial.Probe != reachability.ProbeADNL {
+			t.Fatalf("the trial filed under %q", received.trial.Probe)
+		}
+		if received.trial.Outcome != reachability.OutcomeDirect {
+			t.Fatalf("no direct ADNL session: %q/%q", received.trial.Outcome, received.trial.Failure)
+		}
+		// The full evidence chain holds: endpoint signature, coordinator
+		// attestation naming this endpoint and this probe.
+		if err := reachability.VerifyTrial(policy, received.trial); err != nil {
+			t.Fatalf("the trial does not verify: %v", err)
+		}
+	}
+}
+
+// startCoordinator serves a probe coordinator on loopback and returns its
+// address and derived identifier.
+func startCoordinator(t *testing.T) (string, string) {
+	t.Helper()
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x21}, ed25519.SeedSize))
+	coordinator, err := probe.NewCoordinator(probe.CoordinatorOptions{PrivateKey: key})
+	if err != nil {
+		t.Fatalf("coordinator: %v", err)
+	}
+	listener, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() { _ = coordinator.Serve(listener) }()
+
+	public, ok := key.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected key type")
+	}
+	identifier, err := reachability.CoordinatorID(public)
+	if err != nil {
+		t.Fatalf("coordinator id: %v", err)
+	}
+	return listener.LocalAddr().String(), identifier
+}
+
+// testPolicyWith is the minimal policy VerifyTrial needs: whose attestations
+// count.
+func testPolicyWith(coordinatorID string) reachability.Policy {
+	return reachability.Policy{Coordinators: []string{coordinatorID}}
 }

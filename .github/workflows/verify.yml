@@ -33,6 +33,10 @@ jobs:
       # repository gets wrong under concurrency is invisible without it.
       - name: test
         run: go test -race -count=1 ./...
+      - name: Test ADNL gateway paths (no race detector)
+        # tonutils-go's TL serializer trips checkptr, so the ADNL gateway
+        # cannot run under -race; these tests skip there and run here.
+        run: go test -count=1 -run ADNL ./pkg/probe ./cmd/tos-reachability
 
   # A single-writer journal, a UDP probe, and a binary DHT value all have
   # assumptions about word size and endianness that only another architecture

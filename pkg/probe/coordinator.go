@@ -50,13 +50,16 @@ type Coordinator struct {
 
 type pairing struct {
 	endpoints map[Role]*endpointState
+	done      map[Role]bool
 	touchedAt time.Time
 }
 
 type endpointState struct {
-	observed   netip.AddrPort
-	candidates []string
-	commit     string
+	observed     netip.AddrPort
+	candidates   []string
+	commit       string
+	probe        string
+	transportKey string
 }
 
 // CoordinatorOptions configures a coordinator.
@@ -148,7 +151,7 @@ func (c *Coordinator) Handle(request []byte, from netip.AddrPort) []byte {
 			Nonce: message.Nonce, Observed: from.String(), ServerID: c.serverID,
 		}
 	case KindPair:
-		peer, peerPublic, peerCommit, reason := c.pair(message, from)
+		peer, peerPublic, peerCommit, peerTransportKey, reason := c.pair(message, from)
 		if reason != "" {
 			response = Message{
 				Kind: KindError, SessionID: message.SessionID, Role: message.Role,
@@ -160,6 +163,7 @@ func (c *Coordinator) Handle(request []byte, from netip.AddrPort) []byte {
 			Kind: KindPairOK, SessionID: message.SessionID, Role: message.Role,
 			Nonce: message.Nonce, Observed: from.String(), ServerID: c.serverID,
 			Candidates: peer, PeerPublic: peerPublic, PeerCommit: peerCommit,
+			PeerTransportKey: peerTransportKey,
 		}
 		// The address observed here and whether the peer is publicly
 		// addressable are the two facts that place a trial in its stratum, and
@@ -173,6 +177,12 @@ func (c *Coordinator) Handle(request []byte, from netip.AddrPort) []byte {
 			response.ObservedAt = attested.AtUnix
 			response.SignerKey = attested.PublicKeyHex
 			response.Signature = attested.SignatureHex
+		}
+	case KindDone:
+		peerDone := c.markDone(message)
+		response = Message{
+			Kind: KindDoneOK, SessionID: message.SessionID, Role: message.Role,
+			Nonce: message.Nonce, ServerID: c.serverID, PeerDone: peerDone,
 		}
 	default:
 		// Punch traffic belongs between peers. A coordinator that answered it
@@ -218,7 +228,7 @@ func (c *Coordinator) attest(message Message, from netip.AddrPort, peerPublic st
 // second question. An endpoint that had to guess it would be labelling its own
 // stratum from an assumption, and the stratum is what the decision is computed
 // over.
-func (c *Coordinator) pair(message Message, from netip.AddrPort) ([]string, string, string, string) {
+func (c *Coordinator) pair(message Message, from netip.AddrPort) ([]string, string, string, string, string) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	now := c.now()
@@ -227,17 +237,26 @@ func (c *Coordinator) pair(message Message, from netip.AddrPort) ([]string, stri
 	session, found := c.sessions[message.SessionID]
 	if !found {
 		if len(c.sessions) >= c.capacity {
-			return nil, "", "", "coordinator is at capacity"
+			return nil, "", "", "", "coordinator is at capacity"
 		}
-		session = &pairing{endpoints: make(map[Role]*endpointState, 2)}
+		session = &pairing{endpoints: make(map[Role]*endpointState, 2), done: make(map[Role]bool, 2)}
 		c.sessions[message.SessionID] = session
 	}
 	session.touchedAt = now
-	session.endpoints[message.Role] = &endpointState{observed: from, candidates: message.Candidates, commit: message.Commit}
+	session.endpoints[message.Role] = &endpointState{
+		observed: from, candidates: message.Candidates, commit: message.Commit,
+		probe: message.Probe, transportKey: message.TransportKey,
+	}
 
 	peer, present := session.endpoints[message.Role.Peer()]
 	if !present {
-		return nil, "", "", ""
+		return nil, "", "", "", ""
+	}
+	// Two halves measuring different probes are not one measurement, and the
+	// aggregation would discard the pair anyway. Refusing here tells the
+	// operators at pairing time rather than at report time.
+	if peer.probe != message.Probe {
+		return nil, "", "", "", "the two endpoints are measuring different probes"
 	}
 	peerPublic := PeerPublicNo
 	for _, candidate := range peer.candidates {
@@ -258,7 +277,7 @@ func (c *Coordinator) pair(message Message, from netip.AddrPort) ([]string, stri
 			break
 		}
 	}
-	return candidates, peerPublic, peer.commit, ""
+	return candidates, peerPublic, peer.commit, peer.transportKey, ""
 }
 
 func (c *Coordinator) expireLocked(now time.Time) {
@@ -349,4 +368,24 @@ func (r *rateLimiter) allow(source netip.Addr, now time.Time) bool {
 	}
 	r.observed[source] = count + 1
 	return true
+}
+
+// markDone records that one endpoint finished measuring and reports whether
+// the other has. It is the lifetime half of the rendezvous: each endpoint
+// holds its gateway open until the peer is done or the window ends, and the
+// signal travels through the coordinator because the session under test must
+// not carry its own test's control plane.
+func (c *Coordinator) markDone(message Message) bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	now := c.now()
+	c.expireLocked(now)
+	session, found := c.sessions[message.SessionID]
+	if !found {
+		// The pairing has expired; whatever the peer was doing is over.
+		return true
+	}
+	session.touchedAt = now
+	session.done[message.Role] = true
+	return session.done[message.Role.Peer()]
 }

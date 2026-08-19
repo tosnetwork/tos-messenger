@@ -7,7 +7,8 @@
 // are not accepted as flags. An operator can misdescribe their access network;
 // they should not be able to misdescribe the result.
 //
-// It records a UDP trial. A UDP study answers whether a datagram path exists,
+// It records one trial, UDP or ADNL. A UDP study answers whether a datagram
+// path exists,
 // which is an input to a route decision and never a route decision itself.
 package main
 
@@ -46,6 +47,8 @@ func main() {
 	commit := flag.String("commit", "", "commit of this build, taken from build information when empty")
 	identity := flag.String("identity", "", "endpoint signing key file, created when absent")
 	listen := flag.String("listen", ":0", "local UDP address to bind")
+	probeKind := flag.String("probe", string(reachability.ProbeUDP),
+		"udp for datagram feasibility, adnl for the session establishment a route decision needs")
 	pairTimeout := flag.Duration("pair-timeout", probe.DefaultPairTimeout, "how long to wait for the peer")
 	punchTimeout := flag.Duration("punch-timeout", probe.DefaultPunchTimeout, "how long to attempt a direct path")
 
@@ -59,7 +62,8 @@ func main() {
 	flag.StringVar(&labels.assistance, "mapping-assistance", string(reachability.AssistanceNone), "none, static-port-mapping, or discovery-assisted")
 	flag.Parse()
 
-	trial, err := measure(context.Background(), *coordinators, *session, *role, *listen, *commit, *identity, *pairTimeout, *punchTimeout, labels)
+	trial, err := measure(context.Background(), *coordinators, *session, *role, *listen, *commit, *identity,
+		reachability.ProbeKind(*probeKind), *pairTimeout, *punchTimeout, labels)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tos-reachability:", err)
 		os.Exit(1)
@@ -76,7 +80,8 @@ func main() {
 	fmt.Fprintf(os.Stderr, "outcome=%s failure=%s establish_ms=%d\n", trial.Outcome, trial.Failure, trial.EstablishMillis)
 }
 
-func measure(ctx context.Context, coordinators, session, role, listen, commit, identity string, pairTimeout, punchTimeout time.Duration, labels declared) (reachability.Trial, error) {
+func measure(ctx context.Context, coordinators, session, role, listen, commit, identity string,
+	probeKind reachability.ProbeKind, pairTimeout, punchTimeout time.Duration, labels declared) (reachability.Trial, error) {
 	addresses := splitAddresses(coordinators)
 	if len(addresses) == 0 {
 		return reachability.Trial{}, errors.New("at least one coordinator is required")
@@ -111,7 +116,7 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		return reachability.Trial{}, errors.New("unexpected endpoint key type")
 	}
 	endpointPublicHex := hex.EncodeToString(endpointPublic)
-	result, err := probe.Run(ctx, probe.Config{
+	configuration := probe.Config{
 		Coordinators:   addresses,
 		SessionID:      session,
 		Role:           probe.Role(role),
@@ -120,8 +125,21 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		PunchTimeout:   punchTimeout,
 		Commit:         commit,
 		EndpointKeyHex: endpointPublicHex,
-		Probe:          reachability.ProbeUDP,
-	})
+		Probe:          probeKind,
+	}
+	// The two runners measure different questions. The UDP one answers
+	// whether datagrams pass; the ADNL one answers whether the session a
+	// route decision is actually about comes up. Each refuses the other's
+	// name, so the attestation always describes what happened.
+	var result probe.Result
+	switch probeKind {
+	case reachability.ProbeUDP:
+		result, err = probe.Run(ctx, configuration)
+	case reachability.ProbeADNL:
+		result, err = probe.RunADNL(ctx, configuration)
+	default:
+		return reachability.Trial{}, errors.New("probe must be udp or adnl")
+	}
 	if err != nil {
 		return reachability.Trial{}, err
 	}
@@ -157,7 +175,7 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		SessionID:       session,
 		Role:            reachability.Role(role),
 		Observation:     result.Observation,
-		Probe:           reachability.ProbeUDP,
+		Probe:           probeKind,
 		StartedAtUnix:   uint64(time.Now().Unix()),
 		LocalCommit:     commit,
 		PeerCommit:      result.PeerCommit,

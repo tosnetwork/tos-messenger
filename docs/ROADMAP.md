@@ -19,7 +19,7 @@ gate status: this repository carries none and consumes no gate capacity.
 |---|---:|---|
 | Implemented route-independent M0 primitives (non-gate) | ✅ | Identity, envelope, journal, admission, payload codecs, action policy, authenticated owner decision path, negotiation foundations. This row is not the M0 gate: the gate's acceptance also requires a reviewed suite, an adversarial corpus and a second implementation, none of which exist |
 | M0 protocol freeze | ⬜ | Four items block the freeze directly (genesis-hash representation, suite selection, multi-device model, second-implementation evidence); see [`M0_FREEZE_REVIEW.md`](M0_FREEZE_REVIEW.md) |
-| M0-R reachability and route decision | 🟡 | **M0-R1 UDP feasibility collector: ✅. M0-R2 ADNL route-decision collector: ⬜.** The report tool now exits non-zero for any study that supports no route decision. No study of either kind has been run |
+| M0-R reachability and route decision | 🟡 | **M0-R1 UDP feasibility collector: ✅. M0-R2 ADNL route-decision collector: ✅** (`pkg/probe.RunADNL`, `tos-reachability -probe adnl`; one session by construction, done-signalling via the coordinator, end-to-end tested through trial verification). The report tool exits non-zero for any study that supports no route decision. **No study of either kind has been run** |
 | M1 one-to-one transport | ⬜ | Blocked on an ADNL M0-R decision and a selected E2EE suite |
 | M2-T technical offline Mailbox and multi-Relay failover | ⬜ | No Relay implementation. A descriptor can publish a relay set, which is a declaration, not a service |
 | M2-C commercial Relay lease | 🔒 | Expansion Gate locked |
@@ -30,7 +30,7 @@ gate status: this repository carries none and consumes no gate capacity.
 
 | Component | Status | Evidence | What is missing |
 |---|---:|---|---|
-| M0-R measured reachability study and route-strategy decision | 🟡 | `pkg/reachability`, `pkg/probe` (UDP), `cmd/tos-reachability*` | The ADNL collector (`cmd/tos-reachability` runs `ProbeUDP` only), and the study itself. A UDP study can establish datagram feasibility; only an ADNL study can decide a route, and nothing can collect one yet |
+| M0-R measured reachability study and route-strategy decision | 🟡 | `pkg/reachability`, `pkg/probe` (UDP and ADNL), `cmd/tos-reachability*` | The study itself: multiple operators, multiple sites, real networks. Both collectors exist and refuse each other's names; ADNL evidence should be cross-checked against the TOS node's own adnl stack before a frozen route decision is acted on |
 | Messaging Endpoint delegation schema and verifier | ✅ | `pkg/identity`, `pkg/tosaddr` | — |
 | Messaging Contact Descriptor and DHT locator profile | 🟡 | `pkg/directory` | No integration test against a live TOS DHT encoder; the locator is checked against the encoding rules as read, not as run |
 | One-to-one application-layer E2EE | 🟡 | `pkg/e2ee`, `pkg/e2ee/conformance` | No suite, by design: the contract and the refutation harness exist, choosing a construction is a freeze decision |
@@ -77,8 +77,9 @@ repository, and one ✅ or one 🟡 would misstate both halves.
 
 ## Next, in the order the architecture allows
 
-1. **The ADNL collector**, then the study. The report tool refuses to bless a UDP
-   study as a route decision, so M1 stays blocked until ADNL evidence exists.
+1. **Run the study.** Both collectors exist; what is missing is evidence — ≥3
+   operators, ≥3 sites per required scenario, real networks. The report tool
+   refuses to bless anything less as a route decision.
 2. **Multi-device sessions and key rotation** — M0 decision, transport-independent.
 3. **The adversarial corpus.**
 4. **Membership epochs for rooms.**

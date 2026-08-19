@@ -56,6 +56,14 @@ const (
 	KindPunch Kind = "punch"
 	// KindPunchAck answers a direct probe.
 	KindPunchAck Kind = "punch-ack"
+	// KindDone reports that this endpoint has finished measuring, so the peer
+	// can stop holding its gateway open. It goes to the coordinator rather
+	// than over the measured session on purpose: control signalling carried by
+	// the layer being measured would make "the session failed" and "the
+	// signalling failed" the same observation.
+	KindDone Kind = "done"
+	// KindDoneOK answers, saying whether the peer has reported done.
+	KindDoneOK Kind = "done-ok"
 	// KindError reports a refused request.
 	KindError Kind = "error"
 
@@ -88,6 +96,7 @@ var (
 	kinds               = map[Kind]struct{}{
 		KindBind: {}, KindBindOK: {}, KindPair: {}, KindPairOK: {},
 		KindPunch: {}, KindPunchAck: {}, KindError: {},
+		KindDone: {}, KindDoneOK: {},
 	}
 )
 
@@ -108,6 +117,17 @@ type Message struct {
 	// EndpointKey is the key the endpoint will sign its trial with, presented
 	// so the coordinator can attest to a party rather than only to a session.
 	EndpointKey string `json:"endpoint_key,omitempty"`
+	// TransportKey is the ephemeral key this endpoint will run its measured
+	// transport under, for probes whose handshake needs the peer's key before
+	// a first packet can be built. It is per-trial and never the evidence key:
+	// a transport key that doubled as the signing identity would tie every
+	// session a network observer sees to the operator's published evidence.
+	TransportKey string `json:"transport_key,omitempty"`
+	// PeerTransportKey is the peer's transport key, relayed in a pairing
+	// answer the way the peer's commit is.
+	PeerTransportKey string `json:"peer_transport_key,omitempty"`
+	// PeerDone reports, in a done answer, whether the peer has finished.
+	PeerDone bool `json:"peer_done,omitempty"`
 	// Probe names what is being measured, so an attestation from one probe
 	// cannot stand in for another.
 	Probe      string `json:"probe,omitempty"`
@@ -237,6 +257,12 @@ func Validate(message Message) error {
 		message.Probe != string(reachability.ProbeADNL) {
 		return errors.New("invalid probe kind")
 	}
+	if message.TransportKey != "" && !endpointKeyPattern.MatchString(message.TransportKey) {
+		return errors.New("invalid transport key")
+	}
+	if message.PeerTransportKey != "" && !endpointKeyPattern.MatchString(message.PeerTransportKey) {
+		return errors.New("invalid peer transport key")
+	}
 	// A pairing request is what the coordinator attests to, so it has to say
 	// which endpoint and which probe it is asking about.
 	if message.Kind == KindPair {
@@ -245,6 +271,11 @@ func Validate(message Message) error {
 		}
 		if message.Probe == "" {
 			return errors.New("a pairing request must say what it is measuring")
+		}
+		// An ADNL handshake cannot be built without the receiver's key, so a
+		// pairing that omits it would pair two endpoints that can never speak.
+		if message.Probe == string(reachability.ProbeADNL) && message.TransportKey == "" {
+			return errors.New("an adnl pairing must present a transport key")
 		}
 	}
 	if message.Commit != "" && !commitPattern.MatchString(message.Commit) {

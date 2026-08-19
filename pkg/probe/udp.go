@@ -57,6 +57,9 @@ type Result struct {
 	PeerAddress     netip.AddrPort
 	Failure         reachability.FailureClass
 	PeerCommit      string
+	// PeerTransportKey is the key the peer will run its measured transport
+	// under, learned during pairing.
+	PeerTransportKey string
 	// Observation is the coordinator's signed account of what it saw. A result
 	// without one cannot be filed under a stratum, because the two facts that
 	// place it there would be the endpoint's own claim.
@@ -92,11 +95,14 @@ func newNonce() (string, error) {
 }
 
 type runner struct {
-	config     Config
-	connection net.PacketConn
-	result     Result
-	selfPublic bool
-	learned    []netip.AddrPort
+	config Config
+	// transportKeyHex is presented during pairing for probes whose handshake
+	// needs the peer's key. Empty for a plain datagram probe.
+	transportKeyHex string
+	connection      net.PacketConn
+	result          Result
+	selfPublic      bool
+	learned         []netip.AddrPort
 }
 
 // observe answers a peer probe that arrives while this endpoint is still
@@ -141,6 +147,13 @@ func (r *runner) observe(message Message, from netip.AddrPort) {
 func Run(ctx context.Context, config Config) (Result, error) {
 	if err := validateConfig(&config); err != nil {
 		return Result{}, err
+	}
+	// This runner measures raw datagrams. Running it under another probe's
+	// name would have the coordinator attest to a measurement that never
+	// happened: the attestation names the probe from the pairing request, and
+	// the pairing request names whatever this config says.
+	if config.Probe != reachability.ProbeUDP {
+		return Result{}, errors.New("this runner measures the udp probe; use RunADNL for adnl")
 	}
 	connection, err := net.ListenPacket("udp", config.ListenAddr)
 	if err != nil {
@@ -268,15 +281,21 @@ func (r *runner) recordObservation(reply Message) {
 	if err != nil {
 		return
 	}
+	// The endpoint key and the probe are this endpoint's own inputs to the
+	// pairing, not something the reply echoes: the signature only verifies if
+	// the coordinator signed exactly what was presented, so filling them in
+	// locally is reconstruction, not trust.
 	observation := reachability.Observation{
-		CoordinatorID: identifier,
-		SessionID:     reply.SessionID,
-		Role:          string(reply.Role),
-		Observed:      reply.Observed,
-		PeerPublic:    reply.PeerPublic,
-		AtUnix:        reply.ObservedAt,
-		PublicKeyHex:  reply.SignerKey,
-		SignatureHex:  reply.Signature,
+		CoordinatorID:        identifier,
+		SessionID:            reply.SessionID,
+		Role:                 string(reply.Role),
+		EndpointPublicKeyHex: r.config.EndpointKeyHex,
+		Probe:                string(r.config.Probe),
+		Observed:             reply.Observed,
+		PeerPublic:           reply.PeerPublic,
+		AtUnix:               reply.ObservedAt,
+		PublicKeyHex:         reply.SignerKey,
+		SignatureHex:         reply.Signature,
 	}
 	if err := reachability.VerifyObservation(observation); err != nil {
 		return
@@ -399,6 +418,7 @@ func (r *runner) exchange(ctx context.Context) ([]netip.AddrPort, error) {
 			Kind: KindPair, SessionID: r.config.SessionID, Role: r.config.Role,
 			Nonce: nonce, Candidates: candidates, Commit: r.config.Commit,
 			EndpointKey: r.config.EndpointKeyHex, Probe: string(r.config.Probe),
+			TransportKey: r.transportKeyHex,
 		})
 		if err != nil {
 			return nil, err
@@ -419,6 +439,7 @@ func (r *runner) exchange(ctx context.Context) ([]netip.AddrPort, error) {
 			if reply.Kind == KindPairOK && reply.Nonce == nonce && len(reply.Candidates) > 0 {
 				r.classifySelf()
 				r.result.PeerCommit = reply.PeerCommit
+				r.result.PeerTransportKey = reply.PeerTransportKey
 				r.recordObservation(reply)
 				peers := make([]netip.AddrPort, 0, len(reply.Candidates)+len(r.learned))
 				for _, candidate := range reply.Candidates {
