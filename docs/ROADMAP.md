@@ -48,7 +48,7 @@ gate status: this repository carries none and consumes no gate capacity.
 | Agent Packet-to-Execution-Gate adapter and replay tests | ⬜ | — | Nothing |
 | Native desktop, Web, iOS, and Android Messenger clients | ⬜ | — | Nothing |
 | Relay, attachment, history, and inbox-bond commercial profiles | 🔒 | — | Expansion Gate |
-| Cross-implementation positive vectors and adversarial corpus | 🟡 | `internal/vectors`, fuzz seeds | Positive vectors are sound; there is still no adversarial corpus — no curated set a second implementation must refuse |
+| Cross-implementation positive vectors and adversarial corpus | 🟡 | `internal/vectors` (positive vectors + adversarial corpus), fuzz seeds | Positive vectors and a decode-layer adversarial corpus both exist and are self-verifying (every entry is refused at generation time). The corpus covers the JSON and binary **decoders**; the verify-layer refusals (a tampered signature, a local-only kind arriving from the network) and the reachability trial/policy cases need richer inputs — a delegation, a coordinator key — and are the corpus's named next extension |
 | Independent multi-operator interoperability evidence | ⬜ | — | Needs a second implementation |
 
 ## The policy engine, split honestly

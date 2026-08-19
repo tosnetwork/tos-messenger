@@ -45,7 +45,7 @@ decision:
 | `pkg/probe` | M0-R measurement transport: rendezvous coordinator and UDP establishment probe |
 | `internal/canon` | Domain-separated length-prefixed canonical encoding shared by every signed object |
 | `internal/ids` | Every identifier pattern, defined once |
-| `internal/vectors` | The canonical forms a second implementation checks itself against |
+| `internal/vectors` | The canonical forms a second implementation checks itself against, and the adversarial corpus of inputs it must refuse |
 | `internal/dirlock` | Exclusive process ownership of one private state directory |
 
 The measurement side is deliberately separate from the protocol side. Nothing

@@ -1,0 +1,161 @@
+[
+  {
+    "name": "contact-descriptor/empty",
+    "target": "contact-descriptor",
+    "wire": "",
+    "reason": "an empty document is not an object"
+  },
+  {
+    "name": "contact-descriptor/trailing-json",
+    "target": "contact-descriptor",
+    "wire": "{\"schema\":\"tos.messaging.contact-descriptor.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"delegation_digest\":\"sha256:4ea771c3a07fc009cd99dc173b474901511edcba8e274279b5df4aeb07e6aebe\",\"supported_messaging_versions\":[1],\"supported_a2a_versions\":[\"0.3\"],\"supported_mcp_versions\":[\"2025-06-18\"],\"adnl_id\":\"adnl:2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e\",\"optional_https_endpoint\":\"https://endpoint.example/messaging\",\"prekey_bundle_digest\":\"sha256:7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a\",\"mailbox_relay_set_digest\":\"sha256:09814ff3195302b0b11123e0b08daca08ec8874e4653d866aec0ece6ba654ade\",\"inbox_admission_policy_digest\":\"sha256:4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\",\"maximum_envelope_bytes\":65536,\"issued_at_unix\":1800000000,\"expires_at_unix\":1800003600,\"endpoint_signature_hex\":\"1a08abc505bc07453e5d34196cb6401635c556e3b0190d8efbfb32053ca88dc695318df751fe929aadf80e7c48aeb3abcea2ef94f286ac3ace759caba2d4e40d\"}{\"x\":1}",
+    "reason": "trailing data lets two byte streams decode to one object"
+  },
+  {
+    "name": "contact-descriptor/truncated",
+    "target": "contact-descriptor",
+    "wire": "{\"schema\":\"tos.messaging.contact-descriptor.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"delegation_digest\":\"sha256:4ea771c3a07fc009cd99dc173b474901511edcba8e274279b5df4aeb07e6aebe\",\"supported_messaging_versions\":[1],\"supported_a2a_versions\":[\"0.3\"],\"supported_mcp_versions\":[\"2025-06-18\"],\"adnl_id\":\"adnl:2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e\",\"optional_https_endpoint\":\"https://endpoint.example/messaging\",\"prekey_bundle_digest\":\"sha256:7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a\",\"mailbox_relay_set_digest\":\"sha256:09814ff3195302b0b11123e0b08daca08ec8874e4653d866aec0ece6ba654ade\",\"inbox_admission_policy_digest\":\"sha256:4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\",\"maximum_envelope_bytes\":65536,\"issued_at_unix\":1800000000,\"expires_at_unix\":1800003600,\"endpoint_signature_hex\":\"1a08abc505bc07453e5d34196cb6401635c556e3b0190d8efbfb32053ca88dc695318df751fe929aadf80e7c48aeb3abcea2ef94f286ac3ace759caba2d4e40d\"",
+    "reason": "a truncated document is not the object it was cut from"
+  },
+  {
+    "name": "contact-descriptor/unknown-field",
+    "target": "contact-descriptor",
+    "wire": "{\"unknown_field\":1,\"schema\":\"tos.messaging.contact-descriptor.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"delegation_digest\":\"sha256:4ea771c3a07fc009cd99dc173b474901511edcba8e274279b5df4aeb07e6aebe\",\"supported_messaging_versions\":[1],\"supported_a2a_versions\":[\"0.3\"],\"supported_mcp_versions\":[\"2025-06-18\"],\"adnl_id\":\"adnl:2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e\",\"optional_https_endpoint\":\"https://endpoint.example/messaging\",\"prekey_bundle_digest\":\"sha256:7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a\",\"mailbox_relay_set_digest\":\"sha256:09814ff3195302b0b11123e0b08daca08ec8874e4653d866aec0ece6ba654ade\",\"inbox_admission_policy_digest\":\"sha256:4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\",\"maximum_envelope_bytes\":65536,\"issued_at_unix\":1800000000,\"expires_at_unix\":1800003600,\"endpoint_signature_hex\":\"1a08abc505bc07453e5d34196cb6401635c556e3b0190d8efbfb32053ca88dc695318df751fe929aadf80e7c48aeb3abcea2ef94f286ac3ace759caba2d4e40d\"}",
+    "reason": "an unknown field means the sender and receiver disagree about the object's shape"
+  },
+  {
+    "name": "dht-locator/truncated",
+    "target": "dht-locator",
+    "wire": "016c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196ff006a19e79add9430225f9077c53afabafe52b6ec420fb7cfcb21b78700d898000000006b49d200000000006b49e010002468747470733a2f2f6469726563746f72792e6578616d706c652f64657363726970746f723e3d2443f478a829a089152d629f11b39f0693e20b999c5b263bcb1c5d4683dfcedd80b9d0d68ffc30d96d3f8e9f54f29bf29d87b0108204bdafb4798606",
+    "binary": true,
+    "reason": "a truncated locator is not the locator it was cut from"
+  },
+  {
+    "name": "endpoint-delegation/empty",
+    "target": "endpoint-delegation",
+    "wire": "",
+    "reason": "an empty document is not an object"
+  },
+  {
+    "name": "endpoint-delegation/trailing-json",
+    "target": "endpoint-delegation",
+    "wire": "{\"schema\":\"tos.messaging.endpoint-delegation.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"messaging_identity_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"adnl_id\":\"adnl:2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e\",\"allowed_protocol_versions\":[1],\"allowed_outbound_event_classes\":[\"agent.task\",\"text\"],\"not_before_unix\":1800000000,\"expires_at_unix\":1800086400,\"maximum_session_lifetime_seconds\":3600,\"contact_descriptor_policy_digest\":\"sha256:579c9ccc2ffce6284ca260b19a444836ef77dc714125da0d6b45270d7917f84a\",\"inbox_admission_policy_digest\":\"sha256:4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\"}{\"x\":1}",
+    "reason": "trailing data lets two byte streams decode to one object"
+  },
+  {
+    "name": "endpoint-delegation/truncated",
+    "target": "endpoint-delegation",
+    "wire": "{\"schema\":\"tos.messaging.endpoint-delegation.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"messaging_identity_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"adnl_id\":\"adnl:2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e\",\"allowed_protocol_versions\":[1],\"allowed_outbound_event_classes\":[\"agent.task\",\"text\"],\"not_before_unix\":1800000000,\"expires_at_unix\":1800086400,\"maximum_session_lifetime_seconds\":3600,\"contact_descriptor_policy_digest\":\"sha256:579c9ccc2ffce6284ca260b19a444836ef77dc714125da0d6b45270d7917f84a\",\"inbox_admission_policy_digest\":\"sha256:4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\"",
+    "reason": "a truncated document is not the object it was cut from"
+  },
+  {
+    "name": "endpoint-delegation/unknown-field",
+    "target": "endpoint-delegation",
+    "wire": "{\"unknown_field\":1,\"schema\":\"tos.messaging.endpoint-delegation.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"messaging_identity_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"adnl_id\":\"adnl:2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e\",\"allowed_protocol_versions\":[1],\"allowed_outbound_event_classes\":[\"agent.task\",\"text\"],\"not_before_unix\":1800000000,\"expires_at_unix\":1800086400,\"maximum_session_lifetime_seconds\":3600,\"contact_descriptor_policy_digest\":\"sha256:579c9ccc2ffce6284ca260b19a444836ef77dc714125da0d6b45270d7917f84a\",\"inbox_admission_policy_digest\":\"sha256:4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\"}",
+    "reason": "an unknown field means the sender and receiver disagree about the object's shape"
+  },
+  {
+    "name": "endpoint-delegation/window-inverted",
+    "target": "endpoint-delegation",
+    "wire": "{\"schema\":\"tos.messaging.endpoint-delegation.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"messaging_identity_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"adnl_id\":\"adnl:2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e\",\"allowed_protocol_versions\":[1],\"allowed_outbound_event_classes\":[\"agent.task\",\"text\"],\"not_before_unix\":1800086400,\"expires_at_unix\":1800000000,\"maximum_session_lifetime_seconds\":3600,\"contact_descriptor_policy_digest\":\"sha256:579c9ccc2ffce6284ca260b19a444836ef77dc714125da0d6b45270d7917f84a\",\"inbox_admission_policy_digest\":\"sha256:4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\"}",
+    "reason": "a delegation whose window ends before it starts is valid for no instant"
+  },
+  {
+    "name": "endpoint-delegation/zero-inbox-digest",
+    "target": "endpoint-delegation",
+    "wire": "{\"schema\":\"tos.messaging.endpoint-delegation.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"messaging_identity_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"adnl_id\":\"adnl:2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e\",\"allowed_protocol_versions\":[1],\"allowed_outbound_event_classes\":[\"agent.task\",\"text\"],\"not_before_unix\":1800000000,\"expires_at_unix\":1800086400,\"maximum_session_lifetime_seconds\":3600,\"contact_descriptor_policy_digest\":\"sha256:579c9ccc2ffce6284ca260b19a444836ef77dc714125da0d6b45270d7917f84a\",\"inbox_admission_policy_digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"}",
+    "reason": "an all-zero digest is an uninitialised field, not a commitment"
+  },
+  {
+    "name": "messaging-event/empty",
+    "target": "messaging-event",
+    "wire": "",
+    "reason": "an empty document is not an object"
+  },
+  {
+    "name": "messaging-event/trailing-json",
+    "target": "messaging-event",
+    "wire": "{\"schema\":\"tos.messaging.event.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"event_id\":\"evt_144ad4142ffbd344adb5f8a2fcfa784524712ea9762e680b86456e8ee3005fcf\",\"sender_agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"sender_messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"sender_device_id\":\"dev_4444444444444444444444444444444444444444444444444444444444444444\",\"created_at_unix\":1800000010,\"event_kind\":\"text\",\"payload_schema\":\"tos.messaging.payload.text.v1\",\"content_base64\":\"dG9zLm1lc3NhZ2luZy5wYXlsb2FkLnYxAHRvcy5tZXNzYWdpbmcucGF5bG9hZC50ZXh0LnYxAAAAABl0ZXh0L3BsYWluOyBjaGFyc2V0PXV0Zi04AAAABWhlbGxvAAAAAA==\",\"rendering\":\"hello\"}{\"x\":1}",
+    "reason": "trailing data lets two byte streams decode to one object"
+  },
+  {
+    "name": "messaging-event/truncated",
+    "target": "messaging-event",
+    "wire": "{\"schema\":\"tos.messaging.event.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"event_id\":\"evt_144ad4142ffbd344adb5f8a2fcfa784524712ea9762e680b86456e8ee3005fcf\",\"sender_agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"sender_messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"sender_device_id\":\"dev_4444444444444444444444444444444444444444444444444444444444444444\",\"created_at_unix\":1800000010,\"event_kind\":\"text\",\"payload_schema\":\"tos.messaging.payload.text.v1\",\"content_base64\":\"dG9zLm1lc3NhZ2luZy5wYXlsb2FkLnYxAHRvcy5tZXNzYWdpbmcucGF5bG9hZC50ZXh0LnYxAAAAABl0ZXh0L3BsYWluOyBjaGFyc2V0PXV0Zi04AAAABWhlbGxvAAAAAA==\",\"rendering\":\"hello\"",
+    "reason": "a truncated document is not the object it was cut from"
+  },
+  {
+    "name": "messaging-event/unknown-field",
+    "target": "messaging-event",
+    "wire": "{\"unknown_field\":1,\"schema\":\"tos.messaging.event.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"event_id\":\"evt_144ad4142ffbd344adb5f8a2fcfa784524712ea9762e680b86456e8ee3005fcf\",\"sender_agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"sender_messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"sender_device_id\":\"dev_4444444444444444444444444444444444444444444444444444444444444444\",\"created_at_unix\":1800000010,\"event_kind\":\"text\",\"payload_schema\":\"tos.messaging.payload.text.v1\",\"content_base64\":\"dG9zLm1lc3NhZ2luZy5wYXlsb2FkLnYxAHRvcy5tZXNzYWdpbmcucGF5bG9hZC50ZXh0LnYxAAAAABl0ZXh0L3BsYWluOyBjaGFyc2V0PXV0Zi04AAAABWhlbGxvAAAAAA==\",\"rendering\":\"hello\"}",
+    "reason": "an unknown field means the sender and receiver disagree about the object's shape"
+  },
+  {
+    "name": "negotiation-snapshot/empty",
+    "target": "negotiation-snapshot",
+    "wire": "",
+    "reason": "an empty document is not an object"
+  },
+  {
+    "name": "negotiation-snapshot/future-approval",
+    "target": "negotiation-snapshot",
+    "wire": "{\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"state\":\"intent-agreed\",\"generation\":1,\"counteroffers\":0,\"needs_owner_approval\":false,\"owner_approval\":{\"TermsDigest\":\"sha256:4444444444444444444444444444444444444444444444444444444444444444\",\"Generation\":5,\"MandateDigest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"AtUnix\":1800000000}}",
+    "reason": "an approval from a later version of the negotiation than the snapshot is an approval for terms that do not exist"
+  },
+  {
+    "name": "negotiation-snapshot/trailing-json",
+    "target": "negotiation-snapshot",
+    "wire": "{\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"state\":\"discussing\",\"generation\":0,\"counteroffers\":0,\"needs_owner_approval\":false}{\"x\":1}",
+    "reason": "trailing data lets two byte streams decode to one object"
+  },
+  {
+    "name": "negotiation-snapshot/truncated",
+    "target": "negotiation-snapshot",
+    "wire": "{\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"state\":\"discussing\",\"generation\":0,\"counteroffers\":0,\"needs_owner_approval\":false",
+    "reason": "a truncated document is not the object it was cut from"
+  },
+  {
+    "name": "negotiation-snapshot/unknown-field",
+    "target": "negotiation-snapshot",
+    "wire": "{\"unknown_field\":1,\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"state\":\"discussing\",\"generation\":0,\"counteroffers\":0,\"needs_owner_approval\":false}",
+    "reason": "an unknown field means the sender and receiver disagree about the object's shape"
+  },
+  {
+    "name": "payload-text/oversized-length",
+    "target": "payload-text",
+    "wire": "746f732e6d6573736167696e672e7061796c6f61642e763100746f732e6d6573736167696e672e7061796c6f61642e746578742e76310000000019746578742f706c61696e3b20636861727365743d7574662d380000000568656c6c6fffffffff",
+    "binary": true,
+    "reason": "a length prefix a peer chooses is an allocation a peer chooses, and must be bounded before the read"
+  },
+  {
+    "name": "payload-text/trailing-bytes",
+    "target": "payload-text",
+    "wire": "746f732e6d6573736167696e672e7061796c6f61642e763100746f732e6d6573736167696e672e7061796c6f61642e746578742e76310000000019746578742f706c61696e3b20636861727365743d7574662d380000000568656c6c6f0000000000",
+    "binary": true,
+    "reason": "trailing bytes give one body two encodings"
+  },
+  {
+    "name": "prekey-bundle/empty",
+    "target": "prekey-bundle",
+    "wire": "",
+    "reason": "an empty document is not an object"
+  },
+  {
+    "name": "prekey-bundle/trailing-json",
+    "target": "prekey-bundle",
+    "wire": "{\"schema\":\"tos.messaging.prekey-bundle.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"device_id\":\"dev_4444444444444444444444444444444444444444444444444444444444444444\",\"algorithm_id\":\"tos.messaging.e2ee.example-suite.v1\",\"material_base64\":\"cHVibGlzaGVkIHByZWtleSBtYXRlcmlhbA==\",\"issued_at_unix\":1800000000,\"expires_at_unix\":1800003600,\"endpoint_signature_hex\":\"4c22b10251ee5d0ad283d8d78121626fc35000fb4e858ef70a0e8c3334110ba868153aa551cf94d302d359b77250f1f453a40b08078935ae25216d8fa961840e\"}{\"x\":1}",
+    "reason": "trailing data lets two byte streams decode to one object"
+  },
+  {
+    "name": "prekey-bundle/truncated",
+    "target": "prekey-bundle",
+    "wire": "{\"schema\":\"tos.messaging.prekey-bundle.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"device_id\":\"dev_4444444444444444444444444444444444444444444444444444444444444444\",\"algorithm_id\":\"tos.messaging.e2ee.example-suite.v1\",\"material_base64\":\"cHVibGlzaGVkIHByZWtleSBtYXRlcmlhbA==\",\"issued_at_unix\":1800000000,\"expires_at_unix\":1800003600,\"endpoint_signature_hex\":\"4c22b10251ee5d0ad283d8d78121626fc35000fb4e858ef70a0e8c3334110ba868153aa551cf94d302d359b77250f1f453a40b08078935ae25216d8fa961840e\"",
+    "reason": "a truncated document is not the object it was cut from"
+  },
+  {
+    "name": "prekey-bundle/unknown-field",
+    "target": "prekey-bundle",
+    "wire": "{\"unknown_field\":1,\"schema\":\"tos.messaging.prekey-bundle.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"device_id\":\"dev_4444444444444444444444444444444444444444444444444444444444444444\",\"algorithm_id\":\"tos.messaging.e2ee.example-suite.v1\",\"material_base64\":\"cHVibGlzaGVkIHByZWtleSBtYXRlcmlhbA==\",\"issued_at_unix\":1800000000,\"expires_at_unix\":1800003600,\"endpoint_signature_hex\":\"4c22b10251ee5d0ad283d8d78121626fc35000fb4e858ef70a0e8c3334110ba868153aa551cf94d302d359b77250f1f453a40b08078935ae25216d8fa961840e\"}",
+    "reason": "an unknown field means the sender and receiver disagree about the object's shape"
+  }
+]
