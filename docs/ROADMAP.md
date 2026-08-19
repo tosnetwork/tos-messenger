@@ -79,7 +79,9 @@ repository, and one ✅ or one 🟡 would misstate both halves.
 
 1. **Run the study.** Both collectors exist; what is missing is evidence — ≥3
    operators, ≥3 sites per required scenario, real networks. The report tool
-   refuses to bless anything less as a route decision.
+   refuses to bless anything less as a route decision. A single-operator dry
+   run of the whole chain is scripted in
+   [`M0R_PILOT_RUNBOOK.md`](M0R_PILOT_RUNBOOK.md).
 2. **Multi-device sessions and key rotation** — M0 decision, transport-independent.
 3. **The adversarial corpus.**
 4. **Membership epochs for rooms.**

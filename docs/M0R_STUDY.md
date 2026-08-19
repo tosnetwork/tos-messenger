@@ -103,6 +103,11 @@ carrier-grade NAT and mobile carriers, more than one address family, more than
 one UDP-policy environment, a low-cost endpoint class, and a mobile endpoint.
 Two publicly addressable servers cannot satisfy it.
 
+Operational instructions for a single-operator dry run live in
+[`M0R_PILOT_RUNBOOK.md`](M0R_PILOT_RUNBOOK.md). A pilot validates the tooling
+chain and is expected to end `insufficient-evidence`; it contributes nothing
+to a study.
+
 ## The ADNL probe
 
 A UDP trial answers whether datagrams pass. Only an ADNL trial can feed a
