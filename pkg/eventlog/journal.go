@@ -48,10 +48,15 @@ const (
 	outboundDir = "outbound"
 
 	// MaxRecordBytes bounds one on-disk record. It has to hold a complete
-	// event, because a record without its event cannot be re-delivered.
-	MaxRecordBytes = 256 << 10
+	// event, because a record without its event cannot be re-delivered, and an
+	// outbound record holds both the queued event and its sealed form.
+	MaxRecordBytes = 768 << 10
 	// MaxPayloadBytes bounds the stored event.
 	MaxPayloadBytes = 160 << 10
+	// MaxCiphertextBytes bounds a stored sealed message. Retrying a delivery
+	// must send the same ciphertext rather than sealing again, or every network
+	// retry would consume another message key.
+	MaxCiphertextBytes = MaxPayloadBytes + 4<<10
 
 	// MinLeaseSeconds and MaxLeaseSeconds bound an application lease. A lease
 	// that never expires strands an event when the worker holding it dies.
@@ -162,7 +167,7 @@ func Open(root string) (*Journal, error) {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return nil, errors.New("event journal root must be a private directory")
 	}
-	for _, name := range []string{inboundDir, outboundDir} {
+	for _, name := range []string{inboundDir, outboundDir, sessionDir} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			return nil, errors.New("create event journal directory")
 		}
@@ -629,4 +634,8 @@ func readRecord(path string) (Record, error) {
 // NewLeaseID formats an application lease identifier.
 func NewLeaseID(raw []byte) (string, error) {
 	return ids.Format("lease_", raw)
+}
+
+func idsFormat(prefix string, raw []byte) (string, error) {
+	return ids.Format(prefix, raw)
 }

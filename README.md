@@ -30,7 +30,7 @@ decision:
 | `pkg/eventlog` | Single-writer durable journal: stored inbound events with pending recovery and application leases, outbound delivery state, retry schedule, and pruning |
 | `pkg/fault` | Typed failures, retry dispositions, and what a peer may be told |
 | `pkg/admission` | The lower half of the context firewall: authority, scope, window, inbox policy, and the durable claim |
-| `pkg/e2ee` | The contract a candidate encryption suite must satisfy, message bindings, and published prekey bundles |
+| `pkg/e2ee` | The contract a candidate encryption suite must satisfy as a pure state transition, message bindings, and published prekey bundles |
 | `pkg/e2ee/conformance` | Refutes a candidate suite: ten properties a black-box run can disprove |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
 | `pkg/probe` | M0-R measurement transport: rendezvous coordinator and UDP establishment probe |
@@ -78,6 +78,9 @@ Deliberately absent, with the reason:
 - The journal reports an event as fresh only after it is durably on disk, and
   stores the event itself, so acceptance means recoverable rather than merely
   remembered.
+- Session state and the record it belongs with are committed in one ordered
+  step, and the order differs by direction: inbound never loses a message,
+  outbound never reuses a key.
 - Evidence is judged against thresholds that were fixed before it was
   collected, and a study that misses its own minimums produces no decision.
 - A conformance run can only refute. Passing every check clears a floor; it

@@ -445,6 +445,7 @@ func outbound(eventID string) Outbound {
 		EventID:             eventID,
 		RecipientEndpointID: endpoint,
 		ConversationID:      convo,
+		Payload:             []byte(`{"outbound":"` + eventID + `"}`),
 		CreatedAtUnix:       acceptAt,
 		ExpiresAtUnix:       acceptAt + 86_400,
 	}

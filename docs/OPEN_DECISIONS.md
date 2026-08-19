@@ -45,7 +45,11 @@ than silently forking two implementations.
 | Ciphertext expansion bound | at most 512 bytes over the plaintext | `e2ee.MaxCiphertextOverheadBytes` |
 | Prekey bundle bounds | material at most 4 KiB, lifetime at most 30 days, at most 16 devices per published set | `pkg/e2ee` constants |
 | Descriptor prekey commitment | digest over the sorted per-device bundle digests, so adding or removing a device changes the descriptor | `e2ee.SetDigest` |
-| Snapshot contract | key material only, excluding replay bookkeeping, so a compromise check cannot be dodged by retaining a seen-list | `e2ee.Session.Snapshot` |
+| Suite interface shape | a pure state transition rather than a mutable session, so the caller commits result and next state together and the commit order is this repository's decision rather than a library's | `e2ee.Suite` |
+| Persisted session state | opaque, complete, and including replay bookkeeping, so a restart cannot re-accept a message the session already opened | `e2ee.State` |
+| Attacker's view | `KeyMaterial` returns keys without replay bookkeeping, so a compromise check cannot be dodged by retaining a seen-list | `e2ee.Suite.KeyMaterial` |
+| Commit order | inbound commits the event then the session; outbound commits the session then the ciphertext. Each order is decided by what a crash between the two writes would cost | `e2ee.CommitOrder`, `eventlog.CommitInbound`, `eventlog.CommitSealed` |
+| Stored ciphertext | a retry sends the committed ciphertext rather than sealing again, because sealing per network retry would consume a message key each time | `eventlog.Delivery.Ciphertext` |
 | Probe amplification floor | requests padded to 512 bytes; a response larger than its request is never sent | `probe.MinRequestBytes`, `probe.CheckNoAmplification` |
 | Coordinator limits | 5 minute pairing TTL, 4096 pairings, 600 requests per source address per minute | `probe.CoordinatorOptions` defaults |
 

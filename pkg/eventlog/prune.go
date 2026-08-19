@@ -100,6 +100,22 @@ func (j *Journal) Prune(now time.Time, retention time.Duration) (PruneReport, er
 	}
 	report.DeliveriesRemoved = deliveries.removed
 	report.Unreadable = append(report.Unreadable, deliveries.unreadable...)
+
+	// Session state is never swept by age. A session is live until its own
+	// lifetime ends, and deleting the state of one that is still in use would
+	// lose the ratchet position rather than a piece of history.
+	sessions, err := os.ReadDir(j.sessionRoot())
+	if err != nil {
+		return PruneReport{}, errors.New("read session directory")
+	}
+	for _, entry := range sessions {
+		if entry.IsDir() {
+			continue
+		}
+		if _, err := readSession(filepath.Join(j.sessionRoot(), entry.Name())); err != nil {
+			report.Unreadable = append(report.Unreadable, entry.Name())
+		}
+	}
 	sort.Strings(report.Unreadable)
 	return report, nil
 }

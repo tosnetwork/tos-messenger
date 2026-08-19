@@ -3,7 +3,7 @@ package conformance
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"errors"
+	"encoding/json"
 	"sort"
 	"strings"
 	"testing"
@@ -25,6 +25,30 @@ type double struct {
 	panicOnSeal   bool
 }
 
+// doubleState is the persisted state: key material plus the replay bookkeeping
+// that has to survive a restart.
+type doubleState struct {
+	Key  []byte   `json:"key"`
+	Send uint64   `json:"send"`
+	Seen []uint64 `json:"seen,omitempty"`
+}
+
+func encodeState(state doubleState) e2ee.State {
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
+func decodeState(raw e2ee.State) (doubleState, error) {
+	var state doubleState
+	if err := json.Unmarshal(raw, &state); err != nil || len(state.Key) == 0 {
+		return doubleState{}, e2ee.ErrStateUnusable
+	}
+	return state, nil
+}
+
 func (d double) AlgorithmID() string { return d.algorithm }
 
 func (d double) NewPrekeyMaterial() ([]byte, []byte, error) {
@@ -32,96 +56,97 @@ func (d double) NewPrekeyMaterial() ([]byte, []byte, error) {
 	return material[:], material[:], nil
 }
 
-func (d double) Initiate(peerPublic []byte, _ []byte) (e2ee.Session, []byte, error) {
-	return &doubleSession{key: append([]byte(nil), peerPublic...), suite: d, seen: map[uint64]bool{}}, []byte("initial"), nil
+func (d double) Initiate(peerPublic []byte, _ []byte) (e2ee.State, []byte, error) {
+	return encodeState(doubleState{Key: append([]byte(nil), peerPublic...)}), []byte("initial"), nil
 }
 
-func (d double) Accept(private []byte, _ []byte, _ []byte) (e2ee.Session, error) {
-	return &doubleSession{key: append([]byte(nil), private...), suite: d, seen: map[uint64]bool{}}, nil
+func (d double) Accept(private []byte, _ []byte, _ []byte) (e2ee.State, error) {
+	return encodeState(doubleState{Key: append([]byte(nil), private...)}), nil
 }
 
-type doubleSession struct {
-	key     []byte
-	suite   double
-	counter uint64
-	seen    map[uint64]bool
-}
-
-func (s *doubleSession) stream(counter uint64, length int) []byte {
-	out := make([]byte, 0, length+sha256.Size)
-	for block := 0; len(out) < length; block++ {
-		var header [16]byte
-		binary.BigEndian.PutUint64(header[:8], counter)
-		binary.BigEndian.PutUint64(header[8:], uint64(block))
-		sum := sha256.Sum256(append(append([]byte(nil), s.key...), header[:]...))
-		out = append(out, sum[:]...)
+func (d double) KeyMaterial(raw e2ee.State) (e2ee.State, error) {
+	state, err := decodeState(raw)
+	if err != nil {
+		return nil, err
 	}
-	return out[:length]
+	// Keys only: what someone taking the device obtains, without the record of
+	// what had already been seen.
+	return encodeState(doubleState{Key: state.Key, Send: state.Send}), nil
 }
 
-func (s *doubleSession) tag(counter uint64, body, binding []byte) []byte {
+func (d double) Seal(raw e2ee.State, plaintext, binding []byte) ([]byte, e2ee.State, error) {
+	if d.panicOnSeal {
+		panic("this candidate is broken")
+	}
+	state, err := decodeState(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	counter := state.Send
+	state.Send++
+	body := append([]byte(nil), plaintext...)
+	keystream := stream(state.Key, counter, len(body))
+	for index := range body {
+		body[index] ^= keystream[index]
+	}
+	out := make([]byte, 8)
+	binary.BigEndian.PutUint64(out, counter)
+	out = append(out, d.tag(state.Key, counter, body, binding)...)
+	return append(out, body...), encodeState(state), nil
+}
+
+func (d double) Open(raw e2ee.State, ciphertext, binding []byte) ([]byte, e2ee.State, error) {
+	state, err := decodeState(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(ciphertext) < 24 {
+		return nil, nil, e2ee.ErrNotAuthentic
+	}
+	counter := binary.BigEndian.Uint64(ciphertext[:8])
+	body := ciphertext[24:]
+	if string(d.tag(state.Key, counter, body, binding)) != string(ciphertext[8:24]) {
+		return nil, nil, e2ee.ErrNotAuthentic
+	}
+	if !d.allowReplay {
+		for _, seen := range state.Seen {
+			if seen == counter {
+				return nil, nil, e2ee.ErrReplayed
+			}
+		}
+		state.Seen = append(state.Seen, counter)
+	}
+	plaintext := append([]byte(nil), body...)
+	keystream := stream(state.Key, counter, len(plaintext))
+	for index := range plaintext {
+		plaintext[index] ^= keystream[index]
+	}
+	return plaintext, encodeState(state), nil
+}
+
+func (d double) tag(key []byte, counter uint64, body, binding []byte) []byte {
 	var header [8]byte
 	binary.BigEndian.PutUint64(header[:], counter)
-	input := append([]byte(nil), s.key...)
+	input := append([]byte(nil), key...)
 	input = append(input, header[:]...)
 	input = append(input, body...)
-	if !s.suite.ignoreBinding {
+	if !d.ignoreBinding {
 		input = append(input, binding...)
 	}
 	sum := sha256.Sum256(input)
 	return sum[:16]
 }
 
-func (s *doubleSession) Seal(plaintext, binding []byte) ([]byte, error) {
-	if s.suite.panicOnSeal {
-		panic("this candidate is broken")
+func stream(key []byte, counter uint64, length int) []byte {
+	out := make([]byte, 0, length+sha256.Size)
+	for block := 0; len(out) < length; block++ {
+		var header [16]byte
+		binary.BigEndian.PutUint64(header[:8], counter)
+		binary.BigEndian.PutUint64(header[8:], uint64(block))
+		sum := sha256.Sum256(append(append([]byte(nil), key...), header[:]...))
+		out = append(out, sum[:]...)
 	}
-	counter := s.counter
-	s.counter++
-	body := append([]byte(nil), plaintext...)
-	keystream := s.stream(counter, len(body))
-	for index := range body {
-		body[index] ^= keystream[index]
-	}
-	out := make([]byte, 8)
-	binary.BigEndian.PutUint64(out, counter)
-	out = append(out, s.tag(counter, body, binding)...)
-	return append(out, body...), nil
-}
-
-func (s *doubleSession) Open(ciphertext, binding []byte) ([]byte, error) {
-	if len(ciphertext) < 24 {
-		return nil, e2ee.ErrNotAuthentic
-	}
-	counter := binary.BigEndian.Uint64(ciphertext[:8])
-	body := ciphertext[24:]
-	expected := s.tag(counter, body, binding)
-	if len(expected) != 16 || string(expected) != string(ciphertext[8:24]) {
-		return nil, e2ee.ErrNotAuthentic
-	}
-	if !s.suite.allowReplay && s.seen[counter] {
-		return nil, e2ee.ErrReplayed
-	}
-	s.seen[counter] = true
-	plaintext := append([]byte(nil), body...)
-	keystream := s.stream(counter, len(plaintext))
-	for index := range plaintext {
-		plaintext[index] ^= keystream[index]
-	}
-	return plaintext, nil
-}
-
-// Snapshot exports key material only, which is what an attacker taking the
-// device obtains.
-func (s *doubleSession) Snapshot() ([]byte, error) {
-	return append([]byte(nil), s.key...), nil
-}
-
-func (s *doubleSession) Restore(snapshot []byte) (e2ee.Session, error) {
-	if len(snapshot) == 0 {
-		return nil, errors.New("empty snapshot")
-	}
-	return &doubleSession{key: append([]byte(nil), snapshot...), suite: s.suite, seen: map[uint64]bool{}}, nil
+	return out[:length]
 }
 
 func testBinding() e2ee.Binding {
@@ -166,15 +191,11 @@ func assertFailures(t *testing.T, result Result, expected ...string) {
 }
 
 // A suite whose keys never change passes every mechanical check and still
-// leaves a single device theft permanent. That is the whole reason the
-// compromise checks exist.
+// leaves a single device theft permanent.
 func TestStaticKeysFailOnlyTheCompromiseChecks(t *testing.T) {
 	result := Verify(double{algorithm: "tos.messaging.e2ee.test-double.v1"}, testBinding())
 	if result.AlgorithmID != "tos.messaging.e2ee.test-double.v1" {
 		t.Fatalf("unexpected algorithm identifier: %q", result.AlgorithmID)
-	}
-	if result.Passed() {
-		t.Fatal("a static-key candidate must not pass")
 	}
 	assertFailures(t, result, CheckPastTrafficSealed, CheckPostCompromise)
 }
@@ -184,26 +205,27 @@ func TestUnboundCiphertextIsCaught(t *testing.T) {
 	assertFailures(t, result, CheckBindingEnforced, CheckPastTrafficSealed, CheckPostCompromise)
 }
 
+// Replay protection that does not live in the persisted state fails twice:
+// within a session and across a restart.
 func TestMissingReplayProtectionIsCaught(t *testing.T) {
 	result := Verify(double{algorithm: "tos.messaging.e2ee.test-double.v1", allowReplay: true}, testBinding())
-	assertFailures(t, result, CheckReplayRejected, CheckPastTrafficSealed, CheckPostCompromise)
+	assertFailures(t, result, CheckReplayRejected, CheckReplaySurvivesState,
+		CheckPastTrafficSealed, CheckPostCompromise)
 }
 
 func TestUnnamedSuiteIsCaught(t *testing.T) {
 	result := Verify(double{algorithm: "homegrown"}, testBinding())
-	names := failedNames(result)
 	found := false
-	for _, name := range names {
+	for _, name := range failedNames(result) {
 		if name == CheckAlgorithmIdentifier {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected the algorithm identifier to be refused, failures were %v", names)
+		t.Fatalf("expected the algorithm identifier to be refused, failures were %v", failedNames(result))
 	}
 }
 
-// A candidate that crashes must be reported, not propagated.
 func TestPanickingCandidateIsReported(t *testing.T) {
 	result := Verify(double{algorithm: "tos.messaging.e2ee.test-double.v1", panicOnSeal: true}, testBinding())
 	if result.Passed() {
@@ -233,7 +255,8 @@ func TestEveryCheckRuns(t *testing.T) {
 	expected := []string{
 		CheckAlgorithmIdentifier, CheckAsyncEstablishment, CheckReverseDirection,
 		CheckBindingEnforced, CheckTamperDetected, CheckReplayRejected,
-		CheckOutOfOrder, CheckBoundedExpansion, CheckPastTrafficSealed, CheckPostCompromise,
+		CheckOutOfOrder, CheckBoundedExpansion, CheckStatePortable, CheckStateBounded,
+		CheckReplaySurvivesState, CheckPastTrafficSealed, CheckPostCompromise,
 	}
 	if len(result.Checks) != len(expected) {
 		t.Fatalf("expected %d checks, got %d", len(expected), len(result.Checks))

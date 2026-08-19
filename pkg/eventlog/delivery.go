@@ -1,14 +1,45 @@
 package eventlog
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
 	"sort"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 )
+
+// Payload returns the queued event.
+func (d Delivery) Payload() ([]byte, error) {
+	payload, err := base64.StdEncoding.Strict().DecodeString(d.PayloadBase64)
+	if err != nil {
+		return nil, errors.New("invalid queued event payload")
+	}
+	if canon.Digest(payload) != d.PayloadDigest {
+		return nil, errors.New("queued event payload does not match its digest")
+	}
+	return payload, nil
+}
+
+// Ciphertext returns the sealed message, if one has been committed. A delivery
+// without one has not been sealed yet, or lost its ciphertext to a crash and
+// must be sealed again from the current session state.
+func (d Delivery) Ciphertext() ([]byte, error) {
+	if d.CiphertextBase64 == "" {
+		return nil, nil
+	}
+	ciphertext, err := base64.StdEncoding.Strict().DecodeString(d.CiphertextBase64)
+	if err != nil {
+		return nil, errors.New("invalid sealed ciphertext")
+	}
+	if canon.Digest(ciphertext) != d.CiphertextDigest {
+		return nil, errors.New("sealed ciphertext does not match its digest")
+	}
+	return ciphertext, nil
+}
 
 // DeliverySchema is the on-disk record schema for an outbound event.
 const DeliverySchema = "tos.messaging.delivery-journal.v1"
@@ -43,6 +74,11 @@ var ErrNotPending = errors.New("delivery is not awaiting an attempt")
 type Delivery struct {
 	Schema              string        `json:"schema"`
 	EventID             string        `json:"event_id"`
+	SessionID           string        `json:"session_id,omitempty"`
+	PayloadBase64       string        `json:"payload_base64"`
+	PayloadDigest       string        `json:"payload_digest"`
+	CiphertextBase64    string        `json:"ciphertext_base64,omitempty"`
+	CiphertextDigest    string        `json:"ciphertext_digest,omitempty"`
 	RecipientEndpointID string        `json:"recipient_messaging_endpoint_id"`
 	ConversationID      string        `json:"conversation_id"`
 	State               DeliveryState `json:"state"`
@@ -59,8 +95,12 @@ type Outbound struct {
 	EventID             string
 	RecipientEndpointID string
 	ConversationID      string
-	CreatedAtUnix       uint64
-	ExpiresAtUnix       uint64
+	// Payload is the event to send. It is queued before it is sealed, so that
+	// a crash between advancing the session and storing the ciphertext leaves
+	// something to seal again.
+	Payload       []byte
+	CreatedAtUnix uint64
+	ExpiresAtUnix uint64
 }
 
 // Enqueue records an outbound event exactly once.
@@ -82,6 +122,8 @@ func (j *Journal) Enqueue(request Outbound) (bool, Delivery, error) {
 	delivery := Delivery{
 		Schema:              DeliverySchema,
 		EventID:             request.EventID,
+		PayloadBase64:       base64.StdEncoding.EncodeToString(request.Payload),
+		PayloadDigest:       canon.Digest(request.Payload),
 		RecipientEndpointID: request.RecipientEndpointID,
 		ConversationID:      request.ConversationID,
 		State:               StatePending,
@@ -112,7 +154,8 @@ func (j *Journal) Enqueue(request Outbound) (bool, Delivery, error) {
 		return false, Delivery{}, err
 	}
 	if existing.RecipientEndpointID != request.RecipientEndpointID ||
-		existing.ConversationID != request.ConversationID {
+		existing.ConversationID != request.ConversationID ||
+		existing.PayloadDigest != canon.Digest(request.Payload) {
 		return false, Delivery{}, ErrConflict
 	}
 	return false, existing, nil
@@ -350,6 +393,9 @@ func validateOutbound(request Outbound) error {
 	if !convPattern.MatchString(request.ConversationID) {
 		return errors.New("invalid delivery conversation identifier")
 	}
+	if len(request.Payload) == 0 || len(request.Payload) > MaxPayloadBytes {
+		return errors.New("invalid queued event payload")
+	}
 	if request.CreatedAtUnix == 0 || request.ExpiresAtUnix <= request.CreatedAtUnix {
 		return errors.New("invalid delivery validity window")
 	}
@@ -368,8 +414,20 @@ func readDelivery(path string) (Delivery, error) {
 	if delivery.Schema != DeliverySchema || !eventPattern.MatchString(delivery.EventID) ||
 		!endpointPattern.MatchString(delivery.RecipientEndpointID) ||
 		!convPattern.MatchString(delivery.ConversationID) ||
-		delivery.CreatedAtUnix == 0 || delivery.ExpiresAtUnix <= delivery.CreatedAtUnix {
+		delivery.CreatedAtUnix == 0 || delivery.ExpiresAtUnix <= delivery.CreatedAtUnix ||
+		!canon.ValidDigest(delivery.PayloadDigest) {
 		return Delivery{}, errors.New("invalid delivery record")
+	}
+	if delivery.SessionID != "" && !sessionPattern.MatchString(delivery.SessionID) {
+		return Delivery{}, errors.New("invalid delivery record")
+	}
+	if _, err := delivery.Payload(); err != nil {
+		return Delivery{}, errors.New("invalid delivery record")
+	}
+	if delivery.CiphertextBase64 != "" {
+		if _, err := delivery.Ciphertext(); err != nil {
+			return Delivery{}, errors.New("invalid delivery record")
+		}
 	}
 	switch delivery.State {
 	case StatePending, StateHeld, StateDelivered, StateAbandoned:
