@@ -64,11 +64,15 @@ make alone.**
 
 ### 2. The reachability study has never been run — blocks M1, not the freeze
 
-The UDP feasibility collector is finished and corrected; **the ADNL collector
-does not exist**, and only an ADNL study can decide a route — the report tool
-now exits non-zero for anything less. No evidence of either kind has been
-collected. The architecture makes the route decision a prerequisite for
-*starting* M1 rather than for accepting it.
+Both collectors now exist — UDP feasibility and the ADNL session probe a
+route decision actually turns on — and the report tool exits non-zero for
+anything that supports no route decision. What does not exist is evidence:
+**no study of either kind has been run**, and a study needs at least three
+operators on at least three sites per required scenario, which one
+implementer cannot supply. A single-operator dry run of the chain is
+scripted in [`M0R_PILOT_RUNBOOK.md`](M0R_PILOT_RUNBOOK.md) and is expected
+to end `insufficient-evidence`. The architecture makes the route decision a
+prerequisite for *starting* M1 rather than for accepting it.
 
 ### 3. No encryption suite
 
