@@ -73,7 +73,7 @@ repository, and one ✅ or one 🟡 would misstate both halves.
 | Durable mandates, budgets, negotiations | ✅ | Every transition persists; crash windows between the budget ledger and a negotiation snapshot reconcile deterministically at journal open |
 | Finalized-quote verification contract and term matching | ✅ | `negotiation.QuoteResolver`, `VerifiedAcceptedQuote` |
 | Concrete finalized-state resolver and daemon wiring | ⬜ | The resolver is an interface; nothing reads real chain state, and the daemon wires none. Until it exists, `Committed()` is only as strong as the resolver a caller supplies |
-| Negative-case resolver tests (wrong network/registry/account/provider/money/escrow) | ⬜ | Belong with the concrete resolver |
+| Negative-case resolver tests (wrong network/registry/account/provider/money/escrow) | 🟡 | The Messenger's half of the contract is covered against a stub resolver: a quote diverging in amount, capability, version, expiry, provider, manifest, or **escrow** is rejected; a quote in a **foreign asset at the same nominal amount** is rejected (money is asset-and-amount, not amount alone); a missing, unfinalized, or wrong-commitment quote is refused; a transient resolver **error** leaves the negotiation retryable rather than rejected. **Named gap:** the wrong-**network/registry/account** cases are state-provenance checks the resolver performs when reading the chain, not the term-matching Finalize does — they belong with the concrete resolver, which does not exist here |
 
 ## Next, in the order the architecture allows
 

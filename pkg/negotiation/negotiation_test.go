@@ -374,6 +374,73 @@ func TestCanonicalTermsMustMatchWhatWasAgreed(t *testing.T) {
 	}
 }
 
+// A finalized quote naming a different asset at the same nominal amount is not
+// the agreement. Money is the asset and the amount together; matching the
+// amount while the asset differs would let a settlement move a different token
+// than the one that was agreed, at a number that looks right.
+func TestFinalizeRejectsAForeignAsset(t *testing.T) {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if err := instance.AcceptIntent(at(2)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := instance.BeginCanonicalization(at(3)); err != nil {
+		t.Fatalf("canonicalise: %v", err)
+	}
+
+	foreign := terms("50000000")
+	foreign.Price = otherMoney("50000000")
+	if err := instance.Finalize(stubResolver{quote: finalizedQuote(foreign), found: true}, commitment, at(4)); err == nil {
+		t.Fatal("a quote in a different asset at the same amount was accepted")
+	}
+	if instance.State() != StateRejected {
+		t.Fatalf("a foreign-asset quote left state %q", instance.State())
+	}
+	if instance.ActiveAgreement() {
+		t.Fatal("a rejected finalisation reported an active agreement")
+	}
+}
+
+// A resolver that cannot read finalized state has not said the quote is absent
+// or wrong; it has said nothing. The negotiation stays where it was, to be
+// retried, rather than being rejected for the chain's unavailability -- a
+// rejection would throw away an agreement over a transient read failure, and
+// the budget hold stays held rather than becoming an unaccountable spend.
+func TestFinalizePropagatesAResolverError(t *testing.T) {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if err := instance.AcceptIntent(at(2)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := instance.BeginCanonicalization(at(3)); err != nil {
+		t.Fatalf("canonicalise: %v", err)
+	}
+
+	readErr := errors.New("finalized state is temporarily unreadable")
+	if err := instance.Finalize(stubResolver{err: readErr}, commitment, at(4)); err == nil {
+		t.Fatal("a resolver read error was swallowed")
+	}
+	if instance.State() != StateCanonicalizationPending {
+		t.Fatalf("a transient resolver error moved the state to %q", instance.State())
+	}
+	if instance.ActiveAgreement() {
+		t.Fatal("a pending canonicalisation reported an active agreement")
+	}
+
+	// The read can be retried, and a good resolver then finalises the same
+	// agreement: the transient error cost nothing.
+	if err := instance.Finalize(stubResolver{quote: finalizedQuote(terms("50000000")), found: true}, commitment, at(5)); err != nil {
+		t.Fatalf("retry after a transient error failed: %v", err)
+	}
+	if instance.State() != StateFinalized {
+		t.Fatalf("a retry after a transient error did not finalise: state %q", instance.State())
+	}
+}
+
 // One commitment per negotiation. A repeated event does not produce a second.
 func TestFinalizingTwiceIsRefused(t *testing.T) {
 	instance := start(t, testBudget(t, "1000000000"))
