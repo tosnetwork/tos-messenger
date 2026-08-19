@@ -17,6 +17,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -45,6 +46,17 @@ type recorder struct {
 	swept      []dispatch.Summary
 	maintained int
 	failures   []string
+}
+
+// testBody is a real typed body: the dispatcher refuses anything that is not
+// what its kind says it is.
+func testBody(t *testing.T, body string) []byte {
+	t.Helper()
+	encoded, err := payload.Encode(payload.Text{MediaType: "text/plain; charset=utf-8", Body: body})
+	if err != nil {
+		t.Fatalf("encode payload: %v", err)
+	}
+	return encoded
 }
 
 func (r *recorder) Swept(summary dispatch.Summary)       { r.swept = append(r.swept, summary) }
@@ -333,7 +345,7 @@ func testEvent(t *testing.T) envelope.Event {
 		SenderDeviceID:   "dev_" + strings.Repeat("4", 64),
 		CreatedAtUnix:    uint64(time.Now().Unix()),
 		Kind:             "text",
-		Content:          []byte("hello"),
+		Content:          testBody(t, "hello"),
 	})
 	if err != nil {
 		t.Fatalf("event: %v", err)

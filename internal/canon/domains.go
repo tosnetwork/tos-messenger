@@ -15,6 +15,10 @@ const (
 	DomainEndpointDelegation = "tos.messaging.endpoint-delegation.v1\x00"
 	// DomainEndpointID namespaces the endpoint identifier derivation.
 	DomainEndpointID = "tos.messaging.endpoint-id.v1\x00"
+	// DomainPayload prefixes every typed event body. The body's own schema
+	// follows it, so bytes that parse under one schema cannot be replayed as
+	// another.
+	DomainPayload = "tos.messaging.payload.v1\x00"
 	// DomainInboxPolicy namespaces the published identity of an inbox
 	// admission policy.
 	DomainInboxPolicy = "tos.messaging.inbox-policy.v1\x00"

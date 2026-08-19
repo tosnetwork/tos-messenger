@@ -13,6 +13,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -93,6 +94,17 @@ func testDelegation(t *testing.T) (identity.Delegation, []byte) {
 	return delegation, encoded
 }
 
+// textBody is a real typed body. A test that sent arbitrary bytes would be
+// testing a path the gate no longer has.
+func textBody(t *testing.T, body string) []byte {
+	t.Helper()
+	encoded, err := payload.Encode(payload.Text{MediaType: "text/plain; charset=utf-8", Body: body})
+	if err != nil {
+		t.Fatalf("encode payload: %v", err)
+	}
+	return encoded
+}
+
 func testEvent(t *testing.T, delegation identity.Delegation, mutate func(*envelope.Event)) envelope.Event {
 	t.Helper()
 	event := envelope.Event{
@@ -103,7 +115,7 @@ func testEvent(t *testing.T, delegation identity.Delegation, mutate func(*envelo
 		SenderDeviceID:   deviceID,
 		CreatedAtUnix:    baseUnix + 10,
 		Kind:             "text",
-		Content:          []byte("hello"),
+		Content:          textBody(t, "hello"),
 	}
 	if mutate != nil {
 		mutate(&event)
@@ -385,6 +397,11 @@ func TestRejectionsAreClassified(t *testing.T) {
 // the published one that applies. An event above the protocol maximum cannot
 // be constructed at all, so this is the only case the check can see.
 func TestContentAboveThePublishedBoundIsRefused(t *testing.T) {
+	atBound := textBody(t, "hi")
+	overBound := textBody(t, strings.Repeat("x", 64))
+	if len(overBound) <= len(atBound) {
+		t.Fatal("the oversized body is not larger than the bound")
+	}
 	delegation, encoded := testDelegation(t)
 	digest, err := identity.Digest(delegation)
 	if err != nil {
@@ -405,15 +422,13 @@ func TestContentAboveThePublishedBoundIsRefused(t *testing.T) {
 		Journal:         journal,
 		Policy:          OpenInbox{},
 		LocalDelegation: testLocalDelegation(t, OpenInbox{}),
-		MaxContentBytes: 16,
+		MaxContentBytes: len(atBound),
 		InstallSalt:     bytes.Repeat([]byte{0x5a}, MinInstallSaltBytes),
 	})
 	if err != nil {
 		t.Fatalf("gate: %v", err)
 	}
-	event := testEvent(t, delegation, func(e *envelope.Event) {
-		e.Content = bytes.Repeat([]byte{1}, 32)
-	})
+	event := testEvent(t, delegation, func(e *envelope.Event) { e.Content = overBound })
 	decision, err := gate.Admit(inbound(event, encoded))
 	if err != nil {
 		t.Fatalf("admit: %v", err)
@@ -421,9 +436,7 @@ func TestContentAboveThePublishedBoundIsRefused(t *testing.T) {
 	if decision.Code != fault.CodeContentTooLarge {
 		t.Fatalf("expected the published bound to apply, got %q", decision.Code)
 	}
-	small := testEvent(t, delegation, func(e *envelope.Event) {
-		e.Content = bytes.Repeat([]byte{1}, 16)
-	})
+	small := testEvent(t, delegation, func(e *envelope.Event) { e.Content = atBound })
 	if decision, err := gate.Admit(inbound(small, encoded)); err != nil {
 		t.Fatalf("admit: %v", err)
 	} else if decision.Outcome != Accepted {
@@ -806,5 +819,46 @@ func TestPolicyDigestDoesNotTrackTheRoster(t *testing.T) {
 	open := OpenInbox{}
 	if open.Digest() == empty.Digest() {
 		t.Fatal("an open inbox and an allow list publish the same digest")
+	}
+}
+
+// A kind is a contract about the body, not a label on it. Bytes that do not
+// meet the contract are refused, and the refusal names the reason so a correct
+// implementation can tell it from a network fault.
+func TestBodyMustMatchItsKind(t *testing.T) {
+	gate, journal, delegation, encoded := testGate(t, OpenInbox{})
+	event := testEvent(t, delegation, func(e *envelope.Event) {
+		e.Content = append(textBody(t, "hello"), 0x00)
+	})
+	decision, err := gate.Admit(inbound(event, encoded))
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	if decision.Code != fault.CodePayloadMalformed {
+		t.Fatalf("a body that is not what its kind says was admitted as %q", decision.Code)
+	}
+	// A refusal before the claim leaves the sender's remedy usable.
+	if pending, err := journal.ListPending(time.Unix(int64(baseUnix)+120, 0), 10); err != nil {
+		t.Fatalf("list: %v", err)
+	} else if len(pending) != 0 {
+		t.Fatalf("a malformed body was written down: %+v", pending)
+	}
+}
+
+// A sender who was never admitted must not learn whether their body parsed.
+// That answer is a probe the recipient would be answering for a stranger.
+func TestUnadmittedSenderLearnsNothingAboutTheirBody(t *testing.T) {
+	gate, _, delegation, encoded := testGate(t, AllowList{
+		Blocked: map[string]struct{}{senderID: {}},
+	})
+	event := testEvent(t, delegation, func(e *envelope.Event) {
+		e.Content = append(textBody(t, "hello"), 0x00)
+	})
+	decision, err := gate.Admit(inbound(event, encoded))
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	if decision.Code != fault.CodeRejected {
+		t.Fatalf("a blocked sender learned %q about their body", decision.Code)
 	}
 }

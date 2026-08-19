@@ -13,6 +13,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -216,7 +217,6 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 	if len(inbound.Event.Content) > g.config.MaxContentBytes {
 		return g.refuse(inbound, fault.CodeContentTooLarge, class), nil
 	}
-
 	delegation, code := g.authority(inbound)
 	if code != "" {
 		return g.refuse(inbound, code, class), nil
@@ -248,11 +248,25 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 		return decision, nil
 	}
 
+	// The kind names a payload contract, and a body that does not meet it is
+	// not a weakly-typed message: it is a message whose kind is wrong about
+	// itself. Admitting it would hand the runtime bytes it would have to guess
+	// at, which is the guessing this layer exists to remove.
+	//
+	// It runs after admission on purpose. A sender who was never admitted must
+	// not learn whether their body parsed, because that answer is a probe the
+	// recipient would be answering for a stranger.
+	if err := payload.Validate(inbound.Event.Kind, inbound.Event.Content); err != nil {
+		decision := g.refuse(inbound, fault.CodePayloadMalformed, class)
+		decision.Delegation = delegation
+		return decision, nil
+	}
+
 	// The event itself is stored, not only its identity. A record that said
 	// "seen" without saying what was seen would leave an event deduplicated
 	// forever and delivered never, because the only copy was in the memory of
 	// a process that may not survive the next second.
-	payload, err := envelope.EncodeEventJSON(inbound.Event)
+	stored, err := envelope.EncodeEventJSON(inbound.Event)
 	if err != nil {
 		return Decision{}, err
 	}
@@ -268,7 +282,7 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 		EventID:          inbound.Event.EventID,
 		SenderEndpointID: inbound.Event.SenderEndpointID,
 		ConversationID:   inbound.Event.ConversationID,
-		Payload:          payload,
+		Payload:          stored,
 		Admission:        admitted,
 		ReceivedAtUnix:   inbound.ReceivedAtUnix,
 	})

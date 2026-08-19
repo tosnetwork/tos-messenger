@@ -23,6 +23,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 )
 
 // Message is one sealed event handed to a transport.
@@ -186,7 +187,13 @@ func (d *Dispatcher) Queue(event envelope.Event, sessionID, recipientEndpointID 
 		event.SenderDeviceID != d.config.Identity.DeviceID {
 		return false, eventlog.Delivery{}, errors.New("event does not come from this installation")
 	}
-	payload, err := envelope.EncodeEventJSON(event)
+	// A body that does not meet its own kind's contract must not leave here.
+	// The recipient will refuse it, and queueing it would spend the sender's
+	// delivery attempts on a message that was never going to be interpreted.
+	if err := payload.Validate(event.Kind, event.Content); err != nil {
+		return false, eventlog.Delivery{}, err
+	}
+	stored, err := envelope.EncodeEventJSON(event)
 	if err != nil {
 		return false, eventlog.Delivery{}, err
 	}
@@ -199,7 +206,7 @@ func (d *Dispatcher) Queue(event envelope.Event, sessionID, recipientEndpointID 
 		SessionID:           sessionID,
 		RecipientEndpointID: recipientEndpointID,
 		ConversationID:      event.ConversationID,
-		Payload:             payload,
+		Payload:             stored,
 		CreatedAtUnix:       uint64(now.Unix()),
 		ExpiresAtUnix:       expiresAtUnix,
 	})

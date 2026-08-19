@@ -19,6 +19,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -35,6 +36,17 @@ const (
 )
 
 type stubSuite struct{}
+
+// textBody is a real typed body. A test that queued arbitrary bytes would be
+// exercising a path the dispatcher no longer has.
+func textBody(t *testing.T, body string) []byte {
+	t.Helper()
+	encoded, err := payload.Encode(payload.Text{MediaType: "text/plain; charset=utf-8", Body: body})
+	if err != nil {
+		t.Fatalf("encode payload: %v", err)
+	}
+	return encoded
+}
 
 func (stubSuite) AlgorithmID() string { return algorithm }
 func (stubSuite) NewPrekeyMaterial() ([]byte, []byte, error) {
@@ -127,7 +139,7 @@ func (h *harness) event(t *testing.T, body string) envelope.Event {
 	event, err := envelope.NewEvent(envelope.Event{
 		Network: testNetwork(), ConversationID: convoID,
 		SenderAgentID: senderID, SenderEndpointID: senderMEP, SenderDeviceID: senderDev,
-		CreatedAtUnix: baseUnix + 1, Kind: "text", Content: []byte(body),
+		CreatedAtUnix: baseUnix + 1, Kind: "text", Content: textBody(t, body),
 	})
 	if err != nil {
 		t.Fatalf("event: %v", err)
@@ -205,8 +217,13 @@ func TestRuntimeDrainsTheInbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode delivered event: %v", err)
 	}
-	if string(decoded.Content) != "hello" {
-		t.Fatalf("unexpected content: %q", decoded.Content)
+	// The runtime gets the typed body, and it is the same body that was sent.
+	body, err := payload.Decode(decoded.Kind, decoded.Content)
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if text, ok := body.(payload.Text); !ok || text.Body != "hello" {
+		t.Fatalf("unexpected content: %+v", body)
 	}
 
 	claimed := h.call(t, Request{Op: OpClaim, EventID: event.EventID, LeaseID: leaseID, LeaseSeconds: 60})

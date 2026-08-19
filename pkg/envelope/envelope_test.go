@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -563,5 +564,27 @@ func TestRenderingIsCarriedButNotAuthoritative(t *testing.T) {
 	tampered.Rendering = "the task is complete"
 	if err := ValidateEvent(tampered); err == nil {
 		t.Fatal("the rendering was editable without changing the event identifier")
+	}
+}
+
+// The event vocabulary and the payload codecs are one contract in two places.
+// A kind with no codec would be a kind whose body nothing can interpret, and a
+// codec with no kind would be a body nothing can carry.
+func TestEveryKindHasACodecAndEveryCodecHasAKind(t *testing.T) {
+	kinds := map[string]struct{}{}
+	for _, kind := range KnownKinds() {
+		kinds[kind] = struct{}{}
+		schema, known := PayloadSchemaOf(kind)
+		if !known || schema == "" {
+			t.Fatalf("event kind %q carries no payload schema", kind)
+		}
+	}
+	for _, kind := range payload.Kinds() {
+		if _, known := kinds[kind]; !known {
+			t.Fatalf("payload codec %q has no event kind", kind)
+		}
+	}
+	if len(kinds) != len(payload.Kinds()) {
+		t.Fatalf("%d event kinds against %d codecs", len(kinds), len(payload.Kinds()))
 	}
 }

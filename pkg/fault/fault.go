@@ -108,6 +108,11 @@ const (
 	CodeUnknownEventKind Code = "unknown-event-kind"
 	// CodeContentTooLarge reports content beyond the accepted bound.
 	CodeContentTooLarge Code = "content-too-large"
+	// CodePayloadMalformed reports a body that is not what its own kind says
+	// it is. It is peer-visible because it is a fact about the sender's own
+	// message: withholding it would leave a correct implementation unable to
+	// tell a rejection from a network fault.
+	CodePayloadMalformed Code = "payload-malformed"
 	// CodeEventOutsideWindow reports an event past its own expiry or dated far
 	// enough ahead that no honest clock explains it.
 	CodeEventOutsideWindow Code = "event-outside-window"
@@ -177,6 +182,7 @@ var registry = map[Code]spec{
 	CodeAdmissionRequired:  {Refresh, true, true},
 	CodeUnknownEventKind:   {Permanent, true, false},
 	CodeContentTooLarge:    {Permanent, true, false},
+	CodePayloadMalformed:   {Permanent, true, false},
 	CodeEventOutsideWindow: {Permanent, true, false},
 	// Telling a sender that a person is deciding confirms the event arrived
 	// and was read by policy, so the owner's queue stays invisible.

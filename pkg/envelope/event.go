@@ -11,6 +11,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -41,10 +42,6 @@ var (
 // kindSpec is everything the protocol fixes about one event kind.
 type kindSpec struct {
 	class string
-	// schema names the structured payload this kind carries. Automation reads
-	// the payload; a kind whose payload has no schema cannot be interpreted by
-	// anything except a human, which is not a basis for acting.
-	schema string
 	// localOnly marks a kind that may only arrive over the owner's own local
 	// interface and never from the network.
 	localOnly bool
@@ -64,50 +61,50 @@ type kindSpec struct {
 // operation. Splitting them means the dangerous one is not expressible on the
 // wire at all.
 var eventKinds = map[string]kindSpec{
-	"text":                {class: "text", schema: "tos.messaging.payload.text.v1"},
-	"conversation.invite": {class: "conversation", schema: "tos.messaging.payload.conversation-invite.v1"},
-	"conversation.accept": {class: "conversation", schema: "tos.messaging.payload.conversation-accept.v1"},
-	"presence.hint":       {class: "presence", schema: "tos.messaging.payload.presence-hint.v1"},
+	"text":                {class: "text"},
+	"conversation.invite": {class: "conversation"},
+	"conversation.accept": {class: "conversation"},
+	"presence.hint":       {class: "presence"},
 
-	"agent.task.request":        {class: "agent.task", schema: "tos.messaging.payload.task-request.v1"},
-	"agent.task.progress":       {class: "agent.task", schema: "tos.messaging.payload.task-progress.v1"},
-	"agent.task.result":         {class: "agent.task", schema: "tos.messaging.payload.task-result.v1"},
-	"agent.task.status.request": {class: "agent.task", schema: "tos.messaging.payload.task-status-request.v1"},
+	"agent.task.request":        {class: "agent.task"},
+	"agent.task.progress":       {class: "agent.task"},
+	"agent.task.result":         {class: "agent.task"},
+	"agent.task.status.request": {class: "agent.task"},
 
 	// Negotiation is conversation, not commitment. None of these create,
 	// accept, or fund anything; they carry what the parties said they intend.
-	"negotiation.proposal":        {class: "negotiation", schema: "tos.messaging.payload.negotiation-proposal.v1"},
-	"negotiation.counterproposal": {class: "negotiation", schema: "tos.messaging.payload.negotiation-counterproposal.v1"},
-	"negotiation.withdraw":        {class: "negotiation", schema: "tos.messaging.payload.negotiation-withdraw.v1"},
-	"negotiation.intent.accept":   {class: "negotiation", schema: "tos.messaging.payload.negotiation-intent-accept.v1"},
-	"negotiation.intent.reject":   {class: "negotiation", schema: "tos.messaging.payload.negotiation-intent-reject.v1"},
+	"negotiation.proposal":        {class: "negotiation"},
+	"negotiation.counterproposal": {class: "negotiation"},
+	"negotiation.withdraw":        {class: "negotiation"},
+	"negotiation.intent.accept":   {class: "negotiation"},
+	"negotiation.intent.reject":   {class: "negotiation"},
 
 	// What the other party says it decided.
-	"counterparty.approval.request": {class: "counterparty.approval", schema: "tos.messaging.payload.counterparty-approval-request.v1"},
-	"counterparty.approval.granted": {class: "counterparty.approval", schema: "tos.messaging.payload.counterparty-approval-granted.v1"},
-	"counterparty.approval.denied":  {class: "counterparty.approval", schema: "tos.messaging.payload.counterparty-approval-denied.v1"},
+	"counterparty.approval.request": {class: "counterparty.approval"},
+	"counterparty.approval.granted": {class: "counterparty.approval"},
+	"counterparty.approval.denied":  {class: "counterparty.approval"},
 
 	// What this owner authorises here. Never accepted from the network.
-	"owner.approval.grant": {class: "owner.approval", schema: "tos.messaging.payload.owner-approval-grant.v1", localOnly: true},
-	"owner.approval.deny":  {class: "owner.approval", schema: "tos.messaging.payload.owner-approval-deny.v1", localOnly: true},
+	"owner.approval.grant": {class: "owner.approval", localOnly: true},
+	"owner.approval.deny":  {class: "owner.approval", localOnly: true},
 
-	"a2a.message": {class: "a2a", schema: "tos.messaging.payload.a2a-message.v1"},
-	"mcp.call":    {class: "mcp", schema: "tos.messaging.payload.mcp-call.v1"},
-	"mcp.result":  {class: "mcp", schema: "tos.messaging.payload.mcp-result.v1"},
+	"a2a.message": {class: "a2a"},
+	"mcp.call":    {class: "mcp"},
+	"mcp.result":  {class: "mcp"},
 
-	"artifact.offer":     {class: "artifact", schema: "tos.messaging.payload.artifact-offer.v1"},
-	"artifact.reference": {class: "artifact", schema: "tos.messaging.payload.artifact-reference.v1"},
+	"artifact.offer":     {class: "artifact"},
+	"artifact.reference": {class: "artifact"},
 
-	"service.quote.reference":   {class: "service", schema: "tos.messaging.payload.quote-reference.v1"},
-	"service.escrow.reference":  {class: "service", schema: "tos.messaging.payload.escrow-reference.v1"},
-	"service.receipt.reference": {class: "service", schema: "tos.messaging.payload.receipt-reference.v1"},
+	"service.quote.reference":   {class: "service"},
+	"service.escrow.reference":  {class: "service"},
+	"service.receipt.reference": {class: "service"},
 
-	"delivery.ack":    {class: "delivery", schema: "tos.messaging.payload.delivery-ack.v1"},
-	"application.ack": {class: "application", schema: "tos.messaging.payload.application-ack.v1"},
+	"delivery.ack":    {class: "delivery"},
+	"application.ack": {class: "application"},
 
-	"room.invite":            {class: "room", schema: "tos.messaging.payload.room-invite.v1"},
-	"room.membership.commit": {class: "room", schema: "tos.messaging.payload.room-membership-commit.v1"},
-	"room.message":           {class: "room", schema: "tos.messaging.payload.room-message.v1"},
+	"room.invite":            {class: "room"},
+	"room.membership.commit": {class: "room"},
+	"room.message":           {class: "room"},
 }
 
 // Event is the inner typed object obtained after decryption.
@@ -180,9 +177,16 @@ func ClassOf(kind string) (string, bool) {
 }
 
 // PayloadSchemaOf returns the structured payload schema a kind carries.
+//
+// The schema comes from the codec that actually parses the body, not from a
+// second table kept in step by hand. A kind whose schema was declared in one
+// place and implemented in another would eventually declare a contract nothing
+// enforced.
 func PayloadSchemaOf(kind string) (string, bool) {
-	spec, known := eventKinds[kind]
-	return spec.schema, known
+	if _, known := eventKinds[kind]; !known {
+		return "", false
+	}
+	return payload.SchemaFor(kind)
 }
 
 // LocalOnly reports whether a kind may only arrive over the owner's own local
@@ -257,8 +261,8 @@ func DeriveEventID(event Event) (string, error) {
 // deriving its identifier.
 func NewEvent(event Event) (Event, error) {
 	event.EventID = ""
-	if spec, known := eventKinds[event.Kind]; known && event.PayloadSchema == "" {
-		event.PayloadSchema = spec.schema
+	if schema, known := payload.SchemaFor(event.Kind); known && event.PayloadSchema == "" {
+		event.PayloadSchema = schema
 	}
 	eventID, err := DeriveEventID(event)
 	if err != nil {
@@ -465,8 +469,8 @@ func validateEventFields(event Event) error {
 	// A known kind carries the schema the protocol fixed for it. An unknown
 	// kind may declare its own, which is what makes a forward-compatible event
 	// storable without making it interpretable.
-	if spec, known := eventKinds[event.Kind]; known {
-		if event.PayloadSchema != spec.schema {
+	if schema, known := payload.SchemaFor(event.Kind); known {
+		if event.PayloadSchema != schema {
 			return errors.New("event payload schema does not match its kind")
 		}
 	} else if !payloadSchemaPattern.MatchString(event.PayloadSchema) {

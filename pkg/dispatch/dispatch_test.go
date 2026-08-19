@@ -13,6 +13,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -33,6 +34,17 @@ const (
 // countingSuite is NOT cryptography. It exists so a test can tell how many
 // times a message was sealed, which is the property this package is about.
 type countingSuite struct{ seals *int }
+
+// textBody is a real typed body. A test that queued arbitrary bytes would be
+// exercising a path the dispatcher no longer has.
+func textBody(t *testing.T, body string) []byte {
+	t.Helper()
+	encoded, err := payload.Encode(payload.Text{MediaType: "text/plain; charset=utf-8", Body: body})
+	if err != nil {
+		t.Fatalf("encode payload: %v", err)
+	}
+	return encoded
+}
 
 func (c countingSuite) AlgorithmID() string { return algorithm }
 
@@ -150,7 +162,7 @@ func (h *harness) event(t *testing.T, body string) envelope.Event {
 		SenderDeviceID:   senderDev,
 		CreatedAtUnix:    baseUnix + 1,
 		Kind:             "text",
-		Content:          []byte(body),
+		Content:          textBody(t, body),
 	})
 	if err != nil {
 		t.Fatalf("event: %v", err)
@@ -469,7 +481,8 @@ func TestQueueWithoutATransport(t *testing.T) {
 		Network: &nativev1.NetworkDomain{NetworkId: "tos-local",
 			GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)},
 		ConversationID: convoID, SenderAgentID: senderID, SenderEndpointID: senderMEP,
-		SenderDeviceID: senderDev, CreatedAtUnix: baseUnix + 1, Kind: "text", Content: []byte("queued"),
+		SenderDeviceID: senderDev, CreatedAtUnix: baseUnix + 1, Kind: "text",
+		Content: textBody(t, "queued"),
 	})
 	if err != nil {
 		t.Fatalf("event: %v", err)
