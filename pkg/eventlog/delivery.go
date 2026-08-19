@@ -92,7 +92,11 @@ type Delivery struct {
 
 // Outbound is a request to deliver one event.
 type Outbound struct {
-	EventID             string
+	EventID string
+	// SessionID is known when the event is queued, not when it is sealed. A
+	// process that picked up a queued event after a restart would otherwise
+	// have no way to find the session it belongs to.
+	SessionID           string
 	RecipientEndpointID string
 	ConversationID      string
 	// Payload is the event to send. It is queued before it is sealed, so that
@@ -122,6 +126,7 @@ func (j *Journal) Enqueue(request Outbound) (bool, Delivery, error) {
 	delivery := Delivery{
 		Schema:              DeliverySchema,
 		EventID:             request.EventID,
+		SessionID:           request.SessionID,
 		PayloadBase64:       base64.StdEncoding.EncodeToString(request.Payload),
 		PayloadDigest:       canon.Digest(request.Payload),
 		RecipientEndpointID: request.RecipientEndpointID,
@@ -155,6 +160,7 @@ func (j *Journal) Enqueue(request Outbound) (bool, Delivery, error) {
 	}
 	if existing.RecipientEndpointID != request.RecipientEndpointID ||
 		existing.ConversationID != request.ConversationID ||
+		existing.SessionID != request.SessionID ||
 		existing.PayloadDigest != canon.Digest(request.Payload) {
 		return false, Delivery{}, ErrConflict
 	}
@@ -393,6 +399,9 @@ func validateOutbound(request Outbound) error {
 	if !convPattern.MatchString(request.ConversationID) {
 		return errors.New("invalid delivery conversation identifier")
 	}
+	if !sessionPattern.MatchString(request.SessionID) {
+		return errors.New("invalid delivery session identifier")
+	}
 	if len(request.Payload) == 0 || len(request.Payload) > MaxPayloadBytes {
 		return errors.New("invalid queued event payload")
 	}
@@ -418,7 +427,7 @@ func readDelivery(path string) (Delivery, error) {
 		!canon.ValidDigest(delivery.PayloadDigest) {
 		return Delivery{}, errors.New("invalid delivery record")
 	}
-	if delivery.SessionID != "" && !sessionPattern.MatchString(delivery.SessionID) {
+	if !sessionPattern.MatchString(delivery.SessionID) {
 		return Delivery{}, errors.New("invalid delivery record")
 	}
 	if _, err := delivery.Payload(); err != nil {

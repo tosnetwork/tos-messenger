@@ -443,6 +443,7 @@ func TestRecordsArePrivate(t *testing.T) {
 func outbound(eventID string) Outbound {
 	return Outbound{
 		EventID:             eventID,
+		SessionID:           session(0x11),
 		RecipientEndpointID: endpoint,
 		ConversationID:      convo,
 		Payload:             []byte(`{"outbound":"` + eventID + `"}`),

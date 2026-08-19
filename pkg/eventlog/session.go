@@ -144,10 +144,12 @@ func (j *Journal) CommitSealed(sessionID, algorithm string, next e2ee.State, eve
 	if delivery.State != StatePending {
 		return Delivery{}, ErrNotPending
 	}
+	if delivery.SessionID != sessionID {
+		return Delivery{}, errors.New("sealed message belongs to another session")
+	}
 	if err := j.writeSession(sessionID, algorithm, next, now); err != nil {
 		return Delivery{}, err
 	}
-	delivery.SessionID = sessionID
 	delivery.CiphertextBase64 = base64.StdEncoding.EncodeToString(ciphertext)
 	delivery.CiphertextDigest = canon.Digest(ciphertext)
 	return j.commitDelivery(path, delivery)
