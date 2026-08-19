@@ -156,8 +156,13 @@ implementation of them:
   cryptography;
 - the group key-management protocol, where MLS (RFC 9420) is the recorded
   default candidate that an alternative must be justified against. `pkg/room`
-  now commits room *membership* per epoch, but no per-epoch group secret is
-  derived and no mechanism delivers one, so group encryption is still absent;
+  commits room *membership* per epoch, and `pkg/group` now fixes the contract a
+  group-key scheme must satisfy and how it is refuted — founding agreement,
+  epoch advance, membership binding, re-keying on removal, a joiner with no
+  past, forged-commit refusal — exactly as `pkg/e2ee` does for the 1:1 suite. It
+  selects no construction and implements no cryptography; the harness checks
+  protocol structure, not secrecy. Choosing and building a scheme is the freeze
+  decision that remains;
 - the room-authority model — whether a room's membership is driven by a single
   owner or by member consensus — which decides how a participant reconciles a
   membership epoch another party advanced while it was offline. Until it is

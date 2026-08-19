@@ -246,6 +246,13 @@ func (m Membership) usable() error {
 	return nil
 }
 
+// ValidRoomID reports whether an identifier is a well-formed room identifier.
+// It lets a package that only needs to check a room reference do so without
+// reaching for the identifier patterns directly.
+func ValidRoomID(roomID string) bool {
+	return ids.Room.MatchString(roomID)
+}
+
 // Digest is the commitment a room publishes for one epoch's membership.
 //
 // The preimage is domain-separated and binds the room, the epoch, the count,

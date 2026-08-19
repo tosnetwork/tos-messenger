@@ -24,7 +24,7 @@ gate status: this repository carries none and consumes no gate capacity.
 | M2-T technical offline Mailbox and multi-Relay failover | ⬜ | No Relay implementation. A descriptor can publish a relay set, which is a declaration, not a service |
 | M2-C commercial Relay lease | 🔒 | Expansion Gate locked |
 | M3 OpenFox and conversation-to-commerce integration | 🟡 | Foundations only: typed commerce, mandates, budgets, durable negotiations and the verification contract exist. No transport, no concrete finalized-state resolver wired, no wallet, no execution integration |
-| M4 multi-device and private rooms | 🟡 | Device set succession, session fan-out, and room membership epochs exist (`pkg/e2ee`, `pkg/room`, `pkg/eventlog`). Still missing: group key agreement (per-epoch group encryption), and a room-authority model for peer-observed membership beyond single-step local succession |
+| M4 multi-device and private rooms | 🟡 | Device set succession, session fan-out, room membership epochs, and a group-key contract + refutation harness exist (`pkg/e2ee`, `pkg/room`, `pkg/group`, `pkg/eventlog`). Still missing: a *selected and implemented* group-key scheme (a freeze decision, like the 1:1 suite), and a room-authority model for peer-observed membership beyond single-step local succession |
 
 ## Components
 
@@ -41,7 +41,7 @@ gate status: this repository carries none and consumes no gate capacity.
 | Optional ReadAck wire profile | ⬜ | — | Local `ReadAtUnix` is UI state, not a cross-Agent wire profile |
 | Encrypted offline Mailbox Relay | ⬜ | — | Nothing. It is a transport path, ordered after M0-R |
 | Multi-Relay redundancy and failover | ⬜ | — | Nothing |
-| Private group encryption and membership epochs | 🟡 | `pkg/room` (membership state machine), `pkg/eventlog` (durable room ledger), `room.*` payload shapes | Membership epochs are closed and end-to-end tested: the state machine advances one epoch per change, commits a domain-separated digest over the sorted member set, and the ledger enforces monotonic epoch progression (rollback and gap refused) across restart. **Named gap:** no group key agreement — each epoch has no per-epoch group secret and no mechanism to deliver one, so group *encryption* is absent; and the ledger accepts only strict single-step succession (peer-observed gapped commits carry no member set to verify and are out of scope until a room authority model exists) |
+| Private group encryption and membership epochs | 🟡 | `pkg/room` (membership state machine), `pkg/eventlog` (durable room ledger), `pkg/group` (+ `conformance`) (group-key contract and refutation harness), `room.*` payload shapes | Membership epochs are closed and end-to-end tested: the state machine advances one epoch per change, commits a domain-separated digest over the sorted member set, and the ledger enforces monotonic epoch progression (rollback and gap refused) across restart. The group-key layer now has a **contract and a refutation harness**, exactly as `pkg/e2ee` does for the 1:1 suite: `group.Scheme` fixes how a scheme rides the room's epochs, and `group/conformance` refutes a candidate on founding agreement, epoch advance, membership binding, re-keying on removal, a joiner having no past, forged-commit refusal, and secret/view soundness — proven to pass a reference example and to catch broken doubles. **Named gap:** no scheme is *selected* (that is a freeze decision, like the 1:1 suite) and none is implemented; the harness checks protocol structure, not cryptographic secrecy; and the room-authority model (single-step local succession only) is still open |
 | Public Agent channels over Overlay with history synchronization | ⬜ | — | Nothing |
 | Messenger-specific encrypted attachment protocol | ⬜ | `artifact.*` payload shapes | References by digest only |
 | OpenFox `tos-messenger` channel adapter | ⬜ | — | Nothing; needs a transport first |
@@ -93,9 +93,12 @@ repository, and one ✅ or one 🟡 would misstate both halves.
 4. **Independent multi-operator interoperability evidence.** *(Blocked: needs a
    second implementation and the multi-operator study.)*
 5. **A room authority / group key agreement design.** Membership epochs commit
-   *who* is in a room; group encryption needs a per-epoch secret and a way to
-   deliver it to exactly the current members. This depends on a design decision
-   (single-authority vs. member-consensus room ownership) recorded in
+   *who* is in a room, and `pkg/group` now fixes the contract a group-key scheme
+   must satisfy and refutes candidates against it. What remains is a freeze-level
+   decision, not more scaffolding: *selecting and implementing* a construction
+   (MLS/RFC 9420 is the recorded default candidate), and settling the
+   room-authority model (single-authority vs. member-consensus) that decides how
+   a participant reconciles an epoch another party advanced. Both are recorded in
    [`OPEN_DECISIONS.md`](OPEN_DECISIONS.md).
 
 Item 1 does require the study; none of these settle the genesis-hash
