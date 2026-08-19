@@ -98,8 +98,7 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 		return errors.New("the resolver returned another commitment")
 	}
 	if n.agreed == nil || !n.agreed.Equal(quote.Terms) {
-		n.end(StateRejected, "the finalized quote does not match what was agreed")
-		if err := n.persist(); err != nil {
+		if err := n.settle(StateRejected, "the finalized quote does not match what was agreed"); err != nil {
 			return err
 		}
 		return errors.New("the finalized quote does not match what was agreed")
@@ -112,19 +111,29 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 		}
 	}
 	if _, err := n.Mandate.Permits(quote.Terms, now); err != nil {
-		n.end(StateRejected, "the finalized quote falls outside the mandate")
+		if settleErr := n.settle(StateRejected, "the finalized quote falls outside the mandate"); settleErr != nil {
+			return settleErr
+		}
 		return err
 	}
-	if n.budget != nil {
-		if err := n.budget.Commit(n.ID); err != nil {
-			n.end(StateRejected, "the owner's budget could not cover the commitment")
-			return err
-		}
-	}
+	// The finalized state is written before the budget hold becomes a spend.
+	// A crash between the two leaves a finalized snapshot beside a live hold,
+	// and start-up reconciliation commits it: the reservation is keyed by this
+	// negotiation, so the link survives. The other order turns the hold into
+	// an anonymous spend first, and a crash then leaves money marked spent
+	// with no finalized exchange to account for it -- nothing could tell that
+	// apart from corruption. The commit itself cannot exceed the budget: the
+	// reservation was bounded when it was taken.
 	n.commitment = commitment
 	n.quote = &quote
 	n.state = StateFinalized
-	return n.persist()
+	if err := n.persist(); err != nil {
+		return err
+	}
+	if n.budget != nil {
+		return n.budget.Commit(n.ID)
+	}
+	return nil
 }
 
 // Quote returns the finalized Accepted Quote behind a commitment.

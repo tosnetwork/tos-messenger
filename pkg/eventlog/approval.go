@@ -417,3 +417,40 @@ func (j *Journal) ExpirePendingApprovals(now time.Time) (int, error) {
 	}
 	return expired, nil
 }
+
+// RecordAutoAuthorization records a policy decision the way an owner decision
+// is recorded: durably, and spendable once.
+//
+// It exists for actions the policy allows without a person -- today, a spend
+// inside the owner's mandate. Returning a bare "yes" for those would make the
+// one automatic case weaker than the human one: an approval an owner grants is
+// consumed by the action it authorises, and a policy's grant has to be too, or
+// a runtime could execute the same authorised spend as many times as it asked.
+// The identifier commits the terms, so a second occurrence of the same
+// purchase is a replay by definition and finds its grant already spent.
+func (j *Journal) RecordAutoAuthorization(request ApprovalRequest) (Approval, error) {
+	if err := j.usable(); err != nil {
+		return Approval{}, err
+	}
+	if err := validateApprovalRequest(request); err != nil {
+		return Approval{}, err
+	}
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+
+	existing, found, err := j.readApproval(request.ActionID)
+	if err != nil {
+		return Approval{}, err
+	}
+	if found {
+		// Already recorded -- possibly already spent. Asking again does not
+		// mint a second execution.
+		return existing, nil
+	}
+	approval := Approval{
+		Schema: ApprovalSchema, ActionID: request.ActionID, Effect: request.Effect,
+		Summary: request.Summary, Reason: request.Reason, Origins: request.Origins,
+		State: ApprovalGranted, AskedAtUnix: request.AskedAt, DecidedAtUnix: request.AskedAt,
+	}
+	return j.commitApproval(approval)
+}

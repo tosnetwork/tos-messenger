@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -178,4 +179,120 @@ func (l *BudgetLedger) Record(state negotiation.BudgetState) error {
 
 func (l *BudgetLedger) path() string {
 	return filepath.Join(l.journal.root, budgetDir, l.budgetID[len("bgt_"):]+".json")
+}
+
+// reconcileCommerce repairs the seam between budgets and negotiations after a
+// crash.
+//
+// The two are separate records, so a crash between writing one and the other
+// is possible; what makes it recoverable is that every transition writes them
+// in an order whose intermediate shape names its own repair. A reservation is
+// keyed by the negotiation that took it, so each one is checked against the
+// exchange it belongs to:
+//
+//   - the exchange is settled without finalizing -- the hold goes back;
+//   - the exchange is finalized -- the hold becomes the spend it was about to
+//     become when the crash hit;
+//   - the exchange never reached agreement, or does not exist -- the hold was
+//     written before the agreement it backs, and the agreement never landed,
+//     so it goes back;
+//   - the exchange stands agreed or canonicalising -- the hold is right where
+//     it should be.
+//
+// The reverse orphan -- an agreed exchange with no hold -- cannot arise from
+// these orderings, which is why no repair for it exists: re-reserving here
+// could exceed a ceiling that has moved on, and marking the exchange failed
+// would end an agreement the owner may have approved. The orderings are chosen
+// so that ambiguity never has to be resolved.
+func (j *Journal) reconcileCommerce() error {
+	entries, err := os.ReadDir(filepath.Join(j.root, budgetDir))
+	if err != nil {
+		return errors.New("read budget directory")
+	}
+	store := &NegotiationStore{journal: j}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		if err := j.reconcileBudgetFile(store, filepath.Join(j.root, budgetDir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (j *Journal) reconcileBudgetFile(store *NegotiationStore, path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return errors.New("read budget ledger")
+	}
+	var record BudgetRecord
+	if err := json.Unmarshal(raw, &record); err != nil || record.Schema != BudgetSchema {
+		// A ledger this journal cannot read is not silently rewritten; opening
+		// the budget will refuse it and say so.
+		return nil
+	}
+	changed := false
+	for id, atomic := range record.Reserved {
+		disposition, err := j.holdDisposition(store, id)
+		if err != nil {
+			return err
+		}
+		switch disposition {
+		case holdStands:
+			continue
+		case holdReturns:
+			delete(record.Reserved, id)
+			changed = true
+		case holdBecomesSpend:
+			spent, ok := new(big.Int).SetString(record.Spent, 10)
+			amount, okAmount := new(big.Int).SetString(atomic, 10)
+			if !ok || !okAmount {
+				return errors.New("budget ledger holds a non-numeric amount")
+			}
+			record.Spent = spent.Add(spent, amount).String()
+			delete(record.Reserved, id)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return j.replace(path, encoded)
+}
+
+type disposition int
+
+const (
+	holdStands disposition = iota
+	holdReturns
+	holdBecomesSpend
+)
+
+func (j *Journal) holdDisposition(store *NegotiationStore, negotiationID string) (disposition, error) {
+	path, err := store.path(negotiationID)
+	if err != nil {
+		// A hold keyed by an identifier no negotiation could carry backs
+		// nothing; it goes back.
+		return holdReturns, nil
+	}
+	snapshot, found, err := store.read(path)
+	if err != nil {
+		return holdStands, err
+	}
+	if !found {
+		return holdReturns, nil
+	}
+	switch negotiation.State(snapshot.State) {
+	case negotiation.StateIntentAgreed, negotiation.StateCanonicalizationPending:
+		return holdStands, nil
+	case negotiation.StateFinalized:
+		return holdBecomesSpend, nil
+	default:
+		return holdReturns, nil
+	}
 }

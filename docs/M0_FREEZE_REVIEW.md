@@ -10,9 +10,13 @@ committing to, what is now true, and what is not. The last column of every
 table is the one that matters, because a readiness document that only lists
 what was finished is an advertisement.
 
-**Verdict from this side: not ready.** Five things below cannot be closed by
-writing more code here, and one of them (the reachability study) blocks a
-milestone rather than a review.
+**Verdict from this side: not ready.** Five items are open. Four block the
+freeze directly; the reachability study is separate and blocks M1 scope freeze
+and start rather than this review. And they are not all the same kind of open:
+multi-device, the adversarial corpus, and integrating a chosen suite are work
+this repository can do, while the genesis-hash decision, real reachability
+evidence, second-implementation interoperability, and external cryptographic
+review cannot be closed from inside it.
 
 ## What a freeze would fix
 
@@ -60,11 +64,11 @@ make alone.**
 
 ### 2. The reachability study has never been run — blocks M1, not the freeze
 
-`pkg/reachability` and `pkg/probe` are finished and refuse to produce a
-decision from evidence they do not have. No evidence has been collected, so
-there is no route decision, and the architecture makes that a prerequisite for
-*starting* M1 rather than for accepting it. Nothing about transport should be
-frozen on the strength of tooling that has never been pointed at a network.
+The UDP feasibility collector is finished and corrected; **the ADNL collector
+does not exist**, and only an ADNL study can decide a route — the report tool
+now exits non-zero for anything less. No evidence of either kind has been
+collected. The architecture makes the route decision a prerequisite for
+*starting* M1 rather than for accepting it.
 
 ### 3. No encryption suite
 

@@ -1056,3 +1056,50 @@ func TestSnapshotsAreStrict(t *testing.T) {
 		})
 	}
 }
+
+// Every transition is durable, including the first inbound one. A proposal
+// that survived only in memory would vanish on restart while the counterparty
+// believes it is on the table.
+func TestEveryTransitionIsWrittenDown(t *testing.T) {
+	store := &memoryStore{}
+	instance, err := New("neg-1", conversation, counterparty, testMandate(),
+		testBudget(t, "1000000000"), store, at(0))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if store.saved.State != string(StateDiscussing) {
+		t.Fatalf("the opening state was not written: %+v", store.saved)
+	}
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if store.saved.State != string(StateProposalPending) || store.saved.OnTable == nil {
+		t.Fatalf("a received proposal was not written: %+v", store.saved)
+	}
+	if err := instance.AcceptIntent(at(2)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if store.saved.State != string(StateIntentAgreed) || store.saved.Agreed == nil {
+		t.Fatalf("the agreement was not written: %+v", store.saved)
+	}
+	if err := instance.Withdraw("done"); err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	if store.saved.State != string(StateWithdrawn) {
+		t.Fatalf("the ending was not written: %+v", store.saved)
+	}
+}
+
+// A store that refuses the write refuses the transition: the caller must not
+// end up holding a state the disk has never heard of.
+func TestAFailedWriteIsAFailedTransition(t *testing.T) {
+	store := &failingStore{}
+	if _, err := New("neg-1", conversation, counterparty, testMandate(),
+		testBudget(t, "1000000000"), store, at(0)); err == nil {
+		t.Fatal("a negotiation started with nowhere to live")
+	}
+}
+
+type failingStore struct{}
+
+func (failingStore) Save(Snapshot) error { return errors.New("disk says no") }

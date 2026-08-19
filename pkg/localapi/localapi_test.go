@@ -105,7 +105,9 @@ type harness struct {
 	clock   time.Time
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessWithPolicy(t, firewall.Default()) }
+
+func newHarnessWithPolicy(t *testing.T, policy firewall.Policy) *harness {
 	t.Helper()
 	journal, err := eventlog.Open(filepath.Join(t.TempDir(), "state"))
 	if err != nil {
@@ -123,7 +125,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("dispatcher: %v", err)
 	}
 	server, err := NewServer(Config{
-		Journal: journal, Dispatcher: dispatcher, Policy: firewall.Default(),
+		Journal: journal, Dispatcher: dispatcher, Policy: policy,
 		OwnerKey: testOwnerPublic(),
 		Now:      func() time.Time { return instance.clock },
 	})
@@ -1174,5 +1176,55 @@ func TestAFailedAttemptDoesNotConsumeTheChallenge(t *testing.T) {
 	request.OwnerSignature = genuine
 	if response := h.callAs(t, PrincipalOwner, request); !response.OK {
 		t.Fatalf("a failed attempt consumed the challenge: %+v", response)
+	}
+}
+
+// A spend the policy allows is authorised once. One decision -- the owner's or
+// the policy's -- backs one execution, and the second occurrence of the same
+// purchase finds its grant already spent.
+func TestAllowedSpendIsAuthorisedOnce(t *testing.T) {
+	h := newHarnessWithPolicy(t, firewall.Policy{
+		UnattendedCeiling:    firewall.EffectSpend,
+		OwnInitiativeCeiling: firewall.EffectSpend,
+	})
+	mandateID := h.placeMandate(t)
+	spend := testProposal("spend", testActionOrigin())
+	spend.Terms = testPurchase(200)
+
+	asked := h.call(t, Request{Op: OpRequestAction, Action: spend, MandateID: mandateID})
+	if !asked.OK || asked.Decision != "allow" {
+		t.Fatalf("a spend inside the mandate was not allowed: %+v", asked)
+	}
+	// Allowed is not yet authorised: the grant has to be claimed.
+	if asked.Authorised {
+		t.Fatalf("an allowed spend was authorised without a claim: %+v", asked)
+	}
+	if asked.State != "granted" {
+		t.Fatalf("the policy's grant was not recorded: %+v", asked)
+	}
+
+	first := h.call(t, Request{Op: OpClaimAction, ActionID: asked.ActionID})
+	if !first.Authorised {
+		t.Fatalf("a granted spend could not proceed: %+v", first)
+	}
+	second := h.call(t, Request{Op: OpClaimAction, ActionID: asked.ActionID})
+	if second.Authorised {
+		t.Fatal("one policy decision backed two executions")
+	}
+	// Asking again does not mint a second execution either.
+	again := h.call(t, Request{Op: OpRequestAction, Action: spend, MandateID: mandateID})
+	if again.State != "spent" {
+		t.Fatalf("re-asking reopened a spent grant: %+v", again)
+	}
+	if claimed := h.call(t, Request{Op: OpClaimAction, ActionID: again.ActionID}); claimed.Authorised {
+		t.Fatal("a replayed purchase was executed")
+	}
+
+	// A reply stays inline: the machinery is spent where the damage is.
+	reply := h.call(t, Request{Op: OpRequestAction, Action: &ProposedAction{
+		Effect: "message", Summary: "answer", Derived: []ActionOrigin{testActionOrigin()},
+	}})
+	if !reply.Authorised {
+		t.Fatalf("a reply needed a claim: %+v", reply)
 	}
 }

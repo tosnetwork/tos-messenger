@@ -312,6 +312,13 @@ func openJournalAt(root string, quota Quota) (*Journal, error) {
 		_ = ownership.Close()
 		return nil, err
 	}
+	// The seam between budgets and negotiations is repaired the same way, for
+	// the same reason: a decision a crash interrupted is finished by the
+	// process that owns the records, not left for a person to notice.
+	if err := journal.reconcileCommerce(); err != nil {
+		_ = ownership.Close()
+		return nil, err
+	}
 	return journal, nil
 }
 

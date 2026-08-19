@@ -391,6 +391,27 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 		return refuse(fault.CodeInternal, err)
 	}
 	if decision.Outcome == firewall.Allow {
+		// An allowed spend is authorised once, not indefinitely. The grant is
+		// recorded the way an owner's would be and consumed by ClaimAction, so
+		// one decision -- human or policy -- backs one execution. The action
+		// identifier commits the terms, which is what makes a second identical
+		// purchase a replay rather than a coincidence. Weaker effects are
+		// authorised inline: a reply repeated is a nuisance, a payment
+		// repeated is a loss, and the machinery is spent where the damage is.
+		if action.Effect == firewall.EffectSpend {
+			approval, err := s.config.Journal.RecordAutoAuthorization(eventlog.ApprovalRequest{
+				ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
+				Reason:  "allowed by policy, inside the owner's mandate",
+				Origins: toApprovalOrigins(decision.Provenance),
+				AskedAt: uint64(now.Unix()),
+			})
+			if err != nil {
+				return refuse(fault.CodeInternal, err)
+			}
+			return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
+				Decision: string(decision.Outcome), Detail: decision.Reason,
+				State: string(approval.State)}
+		}
 		return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
 			Decision: string(decision.Outcome), Detail: decision.Reason, Authorised: true}
 	}

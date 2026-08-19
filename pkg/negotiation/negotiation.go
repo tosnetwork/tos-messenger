@@ -177,7 +177,7 @@ func (n *Negotiation) ReceiveProposal(terms Terms, now time.Time) error {
 	proposal := terms
 	n.onTable = &proposal
 	n.state = StateProposalPending
-	return nil
+	return n.persist()
 }
 
 // Counter answers with our own offer.
@@ -190,8 +190,7 @@ func (n *Negotiation) Counter(terms Terms, now time.Time) error {
 		return err
 	}
 	if n.counteroffers >= n.Mandate.MaxCounteroffers {
-		n.end(StateWithdrawn, "counteroffer budget exhausted")
-		if err := n.persist(); err != nil {
+		if err := n.settle(StateWithdrawn, "counteroffer budget exhausted"); err != nil {
 			return err
 		}
 		return errors.New("the mandate's counteroffer budget is exhausted")
@@ -254,17 +253,22 @@ func (n *Negotiation) Reopen(reason string, now time.Time) error {
 	if reason == "" || len(reason) > 512 {
 		return errors.New("reopening must say why")
 	}
-	if n.budget != nil {
-		if err := n.budget.Release(n.ID); err != nil {
-			return err
-		}
-	}
+	// The reopened state is written before the hold is released. A crash
+	// between the two leaves a discussing snapshot beside a hold, and a hold
+	// whose exchange is back in discussion is released at start-up. The other
+	// order would leave an agreed snapshot with no hold behind it.
 	n.agreed = nil
 	n.needsApproval = false
 	n.approval = nil
 	n.generation++
 	n.state = StateDiscussing
-	return n.persist()
+	if err := n.persist(); err != nil {
+		return err
+	}
+	if n.budget != nil {
+		return n.budget.Release(n.ID)
+	}
+	return nil
 }
 
 // Generation is how many times this negotiation has been reopened. It is what
@@ -284,8 +288,7 @@ func (n *Negotiation) RejectIntent(reason string) error {
 	if n.settled() {
 		return errors.New("this negotiation has already ended")
 	}
-	n.end(StateRejected, reason)
-	return n.persist()
+	return n.settle(StateRejected, reason)
 }
 
 // Withdraw ends the exchange from our side.
@@ -293,8 +296,7 @@ func (n *Negotiation) Withdraw(reason string) error {
 	if n.settled() {
 		return errors.New("this negotiation has already ended")
 	}
-	n.end(StateWithdrawn, reason)
-	return n.persist()
+	return n.settle(StateWithdrawn, reason)
 }
 
 // ApproveByOwner records the owner's decision.
@@ -344,8 +346,7 @@ func (n *Negotiation) DenyByOwner(reason string) error {
 	if n.state != StateIntentAgreed {
 		return errors.New("there is no agreed intent to refuse")
 	}
-	n.end(StateRejected, reason)
-	return n.persist()
+	return n.settle(StateRejected, reason)
 }
 
 // BeginCanonicalization moves from conversation towards a commitment.
@@ -408,8 +409,7 @@ func (n *Negotiation) Expire(now time.Time) (bool, error) {
 	if reason == "" {
 		return false, nil
 	}
-	n.end(StateExpired, reason)
-	return true, n.persist()
+	return true, n.settle(StateExpired, reason)
 }
 
 // ActiveAgreement reports whether there is a commercial agreement in force.
@@ -451,9 +451,26 @@ func (n *Negotiation) end(state State, reason string) {
 	n.state = state
 	n.failure = reason
 	n.onTable = nil
-	// Anything held for an exchange that ended goes back, or a withdrawn
-	// negotiation would keep the owner's budget out of reach forever.
-	if n.budget != nil && state != StateFinalized {
-		n.budget.Release(n.ID)
+}
+
+// settle ends a negotiation durably, in the one order a crash cannot make
+// ambiguous: the settled state is written first, and the budget hold is
+// released second. A crash between the two leaves a settled snapshot beside a
+// live hold, which is exactly the shape start-up reconciliation resolves --
+// a hold whose exchange has ended goes back. The other order would leave an
+// agreed snapshot with no hold, which is indistinguishable from money that was
+// never reserved, and nothing could repair it safely.
+func (n *Negotiation) settle(state State, reason string) error {
+	n.end(state, reason)
+	if err := n.persist(); err != nil {
+		return err
 	}
+	// Anything held for an exchange that ended goes back, or a withdrawn
+	// negotiation would keep the owner's budget out of reach forever. The
+	// error is not swallowed: a release the ledger refused is a hold still on
+	// the books, and the caller has to know.
+	if n.budget != nil && state != StateFinalized {
+		return n.budget.Release(n.ID)
+	}
+	return nil
 }

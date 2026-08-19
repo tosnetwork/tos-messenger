@@ -132,3 +132,104 @@ func TestNegotiationIdentifiersCannotNameAPath(t *testing.T) {
 		}
 	}
 }
+
+// Each crash window between the budget ledger and a negotiation snapshot has
+// one deterministic repair, chosen by the order the transitions write in.
+// These tests build the exact intermediate shape a crash leaves and reopen the
+// journal, which is where the repair runs.
+func TestCommerceCrashWindowsReconcile(t *testing.T) {
+	asset := negotiation.Asset{
+		Workchain:      0,
+		AccountID:      strings.Repeat("a", 64),
+		MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
+		WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
+		Decimals:       6,
+	}
+	money := func(atomic string) negotiation.Money {
+		return negotiation.Money{Asset: asset, Atomic: atomic}
+	}
+
+	cases := map[string]struct {
+		state     string // the snapshot the crash left, "" for none
+		remaining string // what the budget should hold afterwards
+		spent     string // what it should record as spent
+		reserved  bool   // whether the hold should survive
+	}{
+		// AcceptIntent crashed after Reserve, before persist: the hold backs
+		// an agreement that never landed, so it goes back.
+		"hold before agreement": {state: string(negotiation.StateDiscussing),
+			remaining: "1000", spent: "0"},
+		// The negotiation was never written at all.
+		"hold with no exchange": {state: "", remaining: "1000", spent: "0"},
+		// settle crashed after persisting the ending, before Release.
+		"hold after withdrawal": {state: string(negotiation.StateWithdrawn),
+			remaining: "1000", spent: "0"},
+		// Finalize crashed after persisting, before Commit: the hold becomes
+		// the spend it was about to become.
+		"hold after finalization": {state: string(negotiation.StateFinalized),
+			remaining: "600", spent: "400"},
+		// The exchange stands agreed: the hold is right where it should be.
+		"hold behind an agreement": {state: string(negotiation.StateIntentAgreed),
+			remaining: "600", spent: "0", reserved: true},
+	}
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir() + "/state"
+			journal, err := Open(root)
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			ledger, err := journal.OpenBudgetLedger(asset)
+			if err != nil {
+				t.Fatalf("ledger: %v", err)
+			}
+			budget, err := negotiation.OpenBudget(money("1000"), ledger)
+			if err != nil {
+				t.Fatalf("budget: %v", err)
+			}
+			if err := budget.Reserve("neg-1", money("400")); err != nil {
+				t.Fatalf("reserve: %v", err)
+			}
+			if testCase.state != "" {
+				store, err := journal.OpenNegotiations()
+				if err != nil {
+					t.Fatalf("negotiations: %v", err)
+				}
+				if err := store.Save(testSnapshot("neg-1", testCase.state)); err != nil {
+					t.Fatalf("save: %v", err)
+				}
+			}
+			// The crash.
+			if err := journal.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+
+			reopened, err := Open(root)
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			defer reopened.Close()
+			restoredLedger, err := reopened.OpenBudgetLedger(asset)
+			if err != nil {
+				t.Fatalf("ledger: %v", err)
+			}
+			restored, err := negotiation.OpenBudget(money("1000"), restoredLedger)
+			if err != nil {
+				t.Fatalf("budget: %v", err)
+			}
+			remaining, err := restored.Remaining()
+			if err != nil {
+				t.Fatalf("remaining: %v", err)
+			}
+			if remaining.Atomic != testCase.remaining {
+				t.Fatalf("expected %s remaining, got %s", testCase.remaining, remaining.Atomic)
+			}
+			if spent := restored.Spent(); spent.Atomic != testCase.spent {
+				t.Fatalf("expected %s spent, got %s", testCase.spent, spent.Atomic)
+			}
+			if _, held := restored.Reserved("neg-1"); held != testCase.reserved {
+				t.Fatalf("expected reserved=%v, got %v", testCase.reserved, held)
+			}
+		})
+	}
+}
