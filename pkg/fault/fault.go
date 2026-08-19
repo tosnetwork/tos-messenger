@@ -53,6 +53,11 @@ const (
 	// CodeSignatureInvalid reports a signature that is not from the key the
 	// delegation authorizes.
 	CodeSignatureInvalid Code = "signature-invalid"
+	// CodeSenderMismatch reports an event whose declared sender is not the
+	// party the delegation covers. It is impersonation inside an otherwise
+	// authenticated channel, which is a different failure from a bad
+	// signature.
+	CodeSenderMismatch Code = "sender-mismatch"
 )
 
 // Discovery.
@@ -103,6 +108,9 @@ const (
 	CodeUnknownEventKind Code = "unknown-event-kind"
 	// CodeContentTooLarge reports content beyond the accepted bound.
 	CodeContentTooLarge Code = "content-too-large"
+	// CodeEventOutsideWindow reports an event past its own expiry or dated far
+	// enough ahead that no honest clock explains it.
+	CodeEventOutsideWindow Code = "event-outside-window"
 	// CodeApprovalRequired reports an event held for an owner decision.
 	CodeApprovalRequired Code = "approval-required"
 )
@@ -146,6 +154,7 @@ var registry = map[Code]spec{
 	CodeDelegationExpired:     {Refresh, true, false},
 	CodeAgentTombstoned:       {Permanent, true, false},
 	CodeSignatureInvalid:      {Permanent, true, false},
+	CodeSenderMismatch:        {Permanent, true, false},
 
 	CodeDescriptorExpired: {Refresh, true, false},
 	CodeDescriptorUnbound: {Permanent, true, false},
@@ -164,10 +173,11 @@ var registry = map[Code]spec{
 	CodeSessionExpired:   {Refresh, true, false},
 	CodeSuiteUnsupported: {Permanent, true, false},
 
-	CodeClassNotDelegated: {Permanent, true, false},
-	CodeAdmissionRequired: {Refresh, true, true},
-	CodeUnknownEventKind:  {Permanent, true, false},
-	CodeContentTooLarge:   {Permanent, true, false},
+	CodeClassNotDelegated:  {Permanent, true, false},
+	CodeAdmissionRequired:  {Refresh, true, true},
+	CodeUnknownEventKind:   {Permanent, true, false},
+	CodeContentTooLarge:    {Permanent, true, false},
+	CodeEventOutsideWindow: {Permanent, true, false},
 	// Telling a sender that a person is deciding confirms the event arrived
 	// and was read by policy, so the owner's queue stays invisible.
 	CodeApprovalRequired: {Approval, false, false},

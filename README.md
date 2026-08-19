@@ -29,6 +29,7 @@ decision:
 | `pkg/envelope` | Outer Relay Envelope and inner typed Messaging Event, including content-addressed Event IDs |
 | `pkg/eventlog` | Single-writer durable journal: inbound claims, outbound delivery state, retry schedule, and pruning |
 | `pkg/fault` | Typed failures, retry dispositions, and what a peer may be told |
+| `pkg/admission` | The lower half of the context firewall: authority, scope, window, inbox policy, and the durable claim |
 | `pkg/e2ee` | The contract a candidate encryption suite must satisfy, message bindings, and published prekey bundles |
 | `pkg/e2ee/conformance` | Refutes a candidate suite: ten properties a black-box run can disprove |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
@@ -81,6 +82,9 @@ Deliberately absent, with the reason:
   does not approve a construction.
 - An error code returned to a stranger is an oracle, so peer visibility is a
   property of the code and everything hidden collapses into one refusal.
+- A valid signature proves origin, not safety. Admission establishes who sent
+  an event and whether it may enter; what the content means is the runtime's
+  problem and is deliberately not decided here.
 - Every domain separator is registered in one list, because a reused separator
   is signature confusion rather than a merge conflict.
 

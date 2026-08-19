@@ -238,6 +238,7 @@ func TestSenderCorrectableCodesAreVisible(t *testing.T) {
 		CodeNetworkMismatch, CodeDelegationUncommitted, CodeDelegationExpired,
 		CodeSignatureInvalid, CodeClassNotDelegated, CodeAdmissionRequired,
 		CodeUnknownEventKind, CodeContentTooLarge, CodeOversized, CodeSuiteUnsupported,
+		CodeSenderMismatch, CodeEventOutsideWindow,
 	} {
 		if !PeerVisible(code) {
 			t.Fatalf("%q is something the sender must be able to fix", code)
