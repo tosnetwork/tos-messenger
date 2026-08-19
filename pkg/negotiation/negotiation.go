@@ -167,11 +167,26 @@ func (n *Negotiation) Failure() string { return n.failure }
 // The offer is recorded whether or not it is inside the mandate. A proposal
 // above the ceiling is a thing that was said, and refusing to record it would
 // leave an Agent unable to counter it.
+// bindsCounterparty refuses terms whose named provider is not the party this
+// negotiation is with. A one-to-one service negotiation names one provider, and
+// terms that quietly name another are a different purchase wearing this
+// conversation's identity. Once the entry points enforce it, the finalised
+// quote inherits it through the terms-equality check.
+func (n *Negotiation) bindsCounterparty(terms Terms) error {
+	if terms.ProviderAgentID != n.CounterpartyAgentID {
+		return errors.New("these terms name a provider that is not the counterparty")
+	}
+	return nil
+}
+
 func (n *Negotiation) ReceiveProposal(terms Terms, now time.Time) error {
 	if err := n.open(now); err != nil {
 		return err
 	}
 	if err := terms.Validate(); err != nil {
+		return err
+	}
+	if err := n.bindsCounterparty(terms); err != nil {
 		return err
 	}
 	proposal := terms
@@ -196,6 +211,9 @@ func (n *Negotiation) Counter(terms Terms, now time.Time) error {
 		return errors.New("the mandate's counteroffer budget is exhausted")
 	}
 	if _, err := n.Mandate.Permits(terms, now); err != nil {
+		return err
+	}
+	if err := n.bindsCounterparty(terms); err != nil {
 		return err
 	}
 	offer := terms

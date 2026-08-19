@@ -441,6 +441,24 @@ func TestFinalizePropagatesAResolverError(t *testing.T) {
 	}
 }
 
+// A one-to-one negotiation refuses terms that name a provider other than the
+// counterparty it is with, at both the offer and the counter-offer.
+func TestTermsMustNameTheCounterparty(t *testing.T) {
+	instance := start(t, testBudget(t, "1000000000"))
+	foreign := withProvider(terms("50000000"), "agent_"+strings.Repeat("8", 64))
+	if err := instance.ReceiveProposal(foreign, at(1)); err == nil {
+		t.Fatal("an offer naming another provider was accepted")
+	}
+	// A genuine offer from the counterparty is fine, and a counter that swaps
+	// the provider is refused.
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+		t.Fatalf("a proper offer was refused: %v", err)
+	}
+	if err := instance.Counter(foreign, at(2)); err == nil {
+		t.Fatal("a counter naming another provider was accepted")
+	}
+}
+
 func proposalMandate() Mandate {
 	m := testMandate()
 	m.Authority = AuthorityPropose
