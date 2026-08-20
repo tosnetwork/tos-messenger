@@ -88,6 +88,30 @@ func validBundleJSON(t *testing.T) []byte {
 	return encoded
 }
 
+func validBundleSetJSON(t *testing.T) []byte {
+	t.Helper()
+	del := delegation(t)
+	first, err := e2ee.SignBundle(e2ee.Bundle{
+		Network: del.Network, AgentID: del.AgentID, EndpointID: del.EndpointID,
+		DeviceID: deviceOne, AlgorithmID: algorithm, Material: []byte("published prekey material"),
+		IssuedAtUnix: baseUnix, ExpiresAtUnix: baseUnix + 3600,
+	}, endpointKey())
+	if err != nil {
+		t.Fatalf("first bundle: %v", err)
+	}
+	second := first
+	second.DeviceID = deviceTwo
+	second, err = e2ee.SignBundle(second, endpointKey())
+	if err != nil {
+		t.Fatalf("second bundle: %v", err)
+	}
+	raw, err := e2ee.EncodeBundleSetJSON([]e2ee.Bundle{first, second})
+	if err != nil {
+		t.Fatalf("bundle set: %v", err)
+	}
+	return raw
+}
+
 func validMLSCredential(t *testing.T) group.DeviceCredential {
 	t.Helper()
 	del := delegation(t)

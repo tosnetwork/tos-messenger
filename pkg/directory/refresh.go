@@ -17,7 +17,7 @@ type RefreshSource interface {
 	Delegation(context.Context, string) ([]byte, error)
 	Locator(context.Context, DHTKey) ([]byte, error)
 	Descriptor(context.Context, string) ([]byte, error)
-	Prekeys(context.Context, Descriptor) ([]e2ee.Bundle, error)
+	Prekeys(context.Context, Descriptor, Locator) ([]e2ee.Bundle, error)
 }
 
 // PublishedSetAdmitter is the durable rollback and revocation boundary. The
@@ -129,7 +129,7 @@ func (r Refresher) Refresh(ctx context.Context, agentID string) (RefreshResult, 
 	if err != nil {
 		return RefreshResult{}, &RefreshError{Stage: StageDescriptor, Err: err}
 	}
-	bundles, err := r.Source.Prekeys(ctx, descriptor)
+	bundles, err := r.Source.Prekeys(ctx, descriptor, locator)
 	if err != nil {
 		return RefreshResult{}, &RefreshError{Stage: StagePrekeys, Err: err}
 	}

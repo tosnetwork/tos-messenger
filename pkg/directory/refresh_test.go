@@ -41,7 +41,7 @@ func (s *refreshSource) Descriptor(context.Context, string) ([]byte, error) {
 	}
 	return s.descriptor, nil
 }
-func (s *refreshSource) Prekeys(context.Context, Descriptor) ([]e2ee.Bundle, error) {
+func (s *refreshSource) Prekeys(context.Context, Descriptor, Locator) ([]e2ee.Bundle, error) {
 	s.calls = append(s.calls, StagePrekeys)
 	if s.fail == StagePrekeys {
 		return nil, errors.New("prekeys unavailable")

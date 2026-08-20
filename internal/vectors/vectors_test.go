@@ -285,7 +285,15 @@ func build(t *testing.T) []Vector {
 	if err != nil {
 		t.Fatalf("set digest: %v", err)
 	}
-	vectors = append(vectors, Vector{Name: "prekey-bundle-set", Digest: setDigest})
+	setWire, err := e2ee.EncodeBundleSetJSON([]e2ee.Bundle{bundle, second})
+	if err != nil {
+		t.Fatalf("set wire: %v", err)
+	}
+	setCanonical, err := e2ee.SetCanonicalBytes([]e2ee.Bundle{bundle, second})
+	if err != nil {
+		t.Fatalf("set canonical: %v", err)
+	}
+	add("prekey-bundle-set", setWire, setCanonical, setDigest)
 
 	// Encrypted attachment secret reference. The chunks themselves are
 	// deterministic under this vector's fixed random material; the manifest

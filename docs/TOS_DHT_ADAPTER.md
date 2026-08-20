@@ -36,10 +36,12 @@ republished inside freshly signed native DHT envelopes before their shorter
 cache TTLs expire. This separates protocol validity from network cache
 retention and stays inside the native DHT's 3660-second upper bound.
 
-## Deliberate remainder
+## Composition and deliberate remainder
 
-The adapter supplies the DHT locator operation of `RefreshSource`. The bounded
-HTTPS descriptor/prekey object source, out-of-band delegation bootstrap,
-daemon peer configuration, and live multi-node deployment evidence remain
-separate work. No URL convention is invented here without a versioned object
-publication profile.
+The adapter supplies the DHT locator operation of `RefreshSource`.
+`HTTPSObjects` now supplies the bounded descriptor and digest-bound prekey-set
+operations under the versioned publication profile documented in
+[`HTTPS_OBJECT_SOURCE.md`](HTTPS_OBJECT_SOURCE.md), and
+`NetworkRefreshSource` composes both with an injected finalized delegation
+source. Out-of-band delegation bootstrap, daemon peer configuration, and live
+multi-node deployment evidence remain separate work.

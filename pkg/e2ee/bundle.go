@@ -100,14 +100,26 @@ func BundleDigest(bundle Bundle) (string, error) {
 // changes the descriptor rather than happening silently underneath it. The
 // order devices are listed in does not change the result.
 func SetDigest(bundles []Bundle) (string, error) {
-	if err := ValidateSet(bundles); err != nil {
+	preimage, err := SetCanonicalBytes(bundles)
+	if err != nil {
 		return "", err
+	}
+	return canon.Digest(preimage), nil
+}
+
+// SetCanonicalBytes returns the exact preimage committed by a descriptor's
+// prekey bundle digest. It is exported so another implementation can consume
+// the same positive vector without treating the JSON publication wrapper as
+// the committed representation.
+func SetCanonicalBytes(bundles []Bundle) ([]byte, error) {
+	if err := ValidateSet(bundles); err != nil {
+		return nil, err
 	}
 	digests := make([]string, 0, len(bundles))
 	for _, bundle := range bundles {
 		digest, err := BundleDigest(bundle)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		digests = append(digests, digest)
 	}
@@ -117,7 +129,7 @@ func SetDigest(bundles []Bundle) (string, error) {
 	for _, digest := range digests {
 		canon.Text(buffer, digest)
 	}
-	return canon.Digest(buffer.Bytes()), nil
+	return buffer.Bytes(), nil
 }
 
 // ValidateSet enforces that a published set is one endpoint's devices and
