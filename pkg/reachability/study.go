@@ -186,6 +186,31 @@ func set[T ~string](values ...T) map[T]struct{} {
 // home node against a datacenter Agent, a phone against a machine behind
 // carrier-grade NAT -- impossible to express, because those pairs differ on
 // every field by definition.
+//
+// Local knowledge is not the same as trustworthy, and the strata a route
+// decision reads are the ones an operator has a reason to get wrong. Two of
+// them are now cross-checked against the coordinator-signed evidence rather
+// than taken on faith:
+//
+//   - Family is checked in VerifyTrial against the family of the signed
+//     Observed address: a trial whose declared family contradicts what the
+//     coordinator was reached over is rejected and not counted.
+//   - Reachability is checked at pairing (see combine): each half's signed
+//     PeerPublic observation about its peer must agree with the other half's
+//     declared reachability, so a side cannot self-declare "public" while the
+//     coordinator saw its peer treat it as behind NAT.
+//
+// NATBehavior remains endpoint-attested and is NOT yet evidence-derived. The
+// single pair-observation each trial carries cannot distinguish
+// mapping-behavior (endpoint-independent vs address/port-dependent) from
+// filtering-behavior: that needs the per-coordinator BIND observations -- the
+// same endpoint reflected off several coordinator addresses/ports -- signed
+// into the trial, which is a collector-and-schema change coupled to the
+// NAT-taxonomy collector rework and deliberately out of scope here.
+//
+// Carrier, EndpointClass, Mobility, and Assistance are legitimately
+// operator-self-reported: they are facts about the operator's own deployment
+// that no coordinator can independently witness, so they stay attested.
 type EndpointStratum struct {
 	Family        AddressFamily `json:"address_family"`
 	Reachability  Reachability  `json:"public_reachability"`

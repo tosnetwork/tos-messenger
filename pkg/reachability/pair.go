@@ -73,6 +73,17 @@ func combine(halves []Trial) (pairResult, error) {
 	if a.LocalCommit != b.PeerCommit || a.PeerCommit != b.LocalCommit {
 		return pairResult{}, errors.New("the halves disagree about which commits were measured")
 	}
+	// The coordinator signs, about each endpoint, whether that endpoint's peer
+	// was publicly addressable -- the one reachability fact an endpoint cannot
+	// observe about itself. Each half's signed peer observation is cross-checked
+	// against the other half's self-declared reachability, so a side that
+	// declares public while the coordinator saw its peer treat it as non-public
+	// (or the reverse) is a pair the signed evidence contradicts. This makes the
+	// reachability stratum evidence-checked rather than self-attested.
+	if !peerReachabilityConsistent(a.Observation.PeerPublic, b.Local.Reachability) ||
+		!peerReachabilityConsistent(b.Observation.PeerPublic, a.Local.Reachability) {
+		return pairResult{}, errors.New("a coordinator's signed peer observation contradicts the other half's declared reachability")
+	}
 	digestA, err := a.Digest()
 	if err != nil {
 		return pairResult{}, err
@@ -105,6 +116,21 @@ func combine(halves []Trial) (pairResult, error) {
 		result.survivalMeasured = true
 	}
 	return result, nil
+}
+
+// peerReachabilityConsistent reports whether a coordinator's signed peer bit
+// agrees with the reachability the other half declared about itself. The
+// coordinator observes "yes" for a publicly addressable peer and "no" for one
+// behind NAT; anything else is treated as a contradiction.
+func peerReachabilityConsistent(peerPublic string, declared Reachability) bool {
+	switch declared {
+	case PublicAddress:
+		return peerPublic == "yes"
+	case BehindNAT:
+		return peerPublic == "no"
+	default:
+		return false
+	}
 }
 
 func canonPairDigest(a, b string) string {

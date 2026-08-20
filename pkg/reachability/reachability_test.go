@@ -117,9 +117,20 @@ func endpointKeyFor(operator string, role Role) ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(seed[:])
 }
 
+// observedFor is an address in the family the coordinator would have reached
+// the endpoint over, so the signed observation matches the declared family. A
+// dual-stack endpoint is reached over one family at a time, so v4 stands in.
+func observedFor(family AddressFamily) string {
+	if family == FamilyIPv6 {
+		return "[2001:db8::7]:41234"
+	}
+	return "203.0.113.7:41234"
+}
+
 // attest names the endpoint it is about, so a copied attestation cannot be
-// worn by another key.
-func attest(session string, role Role, operator, peerPublic string) Observation {
+// worn by another key. The observed address is in the endpoint's declared
+// family, and peerPublic is the coordinator's view of the endpoint's peer.
+func attest(session string, role Role, operator, peerPublic string, family AddressFamily) Observation {
 	public, ok := endpointKeyFor(operator, role).Public().(ed25519.PublicKey)
 	if !ok {
 		panic("unexpected key type")
@@ -129,7 +140,7 @@ func attest(session string, role Role, operator, peerPublic string) Observation 
 		Role:                 string(role),
 		EndpointPublicKeyHex: hex.EncodeToString(public),
 		Probe:                string(ProbeUDP),
-		Observed:             "203.0.113.7:41234",
+		Observed:             observedFor(family),
 		PeerPublic:           peerPublic,
 		AtUnix:               1_800_000_000,
 	}, testCoordinatorKey())
@@ -144,7 +155,7 @@ func attest(session string, role Role, operator, peerPublic string) Observation 
 // attestation about a different measurement, which is what the binding is for.
 func switchProbe(trial Trial, probe ProbeKind) Trial {
 	trial.Probe = probe
-	trial.Observation = attest(trial.SessionID, trial.Role, trial.OperatorID, trial.Observation.PeerPublic)
+	trial.Observation = attest(trial.SessionID, trial.Role, trial.OperatorID, trial.Observation.PeerPublic, trial.Local.Family)
 	trial.Observation.Probe = string(probe)
 	signed, err := SignObservation(trial.Observation, testCoordinatorKey())
 	if err != nil {
@@ -200,12 +211,15 @@ func rawTrial(s Scenario, session string, role Role, operator string,
 	}
 }
 
-func complete(trial Trial) Trial {
+// complete attests and signs a half. The coordinator's peer observation is
+// about the endpoint's peer, so it is derived from the peer stratum rather than
+// from the endpoint's own reachability.
+func complete(trial Trial, peer EndpointStratum) Trial {
 	peerPublic := "no"
-	if trial.Local.Reachability == PublicAddress {
+	if peer.Reachability == PublicAddress {
 		peerPublic = "yes"
 	}
-	trial.Observation = attest(trial.SessionID, trial.Role, trial.OperatorID, peerPublic)
+	trial.Observation = attest(trial.SessionID, trial.Role, trial.OperatorID, peerPublic, trial.Local.Family)
 	signed, err := SignTrial(trial, endpointKeyFor(trial.OperatorID, trial.Role))
 	if err != nil {
 		panic(err)
@@ -215,12 +229,13 @@ func complete(trial Trial) Trial {
 
 // measurement builds both halves of one attempt. Aggregation counts pairs, so
 // a helper that produced a single record would be manufacturing exactly the
-// evidence the report is right to discard.
+// evidence the report is right to discard. Each half's peer observation is the
+// other end's stratum, which is what the pairing cross-check verifies.
 func measurement(s Scenario, operator string, outcome Outcome, failure FailureClass, millis uint64) []Trial {
 	session := nextSession()
 	return []Trial{
-		complete(rawTrial(s, session, RoleA, operator, outcome, failure, millis)),
-		complete(rawTrial(s, session, RoleB, operator, outcome, failure, millis)),
+		complete(rawTrial(s, session, RoleA, operator, outcome, failure, millis), s.Responder),
+		complete(rawTrial(s, session, RoleB, operator, outcome, failure, millis), s.Initiator),
 	}
 }
 
@@ -893,7 +908,7 @@ func TestOneKeyUnderSeveralOperatorsIsExcluded(t *testing.T) {
 		session := nextSession()
 		for _, role := range []Role{RoleA, RoleB} {
 			trial := rawTrial(target, session, role, operator, OutcomeDirect, FailureNone, 20)
-			trial.Observation = attest(session, role, "one-host", "no")
+			trial.Observation = attest(session, role, "one-host", "no", trial.Local.Family)
 			// Every "operator" signs with the same key.
 			signed, err := SignTrial(trial, endpointKeyFor("one-host", RoleA))
 			if err != nil {
@@ -985,7 +1000,7 @@ func TestContradictingHalvesAreDiscarded(t *testing.T) {
 		},
 		"both in one role": func(pair []Trial) []Trial {
 			pair[1].Role = RoleA
-			pair[1].Observation = attest(pair[1].SessionID, RoleA, pair[1].OperatorID, "no")
+			pair[1].Observation = attest(pair[1].SessionID, RoleA, pair[1].OperatorID, "no", pair[1].Local.Family)
 			pair[1] = resign(pair[1])
 			return pair
 		},
@@ -1196,5 +1211,126 @@ func TestSurvivalNeedsBothHalves(t *testing.T) {
 		if cell.SurvivalP50 != 300 {
 			t.Fatalf("survival did not take the shorter half: %+v", cell)
 		}
+	}
+}
+
+// resignObservation re-signs a coordinator observation a test mutated, so the
+// tampered field is what the coordinator attests to rather than a broken
+// signature the verifier would reject for a different reason.
+func resignObservation(observation Observation) Observation {
+	signed, err := SignObservation(observation, testCoordinatorKey())
+	if err != nil {
+		panic(err)
+	}
+	return signed
+}
+
+// The address family a trial counts toward is signed by the coordinator in its
+// observed address, not by the endpoint. A trial that declares one family while
+// the coordinator observed another is the endpoint attesting to a stratum the
+// evidence never saw, and it must not be counted.
+func TestDeclaredFamilyMustMatchSignedObservation(t *testing.T) {
+	policy := testPolicy()
+	pair := directPair(scenario(CarrierConsumerISP, ClassDesktop), opA, 100)
+
+	// The honest IPv4 half verifies against its IPv4 observation.
+	if err := VerifyTrial(policy, pair[0]); err != nil {
+		t.Fatalf("an honest trial was rejected: %v", err)
+	}
+
+	// The endpoint keeps its IPv4 declaration but the coordinator signed an
+	// IPv6 observation: the two disagree about which cell this is.
+	tampered := pair[0]
+	tampered.Observation.Observed = "[2001:db8::7]:41234"
+	tampered.Observation = resignObservation(tampered.Observation)
+	tampered = resign(tampered)
+	if err := VerifyTrial(policy, tampered); err == nil {
+		t.Fatal("a family that contradicts the signed observed address was accepted")
+	}
+
+	// And it is dropped in aggregation rather than counted.
+	var trials []Trial
+	for _, required := range policy.RequiredScenarios {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+	trials[0].Observation.Observed = "[2001:db8::7]:41234"
+	trials[0].Observation = resignObservation(trials[0].Observation)
+	trials[0] = resign(trials[0])
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.UnverifiedTrials != 1 {
+		t.Fatalf("a contradicting family was counted: %+v", report)
+	}
+}
+
+// The coordinator's signed peer bit is cross-checked against the other half's
+// self-declared reachability. A half that declares public while its peer's
+// coordinator saw it treat that peer as non-public is a pair the signed
+// evidence contradicts, and it is dropped as inconsistent rather than counted.
+func TestPeerObservationMustMatchDeclaredReachability(t *testing.T) {
+	policy := testPolicy()
+	// Initiator behind NAT, Responder publicly addressable.
+	target := policy.RequiredScenarios[0]
+
+	var trials []Trial
+	for index := 0; index < 4; index++ {
+		pair := directPair(target, []string{opA, opB, opC}[index%3], uint64(100+index))
+		if index == 0 {
+			// RoleA's coordinator honestly saw a public peer (the Responder);
+			// flip it to "no" so the signed observation contradicts the
+			// Responder's own declaration of being public.
+			pair[0].Observation.PeerPublic = "no"
+			pair[0].Observation = resignObservation(pair[0].Observation)
+			pair[0] = resign(pair[0])
+		}
+		trials = append(trials, pair...)
+	}
+	for _, required := range policy.RequiredScenarios[1:] {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.UnverifiedTrials != 0 {
+		t.Fatalf("both halves should verify individually: %+v", report)
+	}
+	if report.IncompletePairs != 1 {
+		t.Fatalf("a contradicting peer observation was not dropped: %+v", report)
+	}
+	for _, cell := range report.Cells {
+		if cell.ScenarioKey == target.Key() && cell.Samples != 3 {
+			t.Fatalf("an inconsistent pair was counted: %+v", cell)
+		}
+	}
+}
+
+// An honest study whose declarations agree with the coordinator-signed evidence
+// still aggregates to a decision. The cross-checks reject contradictions, not
+// consistent measurements.
+func TestConsistentEvidenceStillDecides(t *testing.T) {
+	policy := testPolicy()
+	var trials []Trial
+	for _, required := range policy.RequiredScenarios {
+		trials = fillCell(trials, required, 4, OutcomeDirect, FailureNone, 0)
+	}
+	for index := range trials {
+		trials[index] = switchProbe(trials[index], ProbeADNL)
+	}
+	report, err := Aggregate(policy, trials, ProbeADNL)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.UnverifiedTrials != 0 || report.IncompletePairs != 0 {
+		t.Fatalf("consistent evidence was dropped: %+v", report)
+	}
+	if report.Finding != FindingDirectFirst {
+		t.Fatalf("an honest direct study did not decide direct-first: %q", report.Finding)
+	}
+	if !report.SupportsRouteDecision() {
+		t.Fatal("a consistent ADNL study did not support a route decision")
 	}
 }

@@ -239,7 +239,51 @@ func VerifyTrial(policy Policy, trial Trial) error {
 	if trial.Observation.Probe != string(trial.Probe) {
 		return errors.New("observation attests to another probe")
 	}
+	// The address family decides which cell a trial counts toward, and the
+	// endpoint signs that declaration itself. The coordinator-signed observed
+	// address is the family it was actually reached over, so a declaration that
+	// contradicts it is the endpoint attesting to a stratum the evidence did not
+	// see: a v4-only host claiming a v6 cell, or the reverse.
+	observed, err := observedFamily(trial.Observation.Observed)
+	if err != nil {
+		return err
+	}
+	if !familyConsistent(trial.Local.Family, observed) {
+		return errors.New("declared address family contradicts the coordinator-signed observed address")
+	}
 	return nil
+}
+
+// observedFamily reports the address family a coordinator's signed observation
+// was reached over. An endpoint cannot forge this without forging the
+// coordinator's signature, which is why the family a trial counts toward is
+// derived from here rather than taken from the endpoint's own declaration.
+func observedFamily(observed string) (AddressFamily, error) {
+	addrPort, err := netip.ParseAddrPort(observed)
+	if err != nil {
+		return "", errors.New("invalid observed address")
+	}
+	if addrPort.Addr().Unmap().Is4() {
+		return FamilyIPv4, nil
+	}
+	return FamilyIPv6, nil
+}
+
+// familyConsistent reports whether a declared family can hold an observation of
+// the given family. A dual-stack endpoint legitimately answers over either
+// family, so only a single-family declaration that contradicts what the
+// coordinator observed is a claim the signed evidence refutes.
+func familyConsistent(declared, observed AddressFamily) bool {
+	switch declared {
+	case FamilyIPv4:
+		return observed == FamilyIPv4
+	case FamilyIPv6:
+		return observed == FamilyIPv6
+	case FamilyDual:
+		return true
+	default:
+		return false
+	}
 }
 
 // AcceptsCoordinator reports whether a policy predeclared a coordinator.
