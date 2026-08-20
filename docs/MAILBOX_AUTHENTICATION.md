@@ -1,8 +1,10 @@
 # Route-neutral Mailbox authentication
 
 This profile authenticates technical Mailbox operations without choosing a
-network listener or transport. It is not a Relay Lease, quota-token, Inbox
-Bond, or payment profile.
+public network transport. `pkg/mailboxapi` now supplies its strict bounded
+service protocol, a private Unix carrier and client, while `tos-mailboxd`
+assembles the finalized authority and durable store. It is not a Relay Lease,
+quota-token, Inbox Bond, or payment profile.
 
 ## Authority chain
 
@@ -53,9 +55,33 @@ the nonce durably. Concurrent or post-restart reuse is refused. A failure after
 the claim does not reopen it; the caller signs a fresh nonce and relies on the
 underlying idempotent store operation.
 
+## Runnable service boundary
+
+`tos.messaging.mailbox-service-request.v1` carries exactly one canonical
+grant, access request, and deposit/read/delete body. Requests are limited to 2
+MiB. Reads return at most eight envelopes and the complete response is limited
+to 16 MiB, preventing a small authenticated request from producing an
+unbounded response. Unknown fields, trailing JSON, malformed nested objects,
+damaged StoredAcks, operation/body mismatches and oversized frames fail
+closed.
+
+`mailbox.FinalizedAuthority` rereads the provisioned delegation and verifies
+its digest against finalized Agent state for every operation. It also checks
+the exact network and Endpoint and refuses a capability grant that outlives
+the delegation. `mailboxapi.DepositClient` signs a fresh request nonce for
+each transport attempt while preserving the exact Relay envelope, allowing
+`mailbox.StoreRedundant` to use independent service processes without
+spending a new message identity.
+
+Tests cover deposit/read/delete, signed acknowledgement validation, durable
+restart, nonce replay refusal after restart, 2-of-2 service fan-out, one-Relay
+failure with an explicit 1-of-2 threshold, and refusal when 2-of-2 is no
+longer met.
+
 ## Deliberate remainder
 
 The post-M0-R network adapter must bind these strict objects to the selected
-transport, impose request/response amplification bounds, and supply the
-finalized Endpoint verifier. Sender-private deposit tokens, live independent
-Relay failover, push wake-ups, and commercial accounting remain separate work.
+public transport. The private Unix carrier, local two-listener tests and
+finalized authority adapter do not constitute independently operated Relay
+evidence. Sender-private deposit tokens, live independent Relay failover, push
+wake-ups, and commercial accounting remain separate work.

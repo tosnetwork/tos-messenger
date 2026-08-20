@@ -56,3 +56,11 @@ func finalizedResolver(config Config) (*chainagent.Resolver, identity.ChainPolic
 	}
 	return resolver, policy, nil
 }
+
+// FinalizedAgentResolver exposes the same strict-majority finalized Agent
+// authority used by daemon startup to separately deployed services such as a
+// Mailbox Relay. The returned resolver and policy still require callers to
+// verify each exact delegation document with identity.Verify.
+func FinalizedAgentResolver(config Config) (identity.AgentResolver, identity.ChainPolicy, error) {
+	return finalizedResolver(config)
+}
