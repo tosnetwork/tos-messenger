@@ -47,7 +47,13 @@ type AddressFamily string
 // asking both to agree on it is asking them to agree about the other's network.
 type Reachability string
 
-// NATBehavior is the observed mapping and filtering behavior.
+// NATBehavior is the observed mapping behavior: which external address a
+// socket appears at toward different destinations. It deliberately says
+// nothing about filtering -- which remote sources may reach that address
+// inbound -- because the two are independent axes and the bind reflections
+// that classify the mapping collect no filtering evidence. Filtering has its
+// own evidence (FilteringObservation) and its own vocabulary
+// (FilteringBehavior), derived rather than declared.
 type NATBehavior string
 
 // Carrier is the access-network class.
@@ -207,11 +213,19 @@ func set[T ~string](values ...T) map[T]struct{} {
 //
 // The mapping check is a refutation, not a full derivation. With fewer than two
 // distinct coordinator reflections the class is undetermined and the
-// declaration stands unchecked, and the no-NAT (none) case is not decided
-// remotely at all, because confirming it needs the host's own interface
-// addresses. FILTERING behaviour -- whether unsolicited inbound datagrams are
-// admitted -- is a separate dimension a different probe measures, and remains
-// out of scope: it is the remaining NAT-taxonomy work.
+// declaration stands unchecked. The no-NAT (none) case is never credited
+// remotely at all: bind reflections cannot distinguish a truly public endpoint
+// from one behind an endpoint-independent NAT, so a "none" declaration is
+// accepted where "endpoint-independent" would be and refuted where it would be,
+// and every consumer of the derived class must keep the two in that one
+// evidentiary bucket rather than treating "none" as verified.
+//
+// FILTERING behaviour -- whether unsolicited inbound datagrams are admitted --
+// is a separate axis with its own coordinator-signed evidence: the
+// FilteringObservations a trial carries, each a proof that a datagram from a
+// cold source was demonstrably received. It has no declared counterpart at all;
+// DeriveFiltering computes the class from the receipts or reports it
+// undetermined.
 //
 // Carrier, EndpointClass, Mobility, and Assistance are legitimately
 // operator-self-reported: they are facts about the operator's own deployment
@@ -344,9 +358,16 @@ type Trial struct {
 	// They carry the evidence the NAT mapping class is derived from, and they
 	// are folded into the trial's canonical preimage so the endpoint signature
 	// covers them: a set swapped after signing breaks the signature.
-	BindObservations     []BindObservation `json:"bind_observations,omitempty"`
-	EndpointPublicKeyHex string            `json:"endpoint_public_key_hex"`
-	EndpointSignatureHex string            `json:"endpoint_signature_hex,omitempty"`
+	BindObservations []BindObservation `json:"bind_observations,omitempty"`
+	// FilteringObservations are the per-coordinator receipts of cold-source
+	// probes: each one is a coordinator's signed statement that a datagram it
+	// sent from a source this endpoint never contacted was demonstrably
+	// received. They carry the evidence the filtering class is derived from,
+	// and they are folded into the trial's canonical preimage so the endpoint
+	// signature covers them.
+	FilteringObservations []FilteringObservation `json:"filtering_observations,omitempty"`
+	EndpointPublicKeyHex  string                 `json:"endpoint_public_key_hex"`
+	EndpointSignatureHex  string                 `json:"endpoint_signature_hex,omitempty"`
 
 	Probe           ProbeKind    `json:"probe"`
 	Outcome         Outcome      `json:"outcome"`
@@ -448,6 +469,24 @@ func (t Trial) Validate() error {
 		}
 		seenBindCoordinators[observation.CoordinatorID] = struct{}{}
 	}
+	// Filtering observations are bounded and well-shaped the same way. One
+	// coordinator attests at most once per cold source kind: a duplicate would
+	// let a reporter pad the set, or slip two conflicting receipts under one
+	// name.
+	if len(t.FilteringObservations) > MaxFilteringObservations {
+		return errors.New("too many filtering observations")
+	}
+	seenFilterSources := make(map[string]struct{}, len(t.FilteringObservations))
+	for _, observation := range t.FilteringObservations {
+		if err := validateFilteringObservationShape(observation, true); err != nil {
+			return err
+		}
+		key := observation.CoordinatorID + "|" + string(observation.Source)
+		if _, duplicate := seenFilterSources[key]; duplicate {
+			return errors.New("a coordinator attested the same filter source more than once")
+		}
+		seenFilterSources[key] = struct{}{}
+	}
 	return nil
 }
 
@@ -489,6 +528,17 @@ func (t Trial) CanonicalBytes() ([]byte, error) {
 	canon.Uint32(buffer, uint32(len(t.BindObservations)))
 	for _, observation := range t.BindObservations {
 		canon.Text(buffer, observation.CoordinatorID)
+		canon.Text(buffer, observation.Observed)
+		canon.Text(buffer, observation.SignatureHex)
+	}
+	// The filtering observations are folded in the same additive, count-prefixed
+	// way: a trial that carries none commits an empty set, and one that carries
+	// receipts commits exactly which coordinator attested which cold source, so
+	// the set cannot be rewritten after signing.
+	canon.Uint32(buffer, uint32(len(t.FilteringObservations)))
+	for _, observation := range t.FilteringObservations {
+		canon.Text(buffer, observation.CoordinatorID)
+		canon.Text(buffer, string(observation.Source))
 		canon.Text(buffer, observation.Observed)
 		canon.Text(buffer, observation.SignatureHex)
 	}

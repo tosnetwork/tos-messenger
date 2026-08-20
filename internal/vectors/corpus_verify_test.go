@@ -419,6 +419,93 @@ func signBindReflection(t *testing.T, coordinatorKey ed25519.PrivateKey, session
 	return observation
 }
 
+// signFilterReceipt signs one coordinator's receipt that the baseline endpoint
+// demonstrably received a cold-source probe, for the key the baseline trial
+// signs with.
+func signFilterReceipt(t *testing.T, coordinatorKey ed25519.PrivateKey, session string,
+	source reachability.FilterSourceKind) reachability.FilteringObservation {
+	t.Helper()
+	public, ok := endpointKey().Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected public key type")
+	}
+	observation, err := reachability.SignFilteringObservation(reachability.FilteringObservation{
+		SessionID:            session,
+		Role:                 string(reachability.RoleA),
+		EndpointPublicKeyHex: hex.EncodeToString(public),
+		Probe:                string(reachability.ProbeUDP),
+		Observed:             "203.0.113.7:41234",
+		Source:               source,
+		AtUnix:               baseUnix,
+	}, coordinatorKey)
+	if err != nil {
+		t.Fatalf("sign filtering observation: %v", err)
+	}
+	return observation
+}
+
+// trialWithFilteringJSON is a signed trial carrying the given filtering
+// receipts, re-signed so the endpoint signature covers them and any refusal is
+// owed to the receipts themselves.
+func trialWithFilteringJSON(t *testing.T, receipts []reachability.FilteringObservation) string {
+	t.Helper()
+	trial := signedTrial(t, inPolicyCoordinatorKey())
+	trial.FilteringObservations = receipts
+	signed, err := reachability.SignTrial(trial, endpointKey())
+	if err != nil {
+		t.Fatalf("sign trial: %v", err)
+	}
+	return encodeTrial(t, signed)
+}
+
+// trialForgedFilteringSignatureJSON carries a filtering receipt whose
+// coordinator signature is valid-length but not the coordinator's over this
+// content: a receipt nobody issued.
+func trialForgedFilteringSignatureJSON(t *testing.T) string {
+	t.Helper()
+	receipt := signFilterReceipt(t, inPolicyCoordinatorKey(), "ses-trial-1",
+		reachability.FilterSourceOtherPort)
+	signature, err := hex.DecodeString(receipt.SignatureHex)
+	if err != nil || len(signature) == 0 {
+		t.Fatalf("decode filtering signature: %v", err)
+	}
+	signature[0] ^= 0xff
+	receipt.SignatureHex = hex.EncodeToString(signature)
+	return trialWithFilteringJSON(t, []reachability.FilteringObservation{receipt})
+}
+
+// trialFilteringForeignSessionJSON carries a validly signed filtering receipt
+// that names a different session than the trial it rides in: somebody else's
+// receipt worn by this measurement.
+func trialFilteringForeignSessionJSON(t *testing.T) string {
+	t.Helper()
+	receipt := signFilterReceipt(t, inPolicyCoordinatorKey(), "ses-trial-other",
+		reachability.FilterSourceOtherPort)
+	return trialWithFilteringJSON(t, []reachability.FilteringObservation{receipt})
+}
+
+// trialDuplicateFilteringCoordinatorJSON carries one coordinator attesting the
+// same cold source twice. It is malformed on shape -- the duplicate could pad a
+// count or hide two conflicting receipts under one name -- so it is refused at
+// decode. The trial is deliberately left with its original signature: the
+// signing path refuses the malformed set, so the wire had to be assembled by
+// hand, exactly as an attacker would.
+func trialDuplicateFilteringCoordinatorJSON(t *testing.T) string {
+	t.Helper()
+	trial := signedTrial(t, inPolicyCoordinatorKey())
+	receipt := signFilterReceipt(t, inPolicyCoordinatorKey(), trial.SessionID,
+		reachability.FilterSourceOtherPort)
+	trial.FilteringObservations = []reachability.FilteringObservation{receipt, receipt}
+	document, err := json.Marshal(struct {
+		Schema string `json:"schema"`
+		reachability.Trial
+	}{Schema: "tos.messaging.reachability-trial.v1", Trial: trial})
+	if err != nil {
+		t.Fatalf("encode trial: %v", err)
+	}
+	return string(document)
+}
+
 // trialMappingContradictsBindJSON is a fully valid, signed trial that declares
 // an endpoint-independent mapping while carrying two predeclared coordinators'
 // reflections of differing external addresses. The signed evidence shows a

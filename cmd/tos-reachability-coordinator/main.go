@@ -30,15 +30,21 @@ func main() {
 	maxSessions := flag.Int("max-sessions", probe.DefaultMaxSessions, "concurrent pairings held")
 	perWindow := flag.Int("requests-per-window", probe.DefaultRequestsPerWindow, "requests admitted per source address per window")
 	window := flag.Duration("rate-window", probe.DefaultRateWindow, "rate-limit window")
+	filterListen := flag.String("filter-listen", ":0",
+		"UDP address for the cold second-port filter source; it must share the primary address, and empty disables filter probing")
+	filterSecondary := flag.String("filter-secondary-listen", "",
+		"UDP address for a cold filter source on a secondary address this host also holds; the address must genuinely differ from the primary, because the coordinator attests the source kind and cannot check it")
 	flag.Parse()
 
-	if err := run(*listen, *keyPath, *sessionTTL, *maxSessions, *perWindow, *window); err != nil {
+	if err := run(*listen, *keyPath, *sessionTTL, *maxSessions, *perWindow, *window,
+		*filterListen, *filterSecondary); err != nil {
 		fmt.Fprintln(os.Stderr, "tos-reachability-coordinator:", err)
 		os.Exit(1)
 	}
 }
 
-func run(listen, keyPath string, ttl time.Duration, maxSessions, perWindow int, window time.Duration) error {
+func run(listen, keyPath string, ttl time.Duration, maxSessions, perWindow int, window time.Duration,
+	filterListen, filterSecondary string) error {
 	key, err := loadOrCreateKey(keyPath)
 	if err != nil {
 		return err
@@ -67,11 +73,38 @@ func run(listen, keyPath string, ttl time.Duration, maxSessions, perWindow int, 
 	}
 	defer connection.Close()
 
+	// The cold sockets are write-only: filter probes leave through them, and
+	// nothing is ever read from or answered on them, because a cold source that
+	// answered anything would stop being cold.
+	filterSources := ""
+	if filterListen != "" {
+		cold, err := net.ListenPacket("udp", filterListen)
+		if err != nil {
+			return err
+		}
+		defer cold.Close()
+		if err := coordinator.AttachFilterSource(reachability.FilterSourceOtherPort, cold); err != nil {
+			return err
+		}
+		filterSources += " filter_port_source=" + cold.LocalAddr().String()
+	}
+	if filterSecondary != "" {
+		cold, err := net.ListenPacket("udp", filterSecondary)
+		if err != nil {
+			return err
+		}
+		defer cold.Close()
+		if err := coordinator.AttachFilterSource(reachability.FilterSourceOtherAddress, cold); err != nil {
+			return err
+		}
+		filterSources += " filter_address_source=" + cold.LocalAddr().String()
+	}
+
 	// Operators put the identifier in their policy. A study only counts
 	// attestations from coordinators it predeclared, so this line is what has
 	// to travel out of band before any measurement is worth anything.
-	fmt.Printf("coordinator_id=%s public_key=%s listening=%s\n",
-		serverID, hex.EncodeToString(public), connection.LocalAddr())
+	fmt.Printf("coordinator_id=%s public_key=%s listening=%s%s\n",
+		serverID, hex.EncodeToString(public), connection.LocalAddr(), filterSources)
 	return coordinator.Serve(connection)
 }
 

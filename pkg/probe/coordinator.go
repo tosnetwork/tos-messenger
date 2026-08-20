@@ -46,6 +46,25 @@ type Coordinator struct {
 
 	mutex    sync.Mutex
 	sessions map[string]*pairing
+	// filterSources are the cold sockets filter probes are sent from, one per
+	// source kind. They are write-only: a cold source that answered anything
+	// would stop being cold.
+	filterSources map[reachability.FilterSourceKind]net.PacketConn
+	// filterGrants holds the outstanding receipt tokens, each redeemable only
+	// over the flow its probe was sent to.
+	filterGrants map[string]*filterGrant
+}
+
+// filterGrant is one outstanding cold-source probe: the token it carried and
+// the flow it may be redeemed over.
+type filterGrant struct {
+	sessionID   string
+	role        Role
+	endpointKey string
+	probe       string
+	observed    netip.AddrPort
+	source      reachability.FilterSourceKind
+	issuedAt    time.Time
 }
 
 type pairing struct {
@@ -119,14 +138,39 @@ func NewCoordinator(options CoordinatorOptions) (*Coordinator, error) {
 		return nil, errors.New("invalid coordinator limits")
 	}
 	return &Coordinator{
-		serverID: serverID,
-		key:      options.PrivateKey,
-		ttl:      ttl,
-		capacity: capacity,
-		limiter:  newRateLimiter(perWindow, window, sources),
-		now:      clock,
-		sessions: make(map[string]*pairing),
+		serverID:      serverID,
+		key:           options.PrivateKey,
+		ttl:           ttl,
+		capacity:      capacity,
+		limiter:       newRateLimiter(perWindow, window, sources),
+		now:           clock,
+		sessions:      make(map[string]*pairing),
+		filterSources: make(map[reachability.FilterSourceKind]net.PacketConn),
+		filterGrants:  make(map[string]*filterGrant),
 	}, nil
+}
+
+// AttachFilterSource gives the coordinator one cold socket to send filter
+// probes from: a second port on the coordinator's own address, or a socket on
+// a secondary address it also holds. The kind is what the coordinator will
+// attest, so it has to be configured truthfully -- the endpoint never states
+// it and cannot check it, which is the same trust the policy already places in
+// a predeclared coordinator's signatures. At most one source per kind: a
+// second socket under one kind could not be told apart in the evidence.
+func (c *Coordinator) AttachFilterSource(kind reachability.FilterSourceKind, connection net.PacketConn) error {
+	if kind != reachability.FilterSourceOtherPort && kind != reachability.FilterSourceOtherAddress {
+		return errors.New("unknown filter source kind")
+	}
+	if connection == nil {
+		return errors.New("a filter source needs a socket")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if _, taken := c.filterSources[kind]; taken {
+		return errors.New("this filter source kind is already attached")
+	}
+	c.filterSources[kind] = connection
+	return nil
 }
 
 // Handle answers one request. It returns nil bytes when the datagram must be
@@ -198,6 +242,26 @@ func (c *Coordinator) Handle(request []byte, from netip.AddrPort) []byte {
 		response = Message{
 			Kind: KindDoneOK, SessionID: message.SessionID, Role: message.Role,
 			Nonce: message.Nonce, ServerID: c.serverID, PeerDone: peerDone,
+		}
+	case KindFilter:
+		// The answer to a filter request is the cold-source probes themselves,
+		// paid for by the request's own padding. Nothing goes back on the
+		// primary flow, so the whole exchange stays inside the request's
+		// amplification budget, and a request that cannot be honoured within it
+		// is silence.
+		c.sendFilterProbes(message, from, len(request))
+		return nil
+	case KindFilterEcho:
+		observation, ok := c.redeemFilterToken(message, from)
+		if !ok {
+			return nil
+		}
+		response = Message{
+			Kind: KindFilterOK, SessionID: message.SessionID, Role: message.Role,
+			Nonce: message.Nonce, ServerID: c.serverID, Token: message.Token,
+			FilterSource: string(observation.Source), Observed: observation.Observed,
+			ObservedAt: observation.AtUnix, SignerKey: observation.PublicKeyHex,
+			Signature: observation.SignatureHex,
 		}
 	default:
 		// Punch traffic belongs between peers. A coordinator that answered it
@@ -400,6 +464,110 @@ func (r *rateLimiter) allow(source netip.Addr, now time.Time) bool {
 	}
 	r.observed[source] = count + 1
 	return true
+}
+
+// sendFilterProbes answers a filter request by probing the requester's
+// observed address from every attached cold source.
+//
+// The discipline is the coordinator's usual one, applied across sockets: the
+// probes go only to the observed source address of the requesting flow, never
+// to an address the request names, so a spoofed request can only ever direct
+// traffic at the spoofed host's own reflection of itself; and the probes sent
+// for one request together never exceed the request's own padded size, so the
+// cold sockets cannot amplify. Each probe carries a fresh random token, and
+// the token is the entire proof: it travels only through the path whose
+// filtering is under test.
+func (c *Coordinator) sendFilterProbes(message Message, from netip.AddrPort, budget int) {
+	// Deterministic order, so which source wins a tight budget is not
+	// map-iteration luck.
+	order := []reachability.FilterSourceKind{
+		reachability.FilterSourceOtherPort,
+		reachability.FilterSourceOtherAddress,
+	}
+	now := c.now()
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.expireFilterGrantsLocked(now)
+	spent := 0
+	for _, kind := range order {
+		connection, attached := c.filterSources[kind]
+		if !attached {
+			continue
+		}
+		// The grant table is bounded by the pairing capacity: two cold sources
+		// per session is what an honest load produces, and past that the probe
+		// is not sent rather than the table growing without limit.
+		if len(c.filterGrants) >= c.capacity*len(order) {
+			return
+		}
+		token, err := randomHex16()
+		if err != nil {
+			return
+		}
+		probe, err := Encode(Message{
+			Kind: KindFilterProbe, SessionID: message.SessionID, Role: message.Role,
+			Nonce: message.Nonce, Token: token, ServerID: c.serverID,
+		})
+		if err != nil {
+			continue
+		}
+		if spent+len(probe) > budget {
+			continue
+		}
+		if _, err := connection.WriteTo(probe, net.UDPAddrFromAddrPort(from)); err != nil {
+			continue
+		}
+		spent += len(probe)
+		c.filterGrants[token] = &filterGrant{
+			sessionID: message.SessionID, role: message.Role,
+			endpointKey: message.EndpointKey, probe: message.Probe,
+			observed: from, source: kind, issuedAt: now,
+		}
+	}
+}
+
+// redeemFilterToken turns an echoed token into a signed filtering observation.
+//
+// The echo must arrive over the same flow the probe was sent to, and must name
+// the same session, role, endpoint key, and probe the grant was issued for:
+// anything else is somebody trying to wear a receipt that is not theirs, and
+// is dropped silently. The grant survives redemption until it expires, so an
+// echo whose answer was lost can be retried.
+func (c *Coordinator) redeemFilterToken(message Message, from netip.AddrPort) (reachability.FilteringObservation, bool) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	now := c.now()
+	c.expireFilterGrantsLocked(now)
+	grant, found := c.filterGrants[message.Token]
+	if !found {
+		return reachability.FilteringObservation{}, false
+	}
+	if grant.sessionID != message.SessionID || grant.role != message.Role ||
+		grant.endpointKey != message.EndpointKey || grant.probe != message.Probe ||
+		grant.observed != from {
+		return reachability.FilteringObservation{}, false
+	}
+	observation, err := reachability.SignFilteringObservation(reachability.FilteringObservation{
+		SessionID:            grant.sessionID,
+		Role:                 string(grant.role),
+		EndpointPublicKeyHex: grant.endpointKey,
+		Probe:                grant.probe,
+		Observed:             grant.observed.String(),
+		Source:               grant.source,
+		AtUnix:               uint64(now.Unix()),
+	}, c.key)
+	if err != nil {
+		return reachability.FilteringObservation{}, false
+	}
+	return observation, true
+}
+
+func (c *Coordinator) expireFilterGrantsLocked(now time.Time) {
+	for token, grant := range c.filterGrants {
+		if now.Sub(grant.issuedAt) > c.ttl {
+			delete(c.filterGrants, token)
+		}
+	}
 }
 
 // markDone records that one endpoint finished measuring and reports whether

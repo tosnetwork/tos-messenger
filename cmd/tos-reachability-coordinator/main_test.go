@@ -64,22 +64,29 @@ func TestCoordinatorIdentityIsStable(t *testing.T) {
 // before anything blocks.
 func TestRunRefusesUnusableConfiguration(t *testing.T) {
 	cases := map[string]struct {
-		listen      string
-		key         string
-		ttl         time.Duration
-		maxSessions int
-		perWindow   int
-		window      time.Duration
+		listen          string
+		key             string
+		ttl             time.Duration
+		maxSessions     int
+		perWindow       int
+		window          time.Duration
+		filterListen    string
+		filterSecondary string
 	}{
-		"no key file":     {"127.0.0.1:0", "", probe.DefaultSessionTTL, 1, 1, time.Minute},
-		"negative ttl":    {"127.0.0.1:0", keyPath(t), -time.Second, 1, 1, time.Minute},
-		"negative window": {"127.0.0.1:0", keyPath(t), probe.DefaultSessionTTL, 1, 1, -time.Minute},
-		"bad listener":    {"not an address", keyPath(t), probe.DefaultSessionTTL, 1, 1, time.Minute},
+		"no key file":     {"127.0.0.1:0", "", probe.DefaultSessionTTL, 1, 1, time.Minute, "", ""},
+		"negative ttl":    {"127.0.0.1:0", keyPath(t), -time.Second, 1, 1, time.Minute, "", ""},
+		"negative window": {"127.0.0.1:0", keyPath(t), probe.DefaultSessionTTL, 1, 1, -time.Minute, "", ""},
+		"bad listener":    {"not an address", keyPath(t), probe.DefaultSessionTTL, 1, 1, time.Minute, "", ""},
+		"bad filter source": {"127.0.0.1:0", keyPath(t), probe.DefaultSessionTTL, 1, 1, time.Minute,
+			"not an address", ""},
+		"bad secondary filter source": {"127.0.0.1:0", keyPath(t), probe.DefaultSessionTTL, 1, 1, time.Minute,
+			"127.0.0.1:0", "not an address"},
 	}
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {
 			err := run(testCase.listen, testCase.key, testCase.ttl,
-				testCase.maxSessions, testCase.perWindow, testCase.window)
+				testCase.maxSessions, testCase.perWindow, testCase.window,
+				testCase.filterListen, testCase.filterSecondary)
 			if err == nil {
 				t.Fatalf("expected %q to be refused", name)
 			}

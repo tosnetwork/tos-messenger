@@ -118,6 +118,8 @@ than silently forking two implementations.
 | Site counting | counted separately from operators, because one operator behind one uplink has measured one network | `reachability.Policy.MinSitesPerCell` |
 | Pair identity | both endpoints of one attempt derive the same identifier from their shared session, so one measurement is not counted as two | `reachability.PairID` |
 | Evidence integrity | every trial is signed by its endpoint and carries a coordinator attestation of the observed address and peer reachability, the two facts an endpoint cannot check about itself | `reachability.SignTrial`, `reachability.Observation` |
+| NAT filtering evidence | filtering is measured, not declared: the coordinator probes the endpoint from cold sources it never contacted, each probe carrying a random token, and echoing the token over the established flow earns a signed receipt. Receipts can only loosen the derived class — silence proves nothing, because a filtered probe and a lost one are the same silence — so the strict class is never derived remotely | `reachability.FilteringObservation`, `reachability.DeriveFiltering`, `probe.MeasureFiltering` |
+| No-NAT declaration | consistent but never credited: bind reflections cannot tell a public host from an endpoint-independent NAT, so `none` and `endpoint-independent` occupy one evidentiary bucket — a `none` declaration survives exactly the evidence an endpoint-independent one survives and is refuted by exactly the evidence that refutes it | `reachability.mappingConsistent` |
 | Predeclared coordinators | a policy names whose attestations count, because anyone can run a coordinator and a signature from an unnamed one proves only that somebody signed something | `reachability.Policy.Coordinators` |
 | Coordinator identity | derived from its key rather than chosen, so a coordinator cannot present itself under a name it does not hold | `reachability.CoordinatorID` |
 | Shared-key exclusion | an endpoint key seen under more than one operator has all of its trials dropped and the key reported | `reachability.Aggregate` |
@@ -135,7 +137,7 @@ than silently forking two implementations.
 | Seal authority | sealing is bound to the send attempt that holds the delivery and refused once a ciphertext exists, so an attempt whose lease expired cannot advance the ratchet for work it lost | `eventlog.CommitSealed` |
 | Commit order | inbound commits the event then the session; outbound commits the session then the ciphertext. Each order is decided by what a crash between the two writes would cost | `e2ee.CommitOrder`, `eventlog.CommitInbound`, `eventlog.CommitSealed` |
 | Stored ciphertext | a retry sends the committed ciphertext rather than sealing again, because sealing per network retry would consume a message key each time | `eventlog.Delivery.Ciphertext` |
-| Probe amplification floor | requests padded to 512 bytes; a response larger than its request is never sent | `probe.MinRequestBytes`, `probe.CheckNoAmplification` |
+| Probe amplification floor | requests padded to 768 bytes; a response larger than its request is never sent, and the cold-source filter probes one request draws are together bounded by that request's own size and go only to the observed source of the requesting flow | `probe.MinRequestBytes`, `probe.CheckNoAmplification`, `probe.Coordinator.sendFilterProbes` |
 | Coordinator limits | 5 minute pairing TTL, 4096 pairings, 600 requests per source address per minute | `probe.CoordinatorOptions` defaults |
 
 ## Named but not established

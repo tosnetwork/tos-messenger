@@ -1581,3 +1581,221 @@ func TestConsistentEvidenceStillDecides(t *testing.T) {
 		t.Fatal("a consistent ADNL study did not support a route decision")
 	}
 }
+
+// signFilter signs one coordinator's receipt that an endpoint demonstrably
+// received a cold-source probe, for the same key the endpoint signs its trial
+// with.
+func signFilter(session string, role Role, operator string, coordinatorKey ed25519.PrivateKey,
+	source FilterSourceKind, observed string) FilteringObservation {
+	public, ok := endpointKeyFor(operator, role).Public().(ed25519.PublicKey)
+	if !ok {
+		panic("unexpected key type")
+	}
+	observation, err := SignFilteringObservation(FilteringObservation{
+		SessionID:            session,
+		Role:                 string(role),
+		EndpointPublicKeyHex: hex.EncodeToString(public),
+		Probe:                string(ProbeUDP),
+		Observed:             observed,
+		Source:               source,
+		AtUnix:               1_800_000_000,
+	}, coordinatorKey)
+	if err != nil {
+		panic(err)
+	}
+	return observation
+}
+
+// filterHalf is one signed measurement half whose filtering observations are
+// built by the given builder over the half's own session.
+func filterHalf(builder func(session string) []FilteringObservation) Trial {
+	session := nextSession()
+	local := endpointIndependentLocal()
+	scene := Scenario{Initiator: local, Responder: publicEndpoint()}
+	trial := rawTrial(scene, session, RoleA, opA, OutcomeDirect, FailureNone, 100)
+	trial.Observation = attest(session, RoleA, opA, "yes", local.Family)
+	trial.FilteringObservations = builder(session)
+	return resign(trial)
+}
+
+// A filtering observation is signed and verified exactly like the other
+// coordinator attestations, and a tampered one attests nothing.
+func TestFilteringObservationSignatureVerifies(t *testing.T) {
+	observation := signFilter(nextSession(), RoleA, opA, testCoordinatorKey(),
+		FilterSourceOtherPort, "203.0.113.7:41234")
+	if err := VerifyFilteringObservation(observation); err != nil {
+		t.Fatalf("a freshly signed observation did not verify: %v", err)
+	}
+	tampered := observation
+	signature, err := hex.DecodeString(tampered.SignatureHex)
+	if err != nil || len(signature) == 0 {
+		t.Fatalf("decode signature: %v", err)
+	}
+	signature[0] ^= 0xff
+	tampered.SignatureHex = hex.EncodeToString(signature)
+	if err := VerifyFilteringObservation(tampered); err == nil {
+		t.Fatal("a forged filtering signature verified")
+	}
+	wrongSource := observation
+	wrongSource.Source = "somewhere-warm"
+	if err := VerifyFilteringObservation(wrongSource); err == nil {
+		t.Fatal("an unknown source kind verified")
+	}
+	// The three observation schemas share a domain and are separated by their
+	// schema string, so a bind signature cannot be worn as a filtering one.
+	bind := signBind(observation.SessionID, RoleA, opA, testCoordinatorKey(), observation.Observed)
+	crossed := observation
+	crossed.SignatureHex = bind.SignatureHex
+	if err := VerifyFilteringObservation(crossed); err == nil {
+		t.Fatal("a bind signature was worn as a filtering observation")
+	}
+}
+
+// The derived filtering class comes from receipts and from nothing else. A
+// receipt can only loosen the class -- it proves a source was admitted -- and
+// silence proves nothing, so the strict class is never derived and an empty
+// set is undetermined.
+func TestDeriveFilteringIsEvidenceOnly(t *testing.T) {
+	session := nextSession()
+	port := signFilter(session, RoleA, opA, testCoordinatorKey(),
+		FilterSourceOtherPort, "203.0.113.7:41234")
+	address := signFilter(session, RoleA, opA, secondCoordinatorKey(),
+		FilterSourceOtherAddress, "203.0.113.7:41234")
+	if got := DeriveFiltering(nil); got != FilteringUndetermined {
+		t.Fatalf("no receipts derived %q", got)
+	}
+	if got := DeriveFiltering([]FilteringObservation{port}); got != FilteringAddressDependent {
+		t.Fatalf("a cold-port receipt derived %q", got)
+	}
+	if got := DeriveFiltering([]FilteringObservation{port, address}); got != FilteringEndpointIndependent {
+		t.Fatalf("a cold-address receipt derived %q", got)
+	}
+	if got := DeriveFiltering([]FilteringObservation{address}); got != FilteringEndpointIndependent {
+		t.Fatalf("a cold-address receipt alone derived %q", got)
+	}
+}
+
+// A trial's filtering receipts are held to the trial's own evidentiary
+// standard: each must verify, come from a predeclared coordinator, and attest
+// to this endpoint, probe, session, and role.
+func TestTrialFilteringReceiptsAreVerified(t *testing.T) {
+	policy := twoCoordinatorPolicy()
+
+	honest := func(session string) []FilteringObservation {
+		return []FilteringObservation{
+			signFilter(session, RoleA, opA, testCoordinatorKey(), FilterSourceOtherPort, "203.0.113.7:41234"),
+			signFilter(session, RoleA, opA, secondCoordinatorKey(), FilterSourceOtherAddress, "203.0.113.7:41234"),
+		}
+	}
+	if err := VerifyTrial(policy, filterHalf(honest)); err != nil {
+		t.Fatalf("honest filtering receipts were rejected: %v", err)
+	}
+
+	forged := func(session string) []FilteringObservation {
+		receipts := honest(session)
+		signature, err := hex.DecodeString(receipts[0].SignatureHex)
+		if err != nil || len(signature) == 0 {
+			t.Fatalf("decode signature: %v", err)
+		}
+		signature[0] ^= 0xff
+		receipts[0].SignatureHex = hex.EncodeToString(signature)
+		return receipts
+	}
+	if err := VerifyTrial(policy, filterHalf(forged)); err == nil {
+		t.Fatal("a forged filtering receipt was accepted")
+	}
+
+	stranger := func(session string) []FilteringObservation {
+		return []FilteringObservation{
+			signFilter(session, RoleA, opA, strangerCoordinatorKey(), FilterSourceOtherPort, "203.0.113.7:41234"),
+		}
+	}
+	if err := VerifyTrial(policy, filterHalf(stranger)); err == nil {
+		t.Fatal("a filtering receipt from an unpredeclared coordinator was accepted")
+	}
+
+	foreignSession := func(string) []FilteringObservation {
+		return []FilteringObservation{
+			signFilter(nextSession(), RoleA, opA, testCoordinatorKey(), FilterSourceOtherPort, "203.0.113.7:41234"),
+		}
+	}
+	if err := VerifyTrial(policy, filterHalf(foreignSession)); err == nil {
+		t.Fatal("a filtering receipt for another session was accepted")
+	}
+
+	foreignParty := func(session string) []FilteringObservation {
+		return []FilteringObservation{
+			signFilter(session, RoleA, opB, testCoordinatorKey(), FilterSourceOtherPort, "203.0.113.7:41234"),
+		}
+	}
+	if err := VerifyTrial(policy, filterHalf(foreignParty)); err == nil {
+		t.Fatal("a filtering receipt attesting another endpoint was accepted")
+	}
+
+	// One coordinator attesting the same cold source twice is malformed before
+	// anything is derived from it.
+	duplicated := filterHalf(honest)
+	duplicated.FilteringObservations = append(duplicated.FilteringObservations,
+		duplicated.FilteringObservations[0])
+	if err := duplicated.Validate(); err == nil {
+		t.Fatal("a duplicated coordinator and source kind validated")
+	}
+	// Signing refuses it too, so the malformed set cannot even be committed.
+	if _, err := SignTrial(duplicated, endpointKeyFor(opA, RoleA)); err == nil {
+		t.Fatal("a duplicated receipt set was signable")
+	}
+
+	// A receipt set swapped after signing breaks the endpoint signature, so the
+	// receipts a trial shows are the receipts that were signed over.
+	swapped := filterHalf(honest)
+	swapped.FilteringObservations = swapped.FilteringObservations[:1]
+	if err := VerifyTrial(policy, swapped); err == nil {
+		t.Fatal("dropping a receipt after signing left the trial verifiable")
+	}
+}
+
+// The no-NAT declaration is consistent with all-equal reflections -- a public
+// host produces exactly what an endpoint-independent NAT produces, so it lands
+// in the same evidentiary bucket -- and refuted by differing ones, exactly as
+// endpoint-independent is. It is never derived: the evidence cannot support it
+// specifically, only the bucket.
+func TestNoNATDeclarationSharesTheEndpointIndependentBucket(t *testing.T) {
+	policy := twoCoordinatorPolicy()
+
+	public := publicEndpoint() // declares Reachability public, NATBehavior none
+	agreeing := func(session string) []BindObservation {
+		return sameAddressBinds(session, RoleA, opA, public.Family)
+	}
+	differing := func(session string) []BindObservation {
+		return []BindObservation{
+			signBind(session, RoleA, opA, testCoordinatorKey(), "203.0.113.7:41234"),
+			signBind(session, RoleA, opA, secondCoordinatorKey(), "198.51.100.9:5000"),
+		}
+	}
+	noneHalf := func(binder func(session string) []BindObservation) Trial {
+		session := nextSession()
+		scene := Scenario{Initiator: public, Responder: publicEndpoint()}
+		trial := rawTrial(scene, session, RoleA, opA, OutcomeDirect, FailureNone, 100)
+		trial.Observation = attest(session, RoleA, opA, "yes", public.Family)
+		trial.BindObservations = binder(session)
+		return resign(trial)
+	}
+
+	if err := VerifyTrial(policy, noneHalf(agreeing)); err != nil {
+		t.Fatalf("a no-NAT declaration was refuted by reflections that agree: %v", err)
+	}
+	// Differing reflections show a mapping that depends on the destination,
+	// which no unmapped host has: the declaration is refuted, exactly as an
+	// endpoint-independent one would be.
+	if err := VerifyTrial(policy, noneHalf(differing)); err == nil {
+		t.Fatal("a no-NAT declaration survived reflections that differ")
+	}
+
+	// The derivation never credits the no-NAT case: all-equal reflections
+	// derive endpoint-independent, the bucket both declarations share, and
+	// nothing a remote verifier holds can split it.
+	session := nextSession()
+	if got := deriveMapping(sameAddressBinds(session, RoleA, opA, FamilyIPv4)); got != NATEndpointIndependent {
+		t.Fatalf("all-equal reflections derived %q, not the shared bucket", got)
+	}
+}

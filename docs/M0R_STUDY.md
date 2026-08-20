@@ -165,6 +165,26 @@ address-dependent one, so one coordinator reports `undetermined` rather than
 guessing. Run at least two coordinators on separate addresses to classify NAT
 behavior.
 
+Mapping and filtering are independent axes, and each has its own evidence. The
+mapping class is derived from coordinator-signed bind reflections. The
+filtering class is derived from coordinator-signed receipts: during the bind
+phase the coordinator probes the endpoint from cold sources — a second port on
+its own address and, when configured, a secondary address — each probe carrying
+a random token, and the endpoint proves receipt by echoing the token back over
+its established flow. Nothing is taken from the endpoint's own claim: the token
+travels only through the path under test, so holding it is having received it.
+A receipt shows the filter admitted that source; silence shows nothing, because
+a dropped probe and a lost probe are the same silence, so the strict filtering
+class is never derived remotely and an unprobed endpoint is `undetermined`.
+
+A `none` (no NAT) declaration is never remotely credited either: bind
+reflections cannot distinguish a truly public endpoint from one behind an
+endpoint-independent NAT, since both reflect one address everywhere. `none`
+and `endpoint-independent` therefore share one evidentiary bucket — left
+standing by the same evidence, refuted by the same evidence — and nothing that
+reads the derived class may treat a surviving `none` as verified public
+addressability.
+
 ## Running it
 
 Start a coordinator somewhere both endpoints can reach. Its identity comes

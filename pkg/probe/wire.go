@@ -64,6 +64,21 @@ const (
 	KindDone Kind = "done"
 	// KindDoneOK answers, saying whether the peer has reported done.
 	KindDoneOK Kind = "done-ok"
+	// KindFilter asks the coordinator to probe this endpoint from cold sources:
+	// sources the endpoint has never contacted. It travels over the endpoint's
+	// established bind flow and is answered not on that flow but by the probes
+	// themselves, so the request's amplification budget pays for them.
+	KindFilter Kind = "filter"
+	// KindFilterProbe is the coordinator's cold-source datagram. It carries a
+	// random token the endpoint can only learn by receiving it, because the
+	// token travels exclusively through the path whose filtering is under test.
+	KindFilterProbe Kind = "filter-probe"
+	// KindFilterEcho returns a received token over the established flow,
+	// proving the cold-source datagram was admitted.
+	KindFilterEcho Kind = "filter-echo"
+	// KindFilterOK answers an echo with the coordinator's signed filtering
+	// observation: which cold source this endpoint demonstrably received from.
+	KindFilterOK Kind = "filter-ok"
 	// KindError reports a refused request.
 	KindError Kind = "error"
 
@@ -97,6 +112,11 @@ var (
 		KindBind: {}, KindBindOK: {}, KindPair: {}, KindPairOK: {},
 		KindPunch: {}, KindPunchAck: {}, KindError: {},
 		KindDone: {}, KindDoneOK: {},
+		KindFilter: {}, KindFilterProbe: {}, KindFilterEcho: {}, KindFilterOK: {},
+	}
+	filterSources = map[string]struct{}{
+		string(reachability.FilterSourceOtherPort):    {},
+		string(reachability.FilterSourceOtherAddress): {},
 	}
 )
 
@@ -130,12 +150,19 @@ type Message struct {
 	PeerDone bool `json:"peer_done,omitempty"`
 	// Probe names what is being measured, so an attestation from one probe
 	// cannot stand in for another.
-	Probe      string `json:"probe,omitempty"`
-	ObservedAt uint64 `json:"observed_at,omitempty"`
-	SignerKey  string `json:"coordinator_public_key,omitempty"`
-	Signature  string `json:"coordinator_signature,omitempty"`
-	Reason     string `json:"reason,omitempty"`
-	Padding    string `json:"padding,omitempty"`
+	Probe string `json:"probe,omitempty"`
+	// Token is the random value a filter probe carries and an echo returns. It
+	// is the receipt: the only way to hold it is to have received the probe.
+	Token string `json:"token,omitempty"`
+	// FilterSource names, in a filter answer, which cold source the echoed
+	// token was sent from. The endpoint never states this; the coordinator
+	// knows what it sent from where, and signs it.
+	FilterSource string `json:"filter_source,omitempty"`
+	ObservedAt   uint64 `json:"observed_at,omitempty"`
+	SignerKey    string `json:"coordinator_public_key,omitempty"`
+	Signature    string `json:"coordinator_signature,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	Padding      string `json:"padding,omitempty"`
 }
 
 // Peer returns the other role.
@@ -262,6 +289,29 @@ func Validate(message Message) error {
 	}
 	if message.PeerTransportKey != "" && !endpointKeyPattern.MatchString(message.PeerTransportKey) {
 		return errors.New("invalid peer transport key")
+	}
+	if message.Token != "" && !noncePattern.MatchString(message.Token) {
+		return errors.New("invalid filter token")
+	}
+	if message.FilterSource != "" {
+		if _, known := filterSources[message.FilterSource]; !known {
+			return errors.New("invalid filter source kind")
+		}
+	}
+	// A filter request is what the coordinator attests receipt for, so like a
+	// pairing it has to name the endpoint key and the probe; an echo carries
+	// the token that proves the receipt as well.
+	if message.Kind == KindFilter || message.Kind == KindFilterEcho {
+		if message.EndpointKey == "" {
+			return errors.New("a filter exchange must present the endpoint key it will sign with")
+		}
+		if message.Probe == "" {
+			return errors.New("a filter exchange must say what it is measuring")
+		}
+	}
+	if (message.Kind == KindFilterEcho || message.Kind == KindFilterProbe || message.Kind == KindFilterOK) &&
+		message.Token == "" {
+		return errors.New("a filter receipt needs its token")
 	}
 	// A pairing request is what the coordinator attests to, so it has to say
 	// which endpoint and which probe it is asking about.

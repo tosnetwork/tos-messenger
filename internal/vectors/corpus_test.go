@@ -16,6 +16,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
+	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 )
 
 var updateCorpus = flag.Bool("update-corpus", false, "rewrite the adversarial corpus")
@@ -68,6 +69,7 @@ var decoders = map[string]func([]byte) error{
 	"messaging-event":      func(b []byte) error { _, err := envelope.DecodeEventJSON(b); return err },
 	"payload-text":         func(b []byte) error { _, err := payload.Decode("text", b); return err },
 	"negotiation-snapshot": func(b []byte) error { _, err := negotiation.DecodeSnapshotJSON(b); return err },
+	"reachability-trial":   func(b []byte) error { _, err := reachability.DecodeTrialJSON(b); return err },
 }
 
 func TestAdversarialCorpus(t *testing.T) {
@@ -279,6 +281,20 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	addVerify("reachability-trial/mapping-contradicts-bind", "reachability-trial",
 		trialMappingContradictsBindJSON(t),
 		"a declared endpoint-independent mapping contradicted by reflections from two coordinators at differing addresses is refuted by the signed evidence")
+
+	// Filtering receipts are held to the same standard as bind reflections: a
+	// receipt is a coordinator's signed statement that a cold-source probe was
+	// demonstrably received, and one that does not verify, or names a different
+	// measurement, is an unchecked assertion wearing a coordinator's name.
+	addVerify("reachability-trial/forged-filtering-signature", "reachability-trial",
+		trialForgedFilteringSignatureJSON(t),
+		"a filtering receipt whose coordinator signature does not verify attests no receipt at all")
+	addVerify("reachability-trial/filtering-names-another-session", "reachability-trial",
+		trialFilteringForeignSessionJSON(t),
+		"a validly signed filtering receipt for a different session is somebody else's receipt and must not count for this trial")
+	add("reachability-trial/duplicate-filtering-coordinator", "reachability-trial",
+		trialDuplicateFilteringCoordinatorJSON(t),
+		"one coordinator attesting the same cold source twice could pad the set or hide two conflicting receipts under one name")
 
 	sort.Slice(corpus, func(i, j int) bool { return corpus[i].Name < corpus[j].Name })
 	return corpus

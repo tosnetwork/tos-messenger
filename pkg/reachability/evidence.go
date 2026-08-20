@@ -353,19 +353,28 @@ func deriveMapping(observations []BindObservation) NATBehavior {
 // against the class derived from the signed bind observations.
 //
 // The check refutes; it does not dictate. Undetermined evidence refutes
-// nothing. All-equal reflections refute a destination-dependent declaration but
-// leave a no-NAT claim alone, because an all-equal reflection is what a public
-// host would also produce and the none case is not remotely verifiable.
-// Differing reflections refute both endpoint-independent and no-NAT, because a
-// host whose external address changes with the destination is behind a mapping
-// that does. Undetermined is always allowed as a declaration: it under-claims
+// nothing, and undetermined is always allowed as a declaration: it under-claims
 // rather than asserting a stratum the evidence denies.
 //
+// The no-NAT (none) declaration is CONSISTENT but never CREDITED, and the two
+// words are doing different work. Bind reflections cannot distinguish a truly
+// public endpoint from one behind an endpoint-independent NAT -- both produce
+// all-equal reflections -- so "none" is remotely unverifiable, and pretending
+// otherwise would put a trial into the public stratum on the operator's word.
+// The honest semantics are that "none" and "endpoint-independent" occupy one
+// evidentiary bucket everywhere the derived class is read: all-equal
+// reflections leave a "none" declaration standing exactly as they leave an
+// endpoint-independent one, and differing reflections refute both, because a
+// host whose external address changes with the destination is mapped, whatever
+// it declares. Nothing here, and nothing downstream, may treat a surviving
+// "none" as evidence of public addressability that "endpoint-independent"
+// would not equally carry.
+//
 // FILTERING behaviour -- whether the mapping also drops unsolicited inbound
-// datagrams -- is a separate dimension a different probe measures, and is
-// deliberately NOT derived or enforced here: the bind reflections speak only to
-// how the address is mapped, not to what the filter admits. Deriving it is the
-// remaining NAT-taxonomy work.
+// datagrams -- is a separate axis and is deliberately NOT derived or enforced
+// here: the bind reflections speak only to how the address is mapped, not to
+// what the filter admits. The filter's evidence is the trial's
+// FilteringObservations, and DeriveFiltering is its derivation.
 func mappingConsistent(declared, derived NATBehavior) bool {
 	switch derived {
 	case NATUndetermined:
@@ -503,6 +512,31 @@ func VerifyTrial(policy Policy, trial Trial) error {
 	// residual case documented on mappingConsistent and EndpointStratum.
 	if !mappingConsistent(trial.Local.NATBehavior, deriveMapping(trial.BindObservations)) {
 		return errors.New("declared NAT mapping contradicts the coordinator-signed bind observations")
+	}
+	// Filtering observations are pure evidence: there is no declared filtering
+	// class to refute, so each receipt only has to be what it claims. It must
+	// verify under the key it names, come from a coordinator the policy
+	// predeclared, and attest to this same endpoint, probe, session, and role,
+	// or it is an unchecked assertion wearing a coordinator's name.
+	for _, observation := range trial.FilteringObservations {
+		if err := VerifyFilteringObservation(observation); err != nil {
+			return err
+		}
+		if !policy.AcceptsCoordinator(observation.CoordinatorID) {
+			return errors.New("a filtering observation comes from a coordinator the policy did not predeclare")
+		}
+		if observation.EndpointPublicKeyHex != trial.EndpointPublicKeyHex {
+			return errors.New("a filtering observation attests to another endpoint")
+		}
+		if observation.Probe != string(trial.Probe) {
+			return errors.New("a filtering observation attests to another probe")
+		}
+		if observation.SessionID != trial.SessionID {
+			return errors.New("a filtering observation describes another session")
+		}
+		if observation.Role != string(trial.Role) {
+			return errors.New("a filtering observation describes another role")
+		}
 	}
 	return nil
 }
