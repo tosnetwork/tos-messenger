@@ -26,6 +26,9 @@ func Bootstrap(stateDir, label string, members []string, driver *group.OpenMLSSi
 	if err != nil {
 		return labgroup.Room{}, err
 	}
+	if len(normalized) > group.MaxPrivateRoomAgents {
+		return labgroup.Room{}, errors.New("MLS lab room exceeds the v1 private-room Agent bound")
+	}
 	if len(normalized) != len(members) {
 		return labgroup.Room{}, errors.New("invalid MLS lab member order")
 	}

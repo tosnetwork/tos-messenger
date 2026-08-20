@@ -19,6 +19,8 @@ match its BasicCredential identity and LeafNode signing key;
   `group_id`, both with candidate change-detection vectors;
 - explicit `room_epoch` and `mls_epoch` clocks. Agent membership advances both;
   device churn and PCS refresh may advance only `mls_epoch`;
+- v1 capacity bounds of 32 logical Agents, 64 total active device leaves, the
+  existing 16-device-per-Endpoint limit, and 32 leaf operations per Commit;
 - deterministic conversion of an accepted device-set succession to MLS leaf
   Add/Remove/Update work. Removing one device leaves the Agent's other devices
   present;
@@ -115,6 +117,13 @@ validates the randomized wire Commit reference; `Apply` checks it; and
 `Seal`/`Open` durably CAS the same-epoch ratchet before exposing ciphertext or
 plaintext. Direct `MLSLedger` methods remain lower-level persistence primitives.
 Relays may deliver these bytes, but Relay order never chooses a commit.
+
+`group.ValidatePrivateRoomCapacity` enforces the stable-state resource shape.
+The 32-operation Commit bound keeps a worst-case batch of 64-KiB KeyPackages,
+after base64 and JSON expansion, below the sidecar's 4-MiB request ceiling.
+The total-leaf bound limits TreeKEM/snapshot work independently of how those
+devices are distributed among Agents. Larger rooms require a future version
+with measured resource and abuse budgets; v1 does not silently accept them.
 
 `pkg/mlslab` exercises that boundary end to end without choosing the M0-R
 route: bootstrap performs sequential KeyPackage/Welcome/Commit invitations,

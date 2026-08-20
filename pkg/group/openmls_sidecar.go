@@ -156,7 +156,7 @@ func (d *OpenMLSSidecar) Join(identityState, welcome []byte) ([]byte, error) {
 }
 
 func (d *OpenMLSSidecar) Commit(state []byte, operations []LeafOperation) ([]byte, []byte, map[string][]byte, error) {
-	if len(operations) > 64 {
+	if len(operations) > MaxMLSLeafOperations {
 		return nil, nil, nil, errors.New("invalid MLS leaf operation count")
 	}
 	if len(operations) == 0 {

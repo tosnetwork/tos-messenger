@@ -3,6 +3,7 @@ package group
 import (
 	"bytes"
 	"crypto/ed25519"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,56 @@ func TestTwoClockTransitionRules(t *testing.T) {
 	lie.Next.MembershipDigest = canon.Digest([]byte("invented"))
 	if err := ValidateTransition(lie); err == nil {
 		t.Fatal("MLS-only update changed membership")
+	}
+}
+
+func TestPrivateRoomCapacityProfile(t *testing.T) {
+	roomID := "room_" + strings.Repeat("7", 64)
+	agents := []string{"agent_" + strings.Repeat("1", 64), "agent_" + strings.Repeat("2", 64)}
+	membership, err := room.Found(roomID, agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegation, _ := mlsAuthority(t)
+	leaves := []Leaf{
+		{AgentID: agents[0], EndpointID: delegation.EndpointID, DeviceID: "dev_" + fmt.Sprintf("%064x", 1)},
+		{AgentID: agents[1], EndpointID: delegation.EndpointID, DeviceID: "dev_" + fmt.Sprintf("%064x", 2)},
+	}
+	if err := ValidatePrivateRoomCapacity(membership, leaves); err != nil {
+		t.Fatalf("valid capacity: %v", err)
+	}
+	if err := ValidatePrivateRoomCapacity(membership, leaves[:1]); err == nil {
+		t.Fatal("Agent without a leaf accepted")
+	}
+	duplicate := append(append([]Leaf(nil), leaves...), leaves[0])
+	if err := ValidatePrivateRoomCapacity(membership, duplicate); err == nil {
+		t.Fatal("duplicate device leaf accepted")
+	}
+
+	tooManyAgents := make([]string, MaxPrivateRoomAgents+1)
+	tooManyLeaves := make([]Leaf, MaxPrivateRoomAgents+1)
+	for i := range tooManyAgents {
+		tooManyAgents[i] = "agent_" + fmt.Sprintf("%064x", i+100)
+		tooManyLeaves[i] = Leaf{AgentID: tooManyAgents[i], EndpointID: delegation.EndpointID, DeviceID: "dev_" + fmt.Sprintf("%064x", i+100)}
+	}
+	oversized, err := room.Found("room_"+strings.Repeat("8", 64), tooManyAgents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePrivateRoomCapacity(oversized, tooManyLeaves); err == nil {
+		t.Fatal("oversized private Agent set accepted")
+	}
+
+	one, err := room.Found("room_"+strings.Repeat("9", 64), []string{agents[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooManyDevices := make([]Leaf, e2ee.MaxDevicesPerSet+1)
+	for i := range tooManyDevices {
+		tooManyDevices[i] = Leaf{AgentID: agents[0], EndpointID: delegation.EndpointID, DeviceID: "dev_" + fmt.Sprintf("%064x", i+500)}
+	}
+	if err := ValidatePrivateRoomCapacity(one, tooManyDevices); err == nil {
+		t.Fatal("per-Agent device overflow accepted")
 	}
 }
 

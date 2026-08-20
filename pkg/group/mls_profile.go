@@ -32,6 +32,15 @@ const (
 	MLSDeviceCredentialSchema    = "tos.messaging.mls-device-credential.v2"
 	MaxKeyPackageBytes           = 64 << 10
 	MaxCredentialLifetimeSeconds = 30 * 24 * 60 * 60
+	// MaxPrivateRoomAgents is the v1 private-room Agent bound. Public/non-MLS
+	// rooms retain pkg/room's separate larger logical bound.
+	MaxPrivateRoomAgents = 32
+	// MaxPrivateRoomLeaves bounds the sum of active device leaves. One Agent
+	// may still publish up to e2ee.MaxDevicesPerSet, subject to this room total.
+	MaxPrivateRoomLeaves = 64
+	// MaxMLSLeafOperations keeps a worst-case batch of bounded KeyPackages below
+	// the sidecar's request limit after base64 and JSON expansion.
+	MaxMLSLeafOperations = 32
 )
 
 // Driver is the deliberately narrow boundary a reviewed RFC 9420 library
@@ -353,6 +362,44 @@ type LeafOperation struct {
 	Kind  LeafOperationKind
 	Prior *Leaf
 	Next  *Leaf
+}
+
+// ValidatePrivateRoomCapacity applies the v1 resource profile to one stable
+// private-room membership and its active MLS leaves. Every logical Agent must
+// own at least one leaf; every leaf must belong to exactly one current Agent.
+func ValidatePrivateRoomCapacity(membership room.Membership, leaves []Leaf) error {
+	if _, err := membership.Announce(); err != nil {
+		return err
+	}
+	if len(membership.Members) > MaxPrivateRoomAgents || len(leaves) < len(membership.Members) || len(leaves) > MaxPrivateRoomLeaves {
+		return errors.New("private room exceeds the v1 Agent or leaf bound")
+	}
+	members := make(map[string]struct{}, len(membership.Members))
+	counts := make(map[string]int, len(membership.Members))
+	for _, agentID := range membership.Members {
+		members[agentID] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(leaves))
+	for _, leaf := range leaves {
+		if _, current := members[leaf.AgentID]; !current || !ids.Device.MatchString(leaf.DeviceID) || !ids.Endpoint.MatchString(leaf.EndpointID) {
+			return errors.New("private room leaf belongs to no current Agent authority")
+		}
+		key := leaf.AgentID + "\x00" + leaf.DeviceID
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("private room has a duplicate Agent device leaf")
+		}
+		seen[key] = struct{}{}
+		counts[leaf.AgentID]++
+		if counts[leaf.AgentID] > e2ee.MaxDevicesPerSet {
+			return errors.New("private room Agent exceeds the device bound")
+		}
+	}
+	for _, agentID := range membership.Members {
+		if counts[agentID] == 0 {
+			return errors.New("private room Agent has no active device leaf")
+		}
+	}
+	return nil
 }
 
 // PlanDeviceSuccession converts one accepted endpoint device succession into
