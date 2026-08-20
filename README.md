@@ -71,6 +71,7 @@ Commands:
 | `cmd/tos-reachability-tunnel` | Double-registration UDP forwarder for the study's proxy-fallback phase; measurement infrastructure, never the Relay milestone |
 | `cmd/tos-reachability-report` | Aggregates a study log against a predeclared policy; exits non-zero when the study supports no decision |
 | `cmd/tos-messengerd` | Runs one installation. See [`docs/RUNNING.md`](docs/RUNNING.md) |
+| `cmd/tos-messenger-lab-group` | Runs the owner-private Unix-socket plaintext group carrier used only for OpenFox integration acceptance; see [`docs/OPENFOX_LAB_GROUP.md`](docs/OPENFOX_LAB_GROUP.md) |
 | `cmd/tos-m0-evidence` | Packs and independently verifies the bounded M0 evidence archive |
 | `cmd/tos-vector-report` | Verifies a signed external vector-consumer report against the committed artifacts |
 

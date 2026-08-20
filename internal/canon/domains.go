@@ -147,6 +147,13 @@ const (
 	DomainMailboxOperationBody = "tos.messaging.mailbox-operation-body.v1\x00"
 	// DomainMailboxAccessClaim namespaces the durable grant+nonce replay key.
 	DomainMailboxAccessClaim = "tos.messaging.mailbox-access-claim.v1\x00"
+	// DomainLabToken namespaces the hash of a local acceptance credential. It
+	// is not a production authentication profile.
+	DomainLabToken = "tos.messaging.lab.token.v1\x00"
+	// DomainLabRoom namespaces a deterministic local acceptance room.
+	DomainLabRoom = "tos.messaging.lab.room.v1\x00"
+	// DomainLabMessage namespaces a local acceptance message identifier.
+	DomainLabMessage = "tos.messaging.lab.message.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -185,6 +192,9 @@ var Domains = []string{
 	DomainMailboxAccessRequest,
 	DomainMailboxOperationBody,
 	DomainMailboxAccessClaim,
+	DomainLabToken,
+	DomainLabRoom,
+	DomainLabMessage,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainNegotiationRecord,
