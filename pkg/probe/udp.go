@@ -112,8 +112,14 @@ type Result struct {
 	// than declared, so a trial that carries them lets a verifier check the
 	// mapping against evidence instead of trusting the endpoint's own label.
 	BindObservations []reachability.BindObservation
-	TxBytes          uint64
-	RxBytes          uint64
+	// FilteringObservations are the coordinator-signed cold-source receipts
+	// the filtering class is derived from; see reachability.DeriveFiltering.
+	// They are collected during the bind phase over the same socket, because
+	// the question is whether the NAT admits cold sources back to this
+	// mapping.
+	FilteringObservations []reachability.FilteringObservation
+	TxBytes               uint64
+	RxBytes               uint64
 }
 
 // NewSessionID returns a fresh session identifier for one measured pair.
@@ -323,6 +329,12 @@ func (r *runner) discover(ctx context.Context) error {
 			len(r.result.BindObservations) < reachability.MaxBindObservations {
 			r.result.BindObservations = append(r.result.BindObservations, attestation)
 		}
+		// The filter exchange runs over the same established socket, and its
+		// stray traffic (early peer punches) is fed back into the runner.
+		filtering := MeasureFiltering(ctx, r.connection, coordinator, r.config, r.observe)
+		r.result.TxBytes += filtering.TxBytes
+		r.result.RxBytes += filtering.RxBytes
+		r.result.FilteringObservations = append(r.result.FilteringObservations, filtering.Observations...)
 	}
 	r.result.Mapping = classifyMapping(r.result.Observed, r.localPort(), hostAddrs())
 	r.result.AddressFamily = classifyFamily(r.result.Observed)

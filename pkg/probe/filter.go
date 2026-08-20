@@ -82,9 +82,27 @@ func MeasureFiltering(ctx context.Context, connection net.PacketConn, coordinato
 	collected := make(map[reachability.FilterSourceKind]struct{}, 2)
 	echoed := make(map[string]struct{}, 4)
 	deadline := time.Now().Add(window)
+	// A coordinator without cold sources answers a filter request with
+	// deliberate silence -- the same silence a filtering NAT produces -- so
+	// from here the two are indistinguishable, and that is the measurement
+	// stance. What the client controls is how long it keeps asking a
+	// coordinator that has never said anything filter-shaped at all: this
+	// evidence is opportunistic, and burning the whole bind window against
+	// every unsupporting coordinator would multiply the coordinator traffic
+	// other phases have already budgeted. A few paced rounds are enough for
+	// a supporting coordinator's first probe to arrive; after that, silence
+	// ends the exchange rather than the window.
+	const silentRoundLimit = 3
+	rounds, heard := 0, false
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return result
+		}
+		if !heard {
+			rounds++
+			if rounds > silentRoundLimit {
+				return result
+			}
 		}
 		if written, err := connection.WriteTo(request, target); err == nil {
 			result.TxBytes += uint64(written)
@@ -103,6 +121,7 @@ func MeasureFiltering(ctx context.Context, connection net.PacketConn, coordinato
 			}
 			switch {
 			case message.Kind == KindFilterProbe && message.Role == config.Role:
+				heard = true
 				// The token arrived, which is the fact under test. Prove the
 				// receipt over the established flow; the echo is a padded
 				// request of its own, so the signed answer it earns cannot
@@ -123,6 +142,7 @@ func MeasureFiltering(ctx context.Context, connection net.PacketConn, coordinato
 					echoed[message.Token] = struct{}{}
 				}
 			case message.Kind == KindFilterOK && message.Role == config.Role:
+				heard = true
 				observation, err := filterObservation(message, config)
 				if err != nil {
 					continue

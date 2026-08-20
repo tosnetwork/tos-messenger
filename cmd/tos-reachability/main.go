@@ -200,14 +200,15 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		Observation: result.Observation,
 		// The signed per-coordinator reflections the verifier derives the NAT
 		// mapping class from, rather than trusting the declared one above.
-		BindObservations: result.BindObservations,
-		Probe:            probeKind,
-		StartedAtUnix:    uint64(time.Now().Unix()),
-		LocalCommit:      commit,
-		PeerCommit:       result.PeerCommit,
-		TxBytes:          result.TxBytes,
-		RxBytes:          result.RxBytes,
-		EstablishMillis:  result.EstablishMillis,
+		BindObservations:      result.BindObservations,
+		FilteringObservations: result.FilteringObservations,
+		Probe:                 probeKind,
+		StartedAtUnix:         uint64(time.Now().Unix()),
+		LocalCommit:           commit,
+		PeerCommit:            result.PeerCommit,
+		TxBytes:               result.TxBytes,
+		RxBytes:               result.RxBytes,
+		EstablishMillis:       result.EstablishMillis,
 	}
 	if err := classify(&trial, result); err != nil {
 		return reachability.Trial{}, err

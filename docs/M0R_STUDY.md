@@ -141,6 +141,16 @@ success rate must not carry. The signal is not carried over the measured ADNL
 session, because a layer must not carry its own test's control plane: "the
 session failed" and "the signalling failed" have to stay distinguishable.
 
+The collector can measure past establishment. A hold window keeps both ends
+pinging the confirmed session and records how long it survived (a pair counts
+only when both halves measured it), and the initiator can deliberately drop
+its channel state and time the reconnect. When a tunnel relay
+(`tos-reachability-tunnel`, a double-registration UDP forwarder bound by the
+same amplification rules as the coordinator) is configured and the direct
+phase fails, the collector establishes the same session through the relay and
+the trial files as a proxy fallback carrying the direct phase's failure class
+-- which is what gives the `tunnel-first` route decision evidence to read.
+
 Two honest caveats. Establishment latency includes the rendezvous hand-off
 (the responder's punch burst and gateway rebind), so absolute latencies carry
 a small tooling offset that is identical across scenarios; comparisons between
