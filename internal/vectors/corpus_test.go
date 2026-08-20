@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tosnetwork/tos-messenger/pkg/attachments"
 	"github.com/tosnetwork/tos-messenger/pkg/conformance"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
@@ -76,6 +77,7 @@ var decoders = map[string]func([]byte) error{
 	"stored-ack":            func(b []byte) error { _, err := mailbox.DecodeAckJSON(b); return err },
 	"conformance-report":    func(b []byte) error { _, err := conformance.DecodeJSON(b); return err },
 	"mls-device-credential": func(b []byte) error { _, err := group.DecodeDeviceCredentialJSON(b); return err },
+	"encrypted-attachment":  func(b []byte) error { _, err := attachments.DecodeReferenceJSON(b); return err },
 }
 
 func TestAdversarialCorpus(t *testing.T) {
@@ -178,6 +180,7 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 		"stored-ack":            validStoredAckJSON(t),
 		"conformance-report":    validConformanceReportJSON(t),
 		"mls-device-credential": validMLSCredentialJSON(t),
+		"encrypted-attachment":  validEncryptedAttachmentJSON(t),
 	}
 	baselineTargets := make([]string, 0, len(jsonBaselines))
 	for target := range jsonBaselines {

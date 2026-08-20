@@ -130,6 +130,12 @@ const (
 	// DomainMLSDeviceCredential namespaces the endpoint signature authorising
 	// one device's distinct MLS leaf key and exact KeyPackage.
 	DomainMLSDeviceCredential = "tos.messaging.mls-device-credential.v1\x00"
+	// DomainAttachmentMetadata commits plaintext metadata kept inside E2EE.
+	DomainAttachmentMetadata = "tos.messaging.attachment-metadata.v1\x00"
+	// DomainAttachmentChunk binds every AEAD chunk to its position and shape.
+	DomainAttachmentChunk = "tos.messaging.attachment-chunk.v1\x00"
+	// DomainAttachmentManifest identifies the ordered ciphertext chunk set.
+	DomainAttachmentManifest = "tos.messaging.attachment-manifest.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -160,6 +166,9 @@ var Domains = []string{
 	DomainStoredAck,
 	DomainConformanceReport,
 	DomainMLSDeviceCredential,
+	DomainAttachmentMetadata,
+	DomainAttachmentChunk,
+	DomainAttachmentManifest,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainNegotiationRecord,

@@ -6,6 +6,7 @@ import (
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/ids"
+	"github.com/tosnetwork/tos-messenger/pkg/attachments"
 )
 
 // CounterpartyApprovalRequest asks the other party to approve something on
@@ -357,6 +358,47 @@ func decodeArtifactReference(reader *canon.Reader) Payload {
 		ArtifactDigest: reader.Text(MaxDigestBytes),
 		Locator:        reader.Text(MaxShortTextBytes),
 	}
+}
+
+// EncryptedAttachment carries the secret attachment Reference inside E2EE and
+// an untrusted retrieval hint. The outer Event must repeat ManifestDigest in
+// attachment_references; envelope validation enforces that equality.
+type EncryptedAttachment struct {
+	ManifestDigest string
+	ReferenceJSON  []byte
+	Locator        string
+}
+
+func (EncryptedAttachment) Schema() string {
+	return "tos.messaging.payload.encrypted-attachment.v1"
+}
+
+func (a EncryptedAttachment) Validate() error {
+	if err := requireDigest("attachment manifest digest", a.ManifestDigest); err != nil {
+		return err
+	}
+	if len(a.ReferenceJSON) == 0 || len(a.ReferenceJSON) > MaxOpaqueBytes {
+		return errors.New("invalid encrypted attachment reference size")
+	}
+	reference, err := attachments.DecodeReferenceJSON(a.ReferenceJSON)
+	if err != nil {
+		return err
+	}
+	digest, err := attachments.ManifestDigest(reference.Manifest)
+	if err != nil || digest != a.ManifestDigest {
+		return errors.New("encrypted attachment reference does not match its manifest digest")
+	}
+	return requireText("attachment locator", a.Locator, MaxShortTextBytes)
+}
+
+func (a EncryptedAttachment) encode(buffer *bytes.Buffer) {
+	canon.Text(buffer, a.ManifestDigest)
+	canon.Bytes(buffer, a.ReferenceJSON)
+	canon.Text(buffer, a.Locator)
+}
+
+func decodeEncryptedAttachment(reader *canon.Reader) Payload {
+	return EncryptedAttachment{ManifestDigest: reader.Text(MaxDigestBytes), ReferenceJSON: reader.Bytes(MaxOpaqueBytes), Locator: reader.Text(MaxShortTextBytes)}
 }
 
 // ChainReference points at finalized state. It carries no authority of its

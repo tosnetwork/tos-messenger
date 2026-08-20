@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/pkg/attachments"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
@@ -298,6 +300,39 @@ func TestUnknownEventKindFailsClosed(t *testing.T) {
 	}
 	if err := AdmittedBy(testDelegation(t), forward); err == nil {
 		t.Fatal("an unrecognised kind must never be admitted by scope")
+	}
+}
+
+func TestEncryptedAttachmentEventBindsOuterManifestReference(t *testing.T) {
+	plaintext := []byte("private attachment")
+	random := bytes.NewReader(bytes.Repeat([]byte{0x41}, attachments.KeyBytes+attachments.AttachmentIDBytes+attachments.NoncePrefixBytes))
+	ref, _, err := attachments.Seal(random, plaintext, attachments.Metadata{Filename: "note.txt", MediaType: "text/plain", PlaintextDigest: canon.Digest(plaintext), ExpiresAtUnix: baseUnix + 3600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	referenceJSON, err := attachments.EncodeReferenceJSON(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestDigest, err := attachments.ManifestDigest(ref.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := payload.Encode(payload.EncryptedAttachment{ManifestDigest: manifestDigest, ReferenceJSON: referenceJSON, Locator: "relay://attachments.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := testEvent(t)
+	event.Kind = "artifact.encrypted"
+	event.PayloadSchema = ""
+	event.Content = body
+	event.AttachmentReferences = []string{manifestDigest}
+	if _, err := NewEvent(event); err != nil {
+		t.Fatalf("valid encrypted attachment event: %v", err)
+	}
+	event.AttachmentReferences = []string{canon.Digest([]byte("other manifest"))}
+	if _, err := NewEvent(event); err == nil {
+		t.Fatal("outer attachment reference diverged from secret manifest")
 	}
 }
 

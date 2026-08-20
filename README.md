@@ -28,6 +28,7 @@ decision:
 | `pkg/directory` | Signed Messaging Contact Descriptor, DHT locator/key mapping, and the route-neutral automatic refresh chain with finalized revocation and durable device-set admission |
 | `pkg/envelope` | Outer Relay Envelope and inner typed Messaging Event, including content-addressed Event IDs |
 | `pkg/mailbox` | Route-neutral offline storage state machine: crash-safe opaque envelope storage, signed StoredAck, quotas, expiry, retrieval deletion, and independently verified multi-Relay fan-out |
+| `pkg/attachments` | Route-neutral AES-256-GCM private attachment chunks, secret E2EE references, ordered ciphertext manifests, resume planning, recipient bounds, and fail-closed authentication |
 | `pkg/eventlog` | Single-writer durable journal: stored inbound events with pending recovery and application leases, outbound delivery state, retry schedule, and pruning |
 | `pkg/fault` | Typed failures, retry dispositions, and what a peer may be told |
 | `pkg/admission` | The lower half of the context firewall: authority, scope, window, inbox policy, and the durable claim |

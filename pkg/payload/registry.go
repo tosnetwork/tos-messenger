@@ -35,6 +35,7 @@ var codecs = map[string]codec{
 
 	"artifact.offer":     {schema: ArtifactOffer{}.Schema(), decode: decodeArtifactOffer},
 	"artifact.reference": {schema: ArtifactReference{}.Schema(), decode: decodeArtifactReference},
+	"artifact.encrypted": {schema: EncryptedAttachment{}.Schema(), decode: decodeEncryptedAttachment},
 
 	"service.quote.reference":   {schema: QuoteReference{}.Schema(), decode: decodeQuoteReference},
 	"service.escrow.reference":  {schema: EscrowReference{}.Schema(), decode: decodeEscrowReference},

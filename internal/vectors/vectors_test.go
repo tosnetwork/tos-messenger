@@ -13,6 +13,7 @@
 package vectors
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/pkg/attachments"
 	"github.com/tosnetwork/tos-messenger/pkg/conformance"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
@@ -276,6 +278,29 @@ func build(t *testing.T) []Vector {
 		t.Fatalf("set digest: %v", err)
 	}
 	vectors = append(vectors, Vector{Name: "prekey-bundle-set", Digest: setDigest})
+
+	// Encrypted attachment secret reference. The chunks themselves are
+	// deterministic under this vector's fixed random material; the manifest
+	// canonical form commits their ordered ciphertext digests.
+	attachmentPlaintext := []byte("private attachment vector")
+	attachmentRandom := bytes.NewReader(bytes.Repeat([]byte{0x5d}, attachments.KeyBytes+attachments.AttachmentIDBytes+attachments.NoncePrefixBytes))
+	attachmentRef, _, err := attachments.Seal(attachmentRandom, attachmentPlaintext, attachments.Metadata{Filename: "vector.txt", MediaType: "text/plain", PlaintextDigest: canon.Digest(attachmentPlaintext), ExpiresAtUnix: baseUnix + 3600})
+	if err != nil {
+		t.Fatalf("attachment: %v", err)
+	}
+	attachmentWire, err := attachments.EncodeReferenceJSON(attachmentRef)
+	if err != nil {
+		t.Fatalf("attachment wire: %v", err)
+	}
+	attachmentCanonical, err := attachments.ManifestCanonicalBytes(attachmentRef.Manifest)
+	if err != nil {
+		t.Fatalf("attachment canonical: %v", err)
+	}
+	attachmentDigest, err := attachments.ManifestDigest(attachmentRef.Manifest)
+	if err != nil {
+		t.Fatalf("attachment digest: %v", err)
+	}
+	add("encrypted-attachment-candidate", attachmentWire, attachmentCanonical, attachmentDigest)
 
 	// Endpoint-authorised MLS device credential and exact KeyPackage. This is
 	// a candidate-profile vector, not a claim that the MLS wire profile has

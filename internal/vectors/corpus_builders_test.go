@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/pkg/attachments"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
@@ -108,6 +110,21 @@ func validMLSCredentialJSON(t *testing.T) []byte {
 	raw, err := group.EncodeDeviceCredentialJSON(validMLSCredential(t))
 	if err != nil {
 		t.Fatalf("MLS credential wire: %v", err)
+	}
+	return raw
+}
+
+func validEncryptedAttachmentJSON(t *testing.T) []byte {
+	t.Helper()
+	plaintext := []byte("private attachment vector")
+	random := bytes.NewReader(bytes.Repeat([]byte{0x5d}, attachments.KeyBytes+attachments.AttachmentIDBytes+attachments.NoncePrefixBytes))
+	ref, _, err := attachments.Seal(random, plaintext, attachments.Metadata{Filename: "vector.txt", MediaType: "text/plain", PlaintextDigest: canon.Digest(plaintext), ExpiresAtUnix: baseUnix + 3600})
+	if err != nil {
+		t.Fatalf("attachment: %v", err)
+	}
+	raw, err := attachments.EncodeReferenceJSON(ref)
+	if err != nil {
+		t.Fatalf("attachment wire: %v", err)
 	}
 	return raw
 }

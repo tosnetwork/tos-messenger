@@ -94,6 +94,7 @@ var eventKinds = map[string]kindSpec{
 
 	"artifact.offer":     {class: "artifact"},
 	"artifact.reference": {class: "artifact"},
+	"artifact.encrypted": {class: "artifact"},
 
 	"service.quote.reference":   {class: "service"},
 	"service.escrow.reference":  {class: "service"},
@@ -488,6 +489,16 @@ func validateEventFields(event Event) error {
 	}
 	if err := validateAttachments(event.AttachmentReferences); err != nil {
 		return err
+	}
+	if event.Kind == "artifact.encrypted" {
+		body, err := payload.Decode(event.Kind, event.Content)
+		if err != nil {
+			return err
+		}
+		attachment, ok := body.(payload.EncryptedAttachment)
+		if !ok || len(event.AttachmentReferences) != 1 || event.AttachmentReferences[0] != attachment.ManifestDigest {
+			return errors.New("encrypted attachment event does not name its exact manifest")
+		}
 	}
 	if event.ServiceBinding != "" && !bindingPattern.MatchString(event.ServiceBinding) {
 		return errors.New("invalid event service binding")

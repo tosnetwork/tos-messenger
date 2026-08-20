@@ -64,6 +64,34 @@
     "reason": "a truncated locator is not the locator it was cut from"
   },
   {
+    "name": "encrypted-attachment/empty",
+    "layer": "decode",
+    "target": "encrypted-attachment",
+    "wire": "",
+    "reason": "an empty document is not an object"
+  },
+  {
+    "name": "encrypted-attachment/trailing-json",
+    "layer": "decode",
+    "target": "encrypted-attachment",
+    "wire": "{\"manifest\":{\"schema\":\"tos.messaging.encrypted-attachment.v1\",\"algorithm\":\"AES-256-GCM\",\"attachment_id_hex\":\"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\",\"nonce_prefix_hex\":\"5d5d5d5d\",\"plaintext_bytes\":25,\"chunk_bytes\":262144,\"metadata_digest\":\"sha256:4ed26b5a09fed613cd9a7adfd58b900be2f01c2656964faf5dc611091c24e2ca\",\"chunk_digests\":[\"sha256:d265e0cc9657e7b4411b32919015352994a36f5a2072a084d611f437b19c68a5\"]},\"key_hex\":\"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\",\"metadata\":{\"filename\":\"vector.txt\",\"media_type\":\"text/plain\",\"plaintext_digest\":\"sha256:d828b946880cc1e577cee7bb1b5df1db56d960d1c315fd0e754d6fb419d7e8e5\",\"expires_at_unix\":1800003600}}{\"x\":1}",
+    "reason": "trailing data lets two byte streams decode to one object"
+  },
+  {
+    "name": "encrypted-attachment/truncated",
+    "layer": "decode",
+    "target": "encrypted-attachment",
+    "wire": "{\"manifest\":{\"schema\":\"tos.messaging.encrypted-attachment.v1\",\"algorithm\":\"AES-256-GCM\",\"attachment_id_hex\":\"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\",\"nonce_prefix_hex\":\"5d5d5d5d\",\"plaintext_bytes\":25,\"chunk_bytes\":262144,\"metadata_digest\":\"sha256:4ed26b5a09fed613cd9a7adfd58b900be2f01c2656964faf5dc611091c24e2ca\",\"chunk_digests\":[\"sha256:d265e0cc9657e7b4411b32919015352994a36f5a2072a084d611f437b19c68a5\"]},\"key_hex\":\"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\",\"metadata\":{\"filename\":\"vector.txt\",\"media_type\":\"text/plain\",\"plaintext_digest\":\"sha256:d828b946880cc1e577cee7bb1b5df1db56d960d1c315fd0e754d6fb419d7e8e5\",\"expires_at_unix\":1800003600}",
+    "reason": "a truncated document is not the object it was cut from"
+  },
+  {
+    "name": "encrypted-attachment/unknown-field",
+    "layer": "decode",
+    "target": "encrypted-attachment",
+    "wire": "{\"unknown_field\":1,\"manifest\":{\"schema\":\"tos.messaging.encrypted-attachment.v1\",\"algorithm\":\"AES-256-GCM\",\"attachment_id_hex\":\"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\",\"nonce_prefix_hex\":\"5d5d5d5d\",\"plaintext_bytes\":25,\"chunk_bytes\":262144,\"metadata_digest\":\"sha256:4ed26b5a09fed613cd9a7adfd58b900be2f01c2656964faf5dc611091c24e2ca\",\"chunk_digests\":[\"sha256:d265e0cc9657e7b4411b32919015352994a36f5a2072a084d611f437b19c68a5\"]},\"key_hex\":\"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\",\"metadata\":{\"filename\":\"vector.txt\",\"media_type\":\"text/plain\",\"plaintext_digest\":\"sha256:d828b946880cc1e577cee7bb1b5df1db56d960d1c315fd0e754d6fb419d7e8e5\",\"expires_at_unix\":1800003600}}",
+    "reason": "an unknown field means the sender and receiver disagree about the object's shape"
+  },
+  {
     "name": "endpoint-delegation/empty",
     "layer": "decode",
     "target": "endpoint-delegation",

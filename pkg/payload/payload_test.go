@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/pkg/attachments"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
 
@@ -65,6 +67,22 @@ func sample(kind string) Payload {
 	case "artifact.reference":
 		return ArtifactReference{ArtifactDigest: "sha256:" + strings.Repeat("6", 64),
 			Locator: "relay://mbx_" + strings.Repeat("7", 64)}
+	case "artifact.encrypted":
+		plaintext := []byte("private attachment")
+		random := bytes.NewReader(bytes.Repeat([]byte{0x42}, attachments.KeyBytes+attachments.AttachmentIDBytes+attachments.NoncePrefixBytes))
+		ref, _, err := attachments.Seal(random, plaintext, attachments.Metadata{Filename: "note.txt", MediaType: "text/plain", PlaintextDigest: canon.Digest(plaintext), ExpiresAtUnix: 1_900_000_000})
+		if err != nil {
+			panic(err)
+		}
+		raw, err := attachments.EncodeReferenceJSON(ref)
+		if err != nil {
+			panic(err)
+		}
+		digest, err := attachments.ManifestDigest(ref.Manifest)
+		if err != nil {
+			panic(err)
+		}
+		return EncryptedAttachment{ManifestDigest: digest, ReferenceJSON: raw, Locator: "relay://attachments.example"}
 	case "service.quote.reference":
 		return QuoteReference{ChainReference: sampleChainReference()}
 	case "service.escrow.reference":

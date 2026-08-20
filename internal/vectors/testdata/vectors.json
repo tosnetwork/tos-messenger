@@ -41,6 +41,12 @@
     "digest": "sha256:f5b45c2dadb835da7533218819186aadba6ce20420157d752118a6772662782c"
   },
   {
+    "name": "encrypted-attachment-candidate",
+    "wire": "{\"manifest\":{\"schema\":\"tos.messaging.encrypted-attachment.v1\",\"algorithm\":\"AES-256-GCM\",\"attachment_id_hex\":\"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\",\"nonce_prefix_hex\":\"5d5d5d5d\",\"plaintext_bytes\":25,\"chunk_bytes\":262144,\"metadata_digest\":\"sha256:4ed26b5a09fed613cd9a7adfd58b900be2f01c2656964faf5dc611091c24e2ca\",\"chunk_digests\":[\"sha256:d265e0cc9657e7b4411b32919015352994a36f5a2072a084d611f437b19c68a5\"]},\"key_hex\":\"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\",\"metadata\":{\"filename\":\"vector.txt\",\"media_type\":\"text/plain\",\"plaintext_digest\":\"sha256:d828b946880cc1e577cee7bb1b5df1db56d960d1c315fd0e754d6fb419d7e8e5\",\"expires_at_unix\":1800003600}}",
+    "canonical_sha256": "sha256:bfdf4d5b079462e31a59f2981734590fd0c430c3ce9784d2b1e3f9e9d5847b7f",
+    "digest": "sha256:bfdf4d5b079462e31a59f2981734590fd0c430c3ce9784d2b1e3f9e9d5847b7f"
+  },
+  {
     "name": "mls-device-credential-candidate",
     "wire": "{\"schema\":\"tos.messaging.mls-device-credential.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"device_id\":\"dev_4444444444444444444444444444444444444444444444444444444444444444\",\"device_set_digest\":\"sha256:f5b45c2dadb835da7533218819186aadba6ce20420157d752118a6772662782c\",\"leaf_signature_public_key_hex\":\"17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce\",\"cipher_suite\":1,\"key_package_base64\":\"Zml4ZWQgUkZDIDk0MjAgS2V5UGFja2FnZSBjYW5kaWRhdGUgYnl0ZXM=\",\"issued_at_unix\":1800000000,\"expires_at_unix\":1800003600,\"endpoint_signature_hex\":\"25c997c1bfcaebac34e7ce948d7f345905834ee70ef6c84c99bb947668929603fda113191f086bc1f6e90f4e9ae831f29f34d231920f9c360bc00a231d5a190d\"}",
     "canonical_sha256": "sha256:152cf3d69873893fde327bc9349c6a37e4910d468f3b1ab8e852cf06c9d8c83b",
