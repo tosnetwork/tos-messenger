@@ -78,6 +78,14 @@ func endpointKey() ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(seed)
 }
 
+func mailboxCapabilityKey() ed25519.PrivateKey {
+	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x44}, ed25519.SeedSize))
+}
+
+func mailboxRelayKey() ed25519.PrivateKey {
+	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x55}, ed25519.SeedSize))
+}
+
 func descriptorPolicy() directory.DescriptorPolicy {
 	return directory.DescriptorPolicy{
 		MaxEnvelopeBytes:   128 << 10,
@@ -414,6 +422,65 @@ func build(t *testing.T) []Vector {
 		t.Fatalf("StoredAck canonical: %v", err)
 	}
 	add("stored-ack", ackWire, ackCanonical, "")
+
+	// Mailbox capability grant and one operation-bound request. The capability
+	// key and Relay key are deliberately distinct from the Endpoint key: the
+	// vector freezes the authority separation, not only the JSON shape.
+	grant, err := mailbox.SignGrant(mailbox.CapabilityGrant{
+		NetworkID:              del.Network.NetworkId,
+		GenesisRootHash:        del.Network.GenesisRootHash,
+		GenesisFileHash:        del.Network.GenesisFileHash,
+		AgentID:                del.AgentID,
+		EndpointID:             del.EndpointID,
+		RelayPublicKeyHex:      hex.EncodeToString(mailboxRelayKey().Public().(ed25519.PublicKey)),
+		MailboxID:              relayEnvelope.OpaqueMailboxID,
+		CapabilityPublicKeyHex: hex.EncodeToString(mailboxCapabilityKey().Public().(ed25519.PublicKey)),
+		Operations:             []mailbox.Operation{mailbox.OperationDelete, mailbox.OperationDeposit, mailbox.OperationRead},
+		IssuedAtUnix:           baseUnix,
+		ExpiresAtUnix:          baseUnix + 3600,
+	}, key)
+	if err != nil {
+		t.Fatalf("Mailbox capability grant: %v", err)
+	}
+	grantWire, err := mailbox.EncodeGrantJSON(grant)
+	if err != nil {
+		t.Fatalf("Mailbox capability grant wire: %v", err)
+	}
+	grantCanonical, err := mailbox.GrantCanonicalBytes(grant)
+	if err != nil {
+		t.Fatalf("Mailbox capability grant canonical: %v", err)
+	}
+	grantDigest, err := mailbox.GrantDigest(grant)
+	if err != nil {
+		t.Fatalf("Mailbox capability grant digest: %v", err)
+	}
+	add("mailbox-capability-grant", grantWire, grantCanonical, grantDigest)
+
+	readDigest, err := mailbox.ReadBodyDigest(grant.MailboxID, 25)
+	if err != nil {
+		t.Fatalf("Mailbox read body: %v", err)
+	}
+	request, err := mailbox.SignAccessRequest(mailbox.AccessRequest{
+		GrantDigest:   grantDigest,
+		Operation:     mailbox.OperationRead,
+		MailboxID:     grant.MailboxID,
+		BodyDigest:    readDigest,
+		NonceHex:      strings.Repeat("66", 32),
+		IssuedAtUnix:  baseUnix + 10,
+		ExpiresAtUnix: baseUnix + 70,
+	}, mailboxCapabilityKey())
+	if err != nil {
+		t.Fatalf("Mailbox access request: %v", err)
+	}
+	requestWire, err := mailbox.EncodeAccessRequestJSON(request)
+	if err != nil {
+		t.Fatalf("Mailbox access request wire: %v", err)
+	}
+	requestCanonical, err := mailbox.AccessRequestCanonicalBytes(request)
+	if err != nil {
+		t.Fatalf("Mailbox access request canonical: %v", err)
+	}
+	add("mailbox-access-request", requestWire, requestCanonical, "")
 
 	// Signed report from an independent vector consumer.
 	consumer, err := conformance.Sign(conformance.Report{

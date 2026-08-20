@@ -1,6 +1,7 @@
 package vectors
 
 import (
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -66,15 +67,23 @@ const (
 // decoders is the wire surface a second implementation has to match. Each
 // returns an error for input it refuses; the corpus asserts every entry does.
 var decoders = map[string]func([]byte) error{
-	"endpoint-delegation":   func(b []byte) error { _, err := identity.DecodeJSON(b); return err },
-	"contact-descriptor":    func(b []byte) error { _, err := directory.DecodeDescriptorJSON(b); return err },
-	"dht-locator":           func(b []byte) error { _, err := directory.DecodeLocator(b); return err },
-	"prekey-bundle":         func(b []byte) error { _, err := e2ee.DecodeBundleJSON(b); return err },
-	"messaging-event":       func(b []byte) error { _, err := envelope.DecodeEventJSON(b); return err },
-	"payload-text":          func(b []byte) error { _, err := payload.Decode("text", b); return err },
-	"negotiation-snapshot":  func(b []byte) error { _, err := negotiation.DecodeSnapshotJSON(b); return err },
-	"reachability-trial":    func(b []byte) error { _, err := reachability.DecodeTrialJSON(b); return err },
-	"stored-ack":            func(b []byte) error { _, err := mailbox.DecodeAckJSON(b); return err },
+	"endpoint-delegation":  func(b []byte) error { _, err := identity.DecodeJSON(b); return err },
+	"contact-descriptor":   func(b []byte) error { _, err := directory.DecodeDescriptorJSON(b); return err },
+	"dht-locator":          func(b []byte) error { _, err := directory.DecodeLocator(b); return err },
+	"prekey-bundle":        func(b []byte) error { _, err := e2ee.DecodeBundleJSON(b); return err },
+	"messaging-event":      func(b []byte) error { _, err := envelope.DecodeEventJSON(b); return err },
+	"payload-text":         func(b []byte) error { _, err := payload.Decode("text", b); return err },
+	"negotiation-snapshot": func(b []byte) error { _, err := negotiation.DecodeSnapshotJSON(b); return err },
+	"reachability-trial":   func(b []byte) error { _, err := reachability.DecodeTrialJSON(b); return err },
+	"stored-ack":           func(b []byte) error { _, err := mailbox.DecodeAckJSON(b); return err },
+	"mailbox-capability-grant": func(b []byte) error {
+		_, err := mailbox.DecodeGrantJSON(b)
+		return err
+	},
+	"mailbox-access-request": func(b []byte) error {
+		_, err := mailbox.DecodeAccessRequestJSON(b)
+		return err
+	},
 	"conformance-report":    func(b []byte) error { _, err := conformance.DecodeJSON(b); return err },
 	"mls-device-credential": func(b []byte) error { _, err := group.DecodeDeviceCredentialJSON(b); return err },
 	"encrypted-attachment":  func(b []byte) error { _, err := attachments.DecodeReferenceJSON(b); return err },
@@ -172,15 +181,17 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	// data must be refused, because a decoder that accepted them would let two
 	// documents mean one object.
 	jsonBaselines := map[string][]byte{
-		"endpoint-delegation":   validDelegationJSON(t),
-		"contact-descriptor":    validDescriptorJSON(t),
-		"prekey-bundle":         validBundleJSON(t),
-		"messaging-event":       validEventJSON(t),
-		"negotiation-snapshot":  validSnapshotJSON(t),
-		"stored-ack":            validStoredAckJSON(t),
-		"conformance-report":    validConformanceReportJSON(t),
-		"mls-device-credential": validMLSCredentialJSON(t),
-		"encrypted-attachment":  validEncryptedAttachmentJSON(t),
+		"endpoint-delegation":      validDelegationJSON(t),
+		"contact-descriptor":       validDescriptorJSON(t),
+		"prekey-bundle":            validBundleJSON(t),
+		"messaging-event":          validEventJSON(t),
+		"negotiation-snapshot":     validSnapshotJSON(t),
+		"stored-ack":               validStoredAckJSON(t),
+		"mailbox-capability-grant": validMailboxGrantJSON(t),
+		"mailbox-access-request":   validMailboxRequestJSON(t),
+		"conformance-report":       validConformanceReportJSON(t),
+		"mls-device-credential":    validMLSCredentialJSON(t),
+		"encrypted-attachment":     validEncryptedAttachmentJSON(t),
 	}
 	baselineTargets := make([]string, 0, len(jsonBaselines))
 	for target := range jsonBaselines {
@@ -244,10 +255,12 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	// Verify layer. Each baseline must itself pass its verifier, or the
 	// mutations prove nothing -- the same discipline the decode baselines get.
 	verifyBaselines := map[string][]byte{
-		"prekey-bundle-binding":    boundBundleJSON(t),
-		"mls-credential-binding":   boundMLSCredentialJSON(t),
-		"reachability-observation": validObservationJSON(t),
-		"reachability-trial":       validTrialJSON(t),
+		"mailbox-capability-grant-binding": validMailboxGrantJSON(t),
+		"mailbox-access-request-binding":   validMailboxRequestJSON(t),
+		"prekey-bundle-binding":            boundBundleJSON(t),
+		"mls-credential-binding":           boundMLSCredentialJSON(t),
+		"reachability-observation":         validObservationJSON(t),
+		"reachability-trial":               validTrialJSON(t),
 	}
 	for target, valid := range verifyBaselines {
 		verify, known := verifiers[target]
@@ -258,6 +271,13 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 			t.Fatalf("the %s verify baseline does not pass: %v", target, err)
 		}
 	}
+
+	addVerify("mailbox-capability-grant-binding/tampered-endpoint-signature", "mailbox-capability-grant-binding",
+		tamperedMailboxGrantSignatureJSON(t),
+		"a grant whose signature is not the finalized Endpoint's over this exact Relay, mailbox, capability key, and operation set grants no authority")
+	addVerify("mailbox-access-request-binding/tampered-capability-signature", "mailbox-access-request-binding",
+		tamperedMailboxRequestSignatureJSON(t),
+		"an operation request whose signature is not the scoped capability key's over its exact body and nonce grants no mailbox access")
 
 	// A prekey bundle can decode and even carry a valid signature and still be
 	// refused when bound: a forged signature, a bundle outliving its
@@ -370,6 +390,67 @@ func validStoredAckJSON(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	raw, err := mailbox.EncodeAckJSON(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func validMailboxGrant(t *testing.T) mailbox.CapabilityGrant {
+	t.Helper()
+	del := delegation(t)
+	grant, err := mailbox.SignGrant(mailbox.CapabilityGrant{
+		NetworkID:              del.Network.NetworkId,
+		GenesisRootHash:        del.Network.GenesisRootHash,
+		GenesisFileHash:        del.Network.GenesisFileHash,
+		AgentID:                del.AgentID,
+		EndpointID:             del.EndpointID,
+		RelayPublicKeyHex:      hex.EncodeToString(mailboxRelayKey().Public().(ed25519.PublicKey)),
+		MailboxID:              "mbx_" + strings.Repeat("5a", 32),
+		CapabilityPublicKeyHex: hex.EncodeToString(mailboxCapabilityKey().Public().(ed25519.PublicKey)),
+		Operations:             []mailbox.Operation{mailbox.OperationDelete, mailbox.OperationDeposit, mailbox.OperationRead},
+		IssuedAtUnix:           baseUnix,
+		ExpiresAtUnix:          baseUnix + 3600,
+	}, endpointKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return grant
+}
+
+func validMailboxGrantJSON(t *testing.T) []byte {
+	t.Helper()
+	raw, err := mailbox.EncodeGrantJSON(validMailboxGrant(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func validMailboxRequestJSON(t *testing.T) []byte {
+	t.Helper()
+	grant := validMailboxGrant(t)
+	grantDigest, err := mailbox.GrantDigest(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyDigest, err := mailbox.ReadBodyDigest(grant.MailboxID, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := mailbox.SignAccessRequest(mailbox.AccessRequest{
+		GrantDigest:   grantDigest,
+		Operation:     mailbox.OperationRead,
+		MailboxID:     grant.MailboxID,
+		BodyDigest:    bodyDigest,
+		NonceHex:      strings.Repeat("66", 32),
+		IssuedAtUnix:  baseUnix + 10,
+		ExpiresAtUnix: baseUnix + 70,
+	}, mailboxCapabilityKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := mailbox.EncodeAccessRequestJSON(request)
 	if err != nil {
 		t.Fatal(err)
 	}

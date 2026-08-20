@@ -43,10 +43,13 @@ Relays may deliver these bytes, but Relay order never chooses a commit.
 
 ## Still open — why this remains 🟡
 
-- selection and review of an RFC 9420 library, plus a concrete `group.Driver`;
-- the BasicCredential identity bytes and network-bound MLS group identifier,
-  which cannot freeze before the genesis-hash representation decision;
-- the room-authority / authorised-committer rule;
+- integrate and review OpenMLS behind a concrete `group.Driver`; suite `0x0001`
+  is selected, but the cryptographic Driver is not yet integrated;
+- specify the BasicCredential identity bytes and network-bound MLS group
+  identifier using the decided raw-32-byte canonical genesis hashes and commit
+  new domains, schemas, and positive/adversarial vectors;
+- enforce the selected single current-authority Agent rule and its explicit,
+  current-authority-signed, single-step transfer;
 - real MLS founding, join/no-past, remove/no-future, exporter separation and
   PCS vectors executed through the selected Driver;
 - offline multi-Relay catch-up using the eventual post-M0-R transport;

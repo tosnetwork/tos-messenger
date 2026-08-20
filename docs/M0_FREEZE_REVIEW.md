@@ -10,13 +10,12 @@ committing to, what is now true, and what is not. The last column of every
 table is the one that matters, because a readiness document that only lists
 what was finished is an advertisement.
 
-**Verdict from this side: not ready.** Four items are open. Three block the
-freeze directly; the reachability study is separate and blocks M1 scope freeze
-and start rather than this review. None can be declared closed by this
-implementation alone: the genesis-hash representation crosses repositories,
-the suite needs owner ratification and independent cryptographic review, the
-vectors need a second implementation, and real reachability evidence needs
-independent operators and networks.
+**Verdict from this side: not ready.** The genesis-hash representation and the
+one-to-one construction choice were decided on 2026-08-20. Two evidence items
+still block the freeze directly: independent cryptographic review and a
+second-language implementation report. The reachability study is separate and
+blocks M1 scope freeze and start rather than this review; it needs independent
+operators and networks.
 
 ## What a freeze would fix
 
@@ -52,15 +51,13 @@ that closed it so a reviewer can check the code instead of the claim.
 
 ## Not closed, and why
 
-### 1. Two representations of a network domain — blocks the freeze directly
+### 1. Canonical network representation — decision closed, migration open
 
-Genesis hashes are bare hex here and `sha256:`-prefixed in the protocol SDK.
-`tosaddr.normalize` converts at the boundary and both sides work, but the
-network domain is committed by a delegation digest, an endpoint identifier, a
-descriptor, an Event identifier, an end-to-end binding and an account address.
-Whichever form is frozen, the other set of vectors is wrong. **This has to be
-decided before anything is frozen, and it is not this repository's decision to
-make alone.**
+Genesis hashes are raw 32-byte values in canonical preimages and lowercase bare
+hex in strict JSON. `sha256:` is SDK boundary syntax only. Every candidate
+preimage must now be audited against that rule; a mismatch takes an explicit
+schema/domain bump and regenerated vectors. That migration must finish before
+freeze, but representation is no longer an owner decision.
 
 ### 2. The reachability study has never been run — blocks M1, not the freeze
 
@@ -74,16 +71,17 @@ scripted in [`M0R_PILOT_RUNBOOK.md`](M0R_PILOT_RUNBOOK.md) and is expected
 to end `insufficient-evidence`. The architecture makes the route decision a
 prerequisite for *starting* M1 rather than for accepting it.
 
-### 3. Encryption suite awaits owner ratification
+### 3. Encryption construction approved; independent review remains
 
 `pkg/e2ee` now implements the candidate recommended in
 [`E2EE_SUITE_DECISION.md`](E2EE_SUITE_DECISION.md): an endpoint-authenticated,
 X3DH-shaped X25519 prekey handshake, HKDF/HMAC-SHA-256, AES-256-GCM, and the
 Double Ratchet. It clears the fourteen-property refutation harness and carries
 deterministic positive and adversarial wire vectors, with the primitives
-cross-checked against published RFC and NIST known answers. This closes the
-codeable implementation gap, not the freeze decision: the owner has not
-ratified the suite, and no independent implementation has consumed its vectors.
+cross-checked against published RFC and NIST known answers. This closes
+algorithm selection and the codeable implementation gap, not the wire freeze:
+independent review is incomplete and no independent implementation has consumed
+its vectors.
 
 ### 4. No second implementation report exists
 

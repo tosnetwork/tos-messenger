@@ -87,6 +87,7 @@ than silently forking two implementations.
 | Commitment authority | Finalize resolves the Accepted Quote from finalized state and compares it field by field; a well-formed digest is not a commitment | `negotiation.QuoteResolver` |
 | Network binding at finalisation | a negotiation is bound to an expected TOS network when it is created, and Finalize accepts a resolved quote only if the quote's network equals that binding -- the network id and both genesis hashes, because the same workchain, account and code hashes can exist on another network and a network id alone is not identity. The binding is persisted and restored so it survives a restart, and a mismatch settles the exchange to rejected | `negotiation.New`, `negotiation.Finalize`, `negotiation.Snapshot` |
 | Network in the canonical digests | the deeper half of the binding above, now closed: the asset carries the network identity (id and both genesis hashes, bare hex) and commits it in its canonical form, so the terms, mandate, and budget preimages all inherit it -- identical terms on two networks are two digests, and a cross-network replay fails cryptographically rather than only at the runtime equality check, which is kept as the second lock. The break is marked loudly: the terms, mandate, and both budget domain separators moved to v2, and the payload schemas that carry terms on the wire moved with them. Terms priced on a network other than the negotiation's binding are refused at proposal, counter, snapshot decode, and quote validation | `negotiation.Network`, `negotiation.Asset`, `canon.DomainNegotiationTerms`, `canon.DomainMandate`, `negotiation.bindsNetwork` |
+| Canonical genesis-hash representation | 32 raw bytes in canonical preimages and 64 lowercase bare hex in strict JSON. `sha256:` is accepted only at SDK boundaries and normalized before signing or hashing; an existing alternate preimage takes an explicit schema/domain bump rather than reinterpretation | [`FIRST_PRINCIPLES_DECISIONS.md`](FIRST_PRINCIPLES_DECISIONS.md), `tosaddr` |
 | Negotiation durability | every transition is written down before it is reported, and a negotiation cannot start without somewhere to survive; a restart that lost the state while the budget hold stayed would leave money spoken for by an exchange nobody could find | `negotiation.Store`, `eventlog.NegotiationStore` |
 | Mandate reference | a snapshot names the mandate by digest rather than copying it, so an exchange does not resume under an authority that was withdrawn or replaced | `negotiation.Restore` |
 | Budget durability | reservations and spend are written whole to a per-asset ledger, so a restart cannot let the same money back a second commitment; a commit-authority mandate cannot start without one | `negotiation.OpenBudget`, `eventlog.BudgetLedger` |
@@ -104,7 +105,7 @@ than silently forking two implementations.
 | Capability class is caller-attested | the canonical on-chain quote (`QuoteProposalV1`) carries no capability class: the capability identifier is a content hash that already determines it, so committing the class again would be redundant. The resolver therefore takes the class from the same `EscrowLocator` that maps the commitment to its escrow, alongside the address, rather than reading it from the chain — the Messenger's commerce core is unchanged, and the class is authorised separately through the mandate | `chainquote.mapTerms`, `chainquote.EscrowLocator` |
 | Multi-device fan-out | one logical event, one content-addressed identity, one sealed copy to every live device of the recipient and of the sender; an expired bundle bootstraps nothing but does not close an established session | `e2ee.FanOut` |
 | Room membership epoch | membership is a sorted Agent set; every add or remove advances a monotonic epoch by exactly one and commits a domain-separated digest over the room, epoch, count, and members. The epoch inside the preimage is what stops an old membership being replayed as a current one. A removed member is absent, not revoked — an Agent legitimately returns, unlike a device key, so re-adding is an ordinary add at a fresh epoch | `pkg/room`, `eventlog.RoomLedger` |
-| Room succession scope | the ledger accepts only strict single-step succession (epoch *n*+1 derived from the members of epoch *n*), because it holds only the current member set and each successor is derived from it; a gapped or peer-observed commit carries no member set to verify. Reconciling membership a peer drove independently is deferred to the room-authority decision below | `eventlog.RoomLedger.Advance` |
+| Room succession scope | the ledger accepts only strict single-step succession (epoch *n*+1 derived from the members of epoch *n*), because it holds only the current member set and each successor is derived from it; a gapped or peer-observed commit carries no member set to verify. The selected single-authority model refuses concurrent peer-driven membership histories instead of reconciling them; signed authority-transfer enforcement remains implementation work | `eventlog.RoomLedger.Advance`, [`FIRST_PRINCIPLES_DECISIONS.md`](FIRST_PRINCIPLES_DECISIONS.md) |
 | Private-room construction choice | MLS 1.0 / RFC 9420 (TreeKEM) is selected instead of a TOS-specific group ratchet. The application-side candidate now implements two clocks, endpoint-authorised per-device Leaf/KeyPackage publication with candidate vectors, succession planning, and durable opaque state/receipt ancestry. The TOS-MLS wire profile is still not frozen: a reviewed RFC 9420 Driver, BasicCredential/group-id canonical bytes, cryptographic MLS vectors, real Relay catch-up, independent review, and second-implementation evidence remain open | [`ROADMAP.md`](ROADMAP.md), [`TOS_MLS_CANDIDATE.md`](TOS_MLS_CANDIDATE.md), `pkg/group` |
 | Account binding | the account a finalized Agent record came from is recomputed from the network, object identifier, registry code and workchain, and compared; a chain policy without a locator cannot validate | `identity.ChainPolicy.Locator`, `tosaddr.Locator` |
 | Addressing rules | called through the protocol SDK rather than reimplemented, because a second implementation of an addressing rule can drift and a drifted check refuses correct state | `tosaddr` |
@@ -128,7 +129,10 @@ than silently forking two implementations.
 | Shared-key exclusion | an endpoint key seen under more than one operator has all of its trials dropped and the key reported | `reachability.Aggregate` |
 | Operator identity | opaque `op_` prefix over a digest of a local operator name, so diversity is counted without collecting identity | `reachability.OperatorID` |
 | Suite identifier form | `tos.messaging.e2ee.<name>.v<n>`, so a suite can be negotiated, deprecated, and upgraded | `e2ee.AlgorithmPattern` |
-| Default one-to-one suite candidate | `tos.messaging.e2ee.x3dh-aes256gcm-dr.v1`: endpoint-signed X25519 identity + signed-prekey material, a three-DH asynchronous handshake, HKDF/HMAC-SHA-256, AES-256-GCM, and the Double Ratchet. Implemented and vectored for review, not frozen until owner ratification | `e2ee.NewDefaultSuite`, [`E2EE_SUITE_DECISION.md`](E2EE_SUITE_DECISION.md) |
+| Default one-to-one suite construction | `tos.messaging.e2ee.x3dh-aes256gcm-dr.v1`: endpoint-signed X25519 identity + signed-prekey material, a three-DH asynchronous handshake, HKDF/HMAC-SHA-256, AES-256-GCM, and the Double Ratchet. Construction approved on 2026-08-20; wire freeze still requires independent review and second-language vector consumption | `e2ee.NewDefaultSuite`, [`E2EE_SUITE_DECISION.md`](E2EE_SUITE_DECISION.md) |
+| Private-room membership authority | one current authority Agent serializes membership; the creator starts as authority and only a current-authority-signed single-step epoch can transfer it. Concurrent children and Relay-order authority are refused; loss creates a new room rather than an implicit consensus protocol | `pkg/room`, `eventlog.RoomLedger`, [`FIRST_PRINCIPLES_DECISIONS.md`](FIRST_PRINCIPLES_DECISIONS.md) |
+| First-contact default | allow-list known contacts, one-time invite-token introductions, and owner hold otherwise; the same policy precedes durable acceptance on direct and Relay paths. No PoW without measurements and no Inbox Bond before the Expansion Gate | `admission.ContactPolicy`, [`FIRST_PRINCIPLES_DECISIONS.md`](FIRST_PRINCIPLES_DECISIONS.md) |
+| Mailbox operation authority | Endpoint-signed, Relay/mailbox-scoped Ed25519 capability grants with separate deposit/read/delete permissions; every request signs an exact body digest and fresh nonce claimed durably before the operation. Mailbox IDs and StoredAcks are not bearer credentials | `pkg/mailbox`, [`MAILBOX_AUTHENTICATION.md`](MAILBOX_AUTHENTICATION.md) |
 | Ciphertext binding | network tuple, suite, conversation, and both sides' Agent, endpoint, and device identifiers, with direction included | `e2ee.Binding` |
 | Ciphertext expansion bound | at most 512 bytes over the plaintext | `e2ee.MaxCiphertextOverheadBytes` |
 | Prekey bundle bounds | material at most 4 KiB, lifetime at most 30 days, at most 16 devices per published set | `pkg/e2ee` constants |
@@ -145,50 +149,40 @@ than silently forking two implementations.
 | Coordinator limits | 5 minute pairing TTL, 4096 pairings, 600 requests per source address per minute | `probe.CoordinatorOptions` defaults |
 | Tunnel relay limits | 2 minute idle session TTL, 4096 sessions, 1 MiB forwarded per session; a registration completes only by echoing a token the relay sent to the claimed source address, control requests are padded to a 128-byte floor no response exceeds, and forwarding is verbatim between the two proven endpoints of one session | `probe.TunnelRelayOptions` defaults, `probe.TunnelRequestFloor` |
 
-## Named but not established
+## Closed representation decision and still-unestablished boundaries
 
 The firewall governs proposals to act. It cannot govern what a model concludes
 from text it reads, and nothing in it should be read as preventing prompt
 injection. What it prevents is a conclusion becoming a payment, a signature, or
 a configuration change without a person.
 
-The genesis hashes in a network domain are carried here as bare hex and by the
-protocol SDK with a `sha256:` prefix. Both describe the same 32 bytes, and
-`tosaddr.normalize` converts at the boundary rather than reinterpreting either
-side's field. Which form the protocol freezes on is open. The commerce digests
-(`negotiation.Network`, folded through the asset into terms, mandate, and
-budget preimages) commit the bare-hex form this repository validates and
-persists; if the freeze lands on the prefixed form, those domains take another
-version bump rather than a silent reinterpretation.
+Genesis hashes now have one canonical meaning: raw 32 bytes in preimages and
+bare lowercase hex in strict JSON. SDK-prefixed input is boundary syntax only.
+Applying that decision to every candidate preimage, regenerating vectors, and
+versioning any preimage that previously committed another representation is
+implementation work, not a remaining design choice.
 
 ## Not proposed here
 
 These remain entirely open, and this repository deliberately contains no
 implementation of them:
 
-- ratification of the one-to-one end-to-end encryption suite and the hybrid
-  post-quantum migration schedule. `pkg/e2ee` now implements and vectors the
-  default candidate in [`E2EE_SUITE_DECISION.md`](E2EE_SUITE_DECISION.md), but
-  its identifier remains a proposal until the owner ratifies it; the hybrid
-  successor and downgrade rules remain open;
+- final wire freeze of the approved one-to-one construction, which still needs
+  independent review and second-language vector evidence. A hybrid
+  post-quantum successor and its downgrade rules remain a separate version;
 - the TOS-MLS v1 cryptographic implementation and wire freeze. MLS 1.0 / RFC
   9420 is selected, and `pkg/group` now supplies the application-side two-clock
   adapter, distinct endpoint-authorised device leaf credentials/KeyPackages,
   candidate vectors and succession plan; `eventlog.MLSLedger` durably records
   opaque state, globally consumed KeyPackages, Welcomes and commit ancestry.
-  Still open are a reviewed RFC 9420 Driver, BasicCredential and group-id bytes
-  after the genesis-hash decision, real cryptographic/Relay acceptance vectors,
+  Still open are an OpenMLS-backed RFC 9420 Driver, BasicCredential and group-id
+  bytes applying the canonical network decision, real cryptographic/Relay acceptance vectors,
   independent review, and second-implementation evidence;
-- the room-authority model — whether a room's membership is driven by a single
-  owner or by member consensus — which decides how a participant reconciles a
-  membership epoch another party advanced while it was offline. Until it is
-  settled, `eventlog.RoomLedger` accepts only strict single-step succession it
-  can verify from the member set it holds;
+- enforcement of the selected single-authority room model, including signed
+  authority transfer and offline reconciliation;
 - private-room transport, beyond the per-device fan-out default;
-- first-contact admission parameters, including whether an economic bond is
-  used, which the current fixed-price software-work escrow cannot express.
-  `admission.ContactPolicy` fixes that a policy is consulted and its answer
-  honoured, and leaves the answer itself open;
+- concrete one-time invite-token encoding and direct/Relay parity tests for the
+  selected allow-list/invite/owner-hold first-contact default;
 - prekey publication, replenishment, and equivocation detection;
 - Mailbox Relay sender privacy, quota tokens, and anti-spam model;
 - mobile push privacy within the contentless wake-up constraint; and

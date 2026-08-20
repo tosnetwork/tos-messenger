@@ -74,6 +74,17 @@
     "canonical_sha256": "sha256:465ec6e1c3061c251e6ce3a79eb40832dfdda63d3f9b92a359676de5a0088633"
   },
   {
+    "name": "mailbox-capability-grant",
+    "wire": "{\"schema\":\"tos.messaging.mailbox-capability-grant.v1\",\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agent_id\":\"agent_2222222222222222222222222222222222222222222222222222222222222222\",\"messaging_endpoint_id\":\"mep_6c7473e1342507dc13e60a2f92ca8d5ee2e445c0314ae50e5f52ac1178cd1196\",\"relay_public_key_hex\":\"c6822637c7d310ec57627be00ba259d253749f4aaf644470cffbe53a35f73242\",\"opaque_mailbox_id\":\"mbx_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"capability_public_key_hex\":\"d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48\",\"operations\":[\"delete\",\"deposit\",\"read\"],\"issued_at_unix\":1800000000,\"expires_at_unix\":1800003600,\"endpoint_signature_hex\":\"9d52e160cfb0c0d0f3b434f01ded56b3670008d927feeb074d81e04b9852abc1af4bb6eddbb58f3d4babe72affc34db29df6dc4caefb9d824fc520a2a10bca0a\"}",
+    "canonical_sha256": "sha256:7b7381328bbe9cae80408d69ef4eee74b57ed6891e628f060e95d76843324d0d",
+    "digest": "sha256:7b7381328bbe9cae80408d69ef4eee74b57ed6891e628f060e95d76843324d0d"
+  },
+  {
+    "name": "mailbox-access-request",
+    "wire": "{\"schema\":\"tos.messaging.mailbox-access-request.v1\",\"grant_digest\":\"sha256:7b7381328bbe9cae80408d69ef4eee74b57ed6891e628f060e95d76843324d0d\",\"operation\":\"read\",\"opaque_mailbox_id\":\"mbx_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"body_digest\":\"sha256:c1659b66de6302a3c67ef35d523778c8ad1eaef52e2821f46c14093b7d40fddf\",\"nonce_hex\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"issued_at_unix\":1800000010,\"expires_at_unix\":1800000070,\"capability_signature_hex\":\"5a7a2d06d3d401885361fbe83c45deea0081a6981886998b006ece575cefeda063a3a98debc25436b36ad5b8e8d9d64530af7e51c091e8dbb6190f9d7c8bc201\"}",
+    "canonical_sha256": "sha256:c86358a82f605f9554d3f1a03d67de98d5cc8125e96b2df4884210fef6ab09f7"
+  },
+  {
     "name": "conformance-report",
     "wire": "{\"schema\":\"tos.messaging.conformance-report.v1\",\"implementation\":\"example.org/independent-messenger\",\"implementation_commit\":\"release-1\",\"toolchain\":\"rustc-1.90\",\"run_at_unix\":1800000012,\"artifacts\":[{\"name\":\"adversarial\",\"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\"},{\"name\":\"e2ee\",\"sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\"},{\"name\":\"objects\",\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\"}],\"positive_checks\":12,\"adversarial_checks\":44,\"consumer_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"signature_hex\":\"004f9c7cd2acc10590948f93e9f2d9cdc8725b1acc07cd11001f36d6ce3c005772ea459f3d70adad9abb0f09f6f0cdfed52c234cf859124643c1a57a626e1b0c\"}",
     "canonical_sha256": "sha256:f7212dde836439ded68e0910fd4f3f35d6e0fea15898465c9b59f698de08bf43"

@@ -1,9 +1,10 @@
 # One-to-one E2EE suite decision package
 
-This document recommends the first concrete suite for owner review. It is a
-candidate, not a protocol freeze: the identifier and construction become a
-wire commitment only after the owner ratifies this package. Until then the
-roadmap stays partial and negotiation must not treat the candidate as frozen.
+The owner approved this construction on 2026-08-20. That closes algorithm
+selection, not the protocol freeze: the identifier becomes a wire commitment
+only after independent cryptographic review and second-language consumption of
+the committed vectors. Until then the roadmap stays partial and negotiation
+must not treat the candidate as frozen.
 
 ## Recommendation
 
@@ -40,7 +41,7 @@ The alternatives do not clear that floor as directly:
 | X3DH-shaped prekeys + Double Ratchet | Strong | Recommended; asynchronous and designed for independently advancing message state |
 | HPKE per message | Partial | Good sealed-message primitive, but replay state, ongoing forward secrecy, and post-compromise recovery would still need a ratchet design |
 | Noise handshake + symmetric ratchet | Partial | Strong online session establishment, but an offline recipient and recovery after compromise require additional protocol choices |
-| MLS used for a two-member group | Partial | Supplies group membership machinery the one-to-one profile does not need; it also couples this decision to the still-open room-authority decision |
+| MLS used for a two-member group | Partial | Supplies group membership machinery the one-to-one profile does not need and couples one-to-one sessions to private-room membership machinery |
 | Hybrid post-quantum prekeys | Deferred | Desirable migration direction, but freezes larger materials and a second KEM before the deployment and interoperability evidence exists |
 
 AES-256-GCM is chosen over adding a ChaCha20-Poly1305 dependency because the
@@ -136,22 +137,23 @@ if any wire byte changes. Separate known-answer tests cross-check X25519 against
 RFC 7748, HKDF-SHA-256 against RFC 5869, and AES-256-GCM against the published
 NIST zero-plaintext example.
 
-Passing these tests is necessary, not a cryptographic proof. Owner ratification
-should require an independent review of the composition and consumption of the
+Passing these tests is necessary, not a cryptographic proof. Final wire freeze
+requires an independent review of the composition and consumption of the
 committed vectors by a second implementation.
 
-## What ratification commits
+## What construction approval commits
 
-Ratifying this candidate freezes the suite identifier, public-material layout,
+The 2026-08-20 approval fixes the intended suite identifier, public-material layout,
 initial-message and ciphertext formats, DH ordering, KDF labels and output
 splits, AEAD and associated data, skipped-key bound, and the error distinctions
-the interface exposes. A change to any one of them requires a new algorithm
+the interface exposes. It does not label those bytes frozen before independent
+review and second-language vector consumption. A change to any one of them requires a new algorithm
 identifier and new positive and adversarial vectors. Opaque private material
 and persisted state may change encoding only when the implementation can
 migrate its own durable values without changing those wire results.
 
-Ratification does not freeze a route order, a transport binding, a group suite,
-the genesis-hash representation, or a post-quantum migration schedule. This
+Wire freeze does not freeze a route order, a transport binding, a group suite,
+or a post-quantum migration schedule. This
 implementation remains route-independent, and nothing here unblocks M1 before
 the M0-R finding exists.
 

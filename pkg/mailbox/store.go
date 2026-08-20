@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	recordSchema   = "tos.messaging.mailbox-record.v1"
-	lockName       = ".mailbox-relay.lock"
-	mailboxesDir   = "mailboxes"
-	MaxListResults = 256
-	MaxRecordBytes = envelope.MaxCiphertextBytes + 2048
+	recordSchema    = "tos.messaging.mailbox-record.v1"
+	lockName        = ".mailbox-relay.lock"
+	mailboxesDir    = "mailboxes"
+	accessClaimsDir = "access-claims"
+	MaxListResults  = 256
+	MaxRecordBytes  = envelope.MaxCiphertextBytes + 2048
 )
 
 var (
@@ -113,11 +114,26 @@ func Open(root string, quota Quota, key ed25519.PrivateKey) (*Store, error) {
 	if err != nil || !mailboxesInfo.IsDir() || mailboxesInfo.Mode().Perm() != 0o700 || mailboxesInfo.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("invalid Mailbox Relay mailboxes directory")
 	}
+	claims := filepath.Join(root, accessClaimsDir)
+	if err := os.Mkdir(claims, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return nil, errors.New("create Mailbox Relay access claims")
+	}
+	claimsInfo, err := os.Lstat(claims)
+	if err != nil || !claimsInfo.IsDir() || claimsInfo.Mode().Perm() != 0o700 || claimsInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("invalid Mailbox Relay access claims directory")
+	}
 	lock, err := dirlock.Acquire(root, lockName)
 	if err != nil {
 		return nil, err
 	}
 	return &Store{root: root, quota: quota, key: append(ed25519.PrivateKey(nil), key...), lock: lock}, nil
+}
+
+func (s *Store) RelayPublicKey() ed25519.PublicKey {
+	if s == nil || len(s.key) != ed25519.PrivateKeySize {
+		return nil
+	}
+	return append(ed25519.PublicKey(nil), s.key.Public().(ed25519.PublicKey)...)
 }
 
 func (s *Store) Close() error {

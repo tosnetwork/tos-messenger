@@ -138,6 +138,15 @@ const (
 	DomainAttachmentManifest = "tos.messaging.attachment-manifest.v1\x00"
 	// DomainAgentPacketClaim namespaces a durable sender+nonce replay claim.
 	DomainAgentPacketClaim = "tos.messaging.agent-packet-claim.v1\x00"
+	// DomainMailboxCapabilityGrant namespaces one Endpoint-signed capability
+	// key and its exact Relay, mailbox, operation and lifetime scope.
+	DomainMailboxCapabilityGrant = "tos.messaging.mailbox-capability-grant.v1\x00"
+	// DomainMailboxAccessRequest namespaces one capability-signed operation.
+	DomainMailboxAccessRequest = "tos.messaging.mailbox-access-request.v1\x00"
+	// DomainMailboxOperationBody namespaces the body digest a request signs.
+	DomainMailboxOperationBody = "tos.messaging.mailbox-operation-body.v1\x00"
+	// DomainMailboxAccessClaim namespaces the durable grant+nonce replay key.
+	DomainMailboxAccessClaim = "tos.messaging.mailbox-access-claim.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -172,6 +181,10 @@ var Domains = []string{
 	DomainAttachmentChunk,
 	DomainAttachmentManifest,
 	DomainAgentPacketClaim,
+	DomainMailboxCapabilityGrant,
+	DomainMailboxAccessRequest,
+	DomainMailboxOperationBody,
+	DomainMailboxAccessClaim,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainNegotiationRecord,

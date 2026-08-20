@@ -12,6 +12,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/group"
+	"github.com/tosnetwork/tos-messenger/pkg/mailbox"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 )
@@ -93,6 +94,26 @@ func buildVerifiers(t *testing.T) map[string]func([]byte) error {
 	now := verifyNow()
 	policy := trialPolicy(t)
 	return map[string]func([]byte) error{
+		"mailbox-capability-grant-binding": func(b []byte) error {
+			grant, err := mailbox.DecodeGrantJSON(b)
+			if err != nil {
+				return err
+			}
+			return mailbox.VerifyGrant(grant, endpointKey().Public().(ed25519.PublicKey),
+				mailboxRelayKey().Public().(ed25519.PublicKey), now)
+		},
+		"mailbox-access-request-binding": func(b []byte) error {
+			request, err := mailbox.DecodeAccessRequestJSON(b)
+			if err != nil {
+				return err
+			}
+			grant := validMailboxGrant(t)
+			bodyDigest, err := mailbox.ReadBodyDigest(grant.MailboxID, 25)
+			if err != nil {
+				return err
+			}
+			return mailbox.VerifyAccessRequest(grant, request, mailbox.OperationRead, bodyDigest, now)
+		},
 		"prekey-bundle-binding": func(b []byte) error {
 			bundle, err := e2ee.DecodeBundleJSON(b)
 			if err != nil {
@@ -148,6 +169,14 @@ func buildVerifiers(t *testing.T) map[string]func([]byte) error {
 // case, the exact confusion this split exists to prevent.
 func verifyDecoders() map[string]func([]byte) error {
 	return map[string]func([]byte) error{
+		"mailbox-capability-grant-binding": func(b []byte) error {
+			_, err := mailbox.DecodeGrantJSON(b)
+			return err
+		},
+		"mailbox-access-request-binding": func(b []byte) error {
+			_, err := mailbox.DecodeAccessRequestJSON(b)
+			return err
+		},
 		"prekey-bundle-binding":         func(b []byte) error { _, err := e2ee.DecodeBundleJSON(b); return err },
 		"mls-credential-binding":        func(b []byte) error { _, err := group.DecodeDeviceCredentialJSON(b); return err },
 		"messaging-event-network-route": func(b []byte) error { _, err := envelope.DecodeEventJSON(b); return err },
@@ -157,6 +186,42 @@ func verifyDecoders() map[string]func([]byte) error {
 		},
 		"reachability-trial": func(b []byte) error { _, err := reachability.DecodeTrialJSON(b); return err },
 	}
+}
+
+func tamperedMailboxGrantSignatureJSON(t *testing.T) string {
+	t.Helper()
+	grant := validMailboxGrant(t)
+	signature, err := hex.DecodeString(grant.EndpointSignatureHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature[0] ^= 0xff
+	grant.EndpointSignatureHex = hex.EncodeToString(signature)
+	raw, err := mailbox.EncodeGrantJSON(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func tamperedMailboxRequestSignatureJSON(t *testing.T) string {
+	t.Helper()
+	raw := validMailboxRequestJSON(t)
+	request, err := mailbox.DecodeAccessRequestJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := hex.DecodeString(request.CapabilitySignatureHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature[0] ^= 0xff
+	request.CapabilitySignatureHex = hex.EncodeToString(signature)
+	raw, err = mailbox.EncodeAccessRequestJSON(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 // signedBundle builds a bundle signed by the delegated endpoint key, applying a

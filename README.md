@@ -27,7 +27,7 @@ decision:
 | `pkg/identity` | Messaging Endpoint delegation: canonical bytes, digest, strict codec, and the verifier that resolves it against finalized Agent state |
 | `pkg/directory` | Signed Messaging Contact Descriptor, DHT locator/key mapping, and the route-neutral automatic refresh chain with finalized revocation and durable device-set admission |
 | `pkg/envelope` | Outer Relay Envelope and inner typed Messaging Event, including content-addressed Event IDs |
-| `pkg/mailbox` | Route-neutral offline storage state machine: crash-safe opaque envelope storage, signed StoredAck, quotas, expiry, retrieval deletion, and independently verified multi-Relay fan-out |
+| `pkg/mailbox` | Route-neutral offline storage state machine: crash-safe opaque envelope storage, Endpoint-authorized scoped capability grants, operation/body-bound requests with durable replay claims, signed StoredAck, quotas, expiry, retrieval deletion, and independently verified multi-Relay fan-out |
 | `pkg/attachments` | Route-neutral AES-256-GCM private attachment chunks, secret E2EE references, ordered ciphertext manifests, resume planning, recipient bounds, and fail-closed authentication |
 | `pkg/agentpacketbridge` | Exact Agent Packet V1 carriage through E2EE with finalized protocol verification, authenticated Event-sender binding, durable nonce replay claims, and pending receiver recovery |
 | `pkg/eventlog` | Single-writer durable journal: stored inbound events with pending recovery and application leases, outbound delivery state, retry schedule, and pruning |
@@ -41,7 +41,7 @@ decision:
 | `pkg/daemon` | Assembly: one state directory, one socket, one schedule |
 | `pkg/negotiation` | The layer between what an Agent says and what the system may do: mandates, exact amounts, the intent boundary, and the negotiation state machine |
 | `pkg/eventlog` (mandates, budgets, negotiations) | The owner's standing authorisations, placed and withdrawn on the owner's socket and resolved from the store when a spend is judged |
-| `pkg/e2ee` | The pure-state suite contract, message bindings and published prekeys, plus the implemented default candidate awaiting owner ratification |
+| `pkg/e2ee` | The pure-state suite contract, message bindings and published prekeys, plus the approved and implemented default construction awaiting independent review and second-language evidence before wire freeze |
 | `pkg/e2ee/conformance` | Refutes a candidate suite against fourteen black-box properties, including peer-prekey possession |
 | `pkg/e2ee` (devices) | The multi-device model: device-set succession with rollback and revocation defences, deterministic per-pair session identifiers, and the per-event fan-out to every live device of both parties |
 | `pkg/group` | TOS-MLS candidate application adapter: explicit room/MLS clocks, endpoint-authorised per-device leaf credentials, device succession planning, and the boundary for a reviewed RFC 9420 library; no home-grown MLS cryptography |
@@ -74,15 +74,16 @@ Commands:
 
 Deliberately absent, with the reason:
 
-- **a frozen cryptographic construction** — the default candidate and its
-  vectors exist, but the suite remains a protocol-freeze decision until the
-  owner ratifies [`docs/E2EE_SUITE_DECISION.md`](docs/E2EE_SUITE_DECISION.md);
+- **a frozen cryptographic wire suite** — the construction is approved and its
+  vectors exist, but independent cryptographic review and second-language
+  consumption are still required by [`docs/E2EE_SUITE_DECISION.md`](docs/E2EE_SUITE_DECISION.md);
 - **any transport** — direct, tunnel, Relay, and HTTPS ordering is frozen only
   after the reachability study, which is why the study tooling is here and the
   transport is not;
 - **a network-bound Mailbox Relay service, rooms, channels, clients** — the
-  route-neutral Mailbox store and redundancy contract exist, while listener,
-  retrieval authentication, and transport binding wait for the route decision;
+  route-neutral Mailbox store, scoped authentication core, and redundancy
+  contract exist, while the finalized-state adapter, listener, and transport
+  binding remain;
 - **Relay lease, inbox bond, and any other commercial profile** — locked behind
   the Expansion Gate in the governing roadmap.
 
