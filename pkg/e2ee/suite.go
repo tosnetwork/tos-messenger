@@ -1,12 +1,12 @@
 // Package e2ee defines the contract a candidate end-to-end encryption profile
 // must satisfy, and the bindings that tie one ciphertext to one conversation.
 //
-// It contains no cryptography. The suite is a protocol-freeze decision, and
-// the architecture is explicit that no new cipher, MAC, signature, or ratchet
-// construction may be invented on the way there. What can be settled before
-// that decision is everything around it: what a candidate must provide, what a
-// ciphertext is bound to, what published material commits, how a candidate is
-// refuted, and how session state survives a crash.
+// It carries a concrete default candidate, but that candidate remains a
+// protocol-freeze decision: its presence is implementation evidence, not owner
+// ratification. The package invents no cipher, MAC, signature, or ratchet. It
+// fixes what the candidate provides, what a ciphertext is bound to, what
+// published material commits, how a candidate is refuted, and how session
+// state survives a crash.
 //
 // The last of those is why the interface is a pure state transition rather
 // than a mutable session object. A session that advances in memory has two
@@ -79,12 +79,15 @@ type Suite interface {
 	// the private state that answers it.
 	NewPrekeyMaterial() (public []byte, private []byte, err error)
 
-	// Initiate starts a session against published material, returning the
-	// session state and the initial message the peer needs.
-	Initiate(peerPublic []byte, binding []byte) (State, []byte, error)
+	// Initiate starts a session using this device's private prekey material and
+	// the peer's published material. Requiring both is the possession proof
+	// behind the identities in the binding; published material alone would let
+	// anyone initiate while claiming to be any delegated endpoint.
+	Initiate(private []byte, peerPublic []byte, binding []byte) (State, []byte, error)
 
-	// Accept completes a session from an initial message.
-	Accept(private []byte, initial []byte, binding []byte) (State, error)
+	// Accept completes a session from an initial message and the initiator's
+	// independently fetched, endpoint-signed published material.
+	Accept(private []byte, peerPublic []byte, initial []byte, binding []byte) (State, error)
 
 	// Seal encrypts under a binding and returns the state that must be durable
 	// before the ciphertext is released.

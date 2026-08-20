@@ -52,11 +52,11 @@ func (c countingSuite) NewPrekeyMaterial() ([]byte, []byte, error) {
 	return []byte("public"), []byte("private"), nil
 }
 
-func (c countingSuite) Initiate([]byte, []byte) (e2ee.State, []byte, error) {
+func (c countingSuite) Initiate([]byte, []byte, []byte) (e2ee.State, []byte, error) {
 	return e2ee.State(make([]byte, 8)), []byte("initial"), nil
 }
 
-func (c countingSuite) Accept([]byte, []byte, []byte) (e2ee.State, error) {
+func (c countingSuite) Accept([]byte, []byte, []byte, []byte) (e2ee.State, error) {
 	return e2ee.State(make([]byte, 8)), nil
 }
 

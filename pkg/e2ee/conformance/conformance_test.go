@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
@@ -21,6 +23,7 @@ import (
 type double struct {
 	algorithm     string
 	ignoreBinding bool
+	ignorePeer    bool
 	allowReplay   bool
 	panicOnSeal   bool
 }
@@ -32,6 +35,8 @@ type doubleState struct {
 	Send uint64   `json:"send"`
 	Seen []uint64 `json:"seen,omitempty"`
 }
+
+var doubleMaterialCounter atomic.Uint64
 
 func encodeState(state doubleState) e2ee.State {
 	encoded, err := json.Marshal(state)
@@ -52,16 +57,25 @@ func decodeState(raw e2ee.State) (doubleState, error) {
 func (d double) AlgorithmID() string { return d.algorithm }
 
 func (d double) NewPrekeyMaterial() ([]byte, []byte, error) {
-	material := sha256.Sum256([]byte("test double material"))
+	sequence := doubleMaterialCounter.Add(1)
+	material := sha256.Sum256([]byte(fmt.Sprintf("test double material %d", sequence)))
 	return material[:], material[:], nil
 }
 
-func (d double) Initiate(peerPublic []byte, _ []byte) (e2ee.State, []byte, error) {
-	return encodeState(doubleState{Key: append([]byte(nil), peerPublic...)}), []byte("initial"), nil
+func (d double) Initiate(private []byte, peerPublic []byte, _ []byte) (e2ee.State, []byte, error) {
+	if d.ignorePeer {
+		return encodeState(doubleState{Key: append([]byte(nil), peerPublic...)}), []byte("initial"), nil
+	}
+	key := sha256.Sum256(append(append([]byte(nil), private...), peerPublic...))
+	return encodeState(doubleState{Key: key[:]}), []byte("initial"), nil
 }
 
-func (d double) Accept(private []byte, _ []byte, _ []byte) (e2ee.State, error) {
-	return encodeState(doubleState{Key: append([]byte(nil), private...)}), nil
+func (d double) Accept(private []byte, peerPublic []byte, _ []byte, _ []byte) (e2ee.State, error) {
+	if d.ignorePeer {
+		return encodeState(doubleState{Key: append([]byte(nil), private...)}), nil
+	}
+	key := sha256.Sum256(append(append([]byte(nil), peerPublic...), private...))
+	return encodeState(doubleState{Key: key[:]}), nil
 }
 
 func (d double) KeyMaterial(raw e2ee.State) (e2ee.State, error) {
@@ -205,6 +219,11 @@ func TestUnboundCiphertextIsCaught(t *testing.T) {
 	assertFailures(t, result, CheckBindingEnforced, CheckPastTrafficSealed, CheckPostCompromise)
 }
 
+func TestUnauthenticatedPeerIsCaught(t *testing.T) {
+	result := Verify(double{algorithm: "tos.messaging.e2ee.test-double.v1", ignorePeer: true}, testBinding())
+	assertFailures(t, result, CheckPeerAuthentication, CheckPastTrafficSealed, CheckPostCompromise)
+}
+
 // Replay protection that does not live in the persisted state fails twice:
 // within a session and across a restart.
 func TestMissingReplayProtectionIsCaught(t *testing.T) {
@@ -253,7 +272,7 @@ func TestHarnessRefusesUnusableInput(t *testing.T) {
 func TestEveryCheckRuns(t *testing.T) {
 	result := Verify(double{algorithm: "tos.messaging.e2ee.test-double.v1"}, testBinding())
 	expected := []string{
-		CheckAlgorithmIdentifier, CheckAsyncEstablishment, CheckReverseDirection,
+		CheckAlgorithmIdentifier, CheckAsyncEstablishment, CheckPeerAuthentication, CheckReverseDirection,
 		CheckBindingEnforced, CheckTamperDetected, CheckReplayRejected,
 		CheckOutOfOrder, CheckBoundedExpansion, CheckStatePortable, CheckStateBounded,
 		CheckReplaySurvivesState, CheckPastTrafficSealed, CheckPostCompromise,

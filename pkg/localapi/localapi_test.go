@@ -55,10 +55,10 @@ func (stubSuite) AlgorithmID() string { return algorithm }
 func (stubSuite) NewPrekeyMaterial() ([]byte, []byte, error) {
 	return []byte("public"), []byte("private"), nil
 }
-func (stubSuite) Initiate([]byte, []byte) (e2ee.State, []byte, error) {
+func (stubSuite) Initiate([]byte, []byte, []byte) (e2ee.State, []byte, error) {
 	return e2ee.State(make([]byte, 8)), []byte("initial"), nil
 }
-func (stubSuite) Accept([]byte, []byte, []byte) (e2ee.State, error) {
+func (stubSuite) Accept([]byte, []byte, []byte, []byte) (e2ee.State, error) {
 	return e2ee.State(make([]byte, 8)), nil
 }
 func (stubSuite) KeyMaterial(state e2ee.State) (e2ee.State, error) { return state, nil }

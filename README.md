@@ -38,8 +38,8 @@ decision:
 | `pkg/daemon` | Assembly: one state directory, one socket, one schedule |
 | `pkg/negotiation` | The layer between what an Agent says and what the system may do: mandates, exact amounts, the intent boundary, and the negotiation state machine |
 | `pkg/eventlog` (mandates, budgets, negotiations) | The owner's standing authorisations, placed and withdrawn on the owner's socket and resolved from the store when a spend is judged |
-| `pkg/e2ee` | The contract a candidate encryption suite must satisfy as a pure state transition, message bindings, and published prekey bundles |
-| `pkg/e2ee/conformance` | Refutes a candidate suite: ten properties a black-box run can disprove |
+| `pkg/e2ee` | The pure-state suite contract, message bindings and published prekeys, plus the implemented default candidate awaiting owner ratification |
+| `pkg/e2ee/conformance` | Refutes a candidate suite against fourteen black-box properties, including peer-prekey possession |
 | `pkg/e2ee` (devices) | The multi-device model: device-set succession with rollback and revocation defences, deterministic per-pair session identifiers, and the per-event fan-out to every live device of both parties |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
 | `pkg/probe` | M0-R measurement transport: rendezvous coordinator with cold-source filter probing, the UDP and ADNL collectors with their post-establishment phases, and the tunnel relay the proxy-fallback phase measures against |
@@ -65,9 +65,9 @@ Commands:
 
 Deliberately absent, with the reason:
 
-- **any cryptographic construction** — the suite is a protocol-freeze decision
-  and the architecture forbids inventing one, so `pkg/e2ee` defines the contract
-  a candidate must satisfy and the harness that refutes it, and stops there;
+- **a frozen cryptographic construction** — the default candidate and its
+  vectors exist, but the suite remains a protocol-freeze decision until the
+  owner ratifies [`docs/E2EE_SUITE_DECISION.md`](docs/E2EE_SUITE_DECISION.md);
 - **any transport** — direct, tunnel, Relay, and HTTPS ordering is frozen only
   after the reachability study, which is why the study tooling is here and the
   transport is not;
@@ -172,16 +172,18 @@ Go 1.26.5.
 make verify
 ```
 
-Continuous integration runs the same checks plus a cross-architecture build,
-the fuzz seed corpora, and a check that the committed vectors are unchanged.
-Branch protection enforcing those checks before merge is deferred by owner
-decision — not in place, and recorded here rather than left silent; the
-compensating control is a manually reproduced evidence bundle for the freeze
-(verify logs, binary hashes, and collector manifests on amd64 and arm64).
+The manual release evidence runs the same checks plus a cross-architecture
+build, the fuzz seed corpora, and a check that the committed vectors are
+unchanged. Hosted CI and branch protection enforcing those checks before merge
+are deferred by owner decision — not in place, and recorded here rather than
+left silent; the compensating control is a manually reproduced evidence bundle
+for the freeze (verify logs, binary hashes, and collector manifests on amd64
+and arm64).
 Vectors are rewritten deliberately:
 
 ```sh
 go test ./internal/vectors -update
+go test ./pkg/e2ee -run TestDefaultSuiteInteroperabilityVectors -update-suite-vectors
 ```
 
 The module builds standalone. `GOWORK=off` in the Makefile keeps a developer

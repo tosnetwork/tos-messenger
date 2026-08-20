@@ -10,13 +10,13 @@ committing to, what is now true, and what is not. The last column of every
 table is the one that matters, because a readiness document that only lists
 what was finished is an advertisement.
 
-**Verdict from this side: not ready.** Five items are open. Four block the
+**Verdict from this side: not ready.** Four items are open. Three block the
 freeze directly; the reachability study is separate and blocks M1 scope freeze
-and start rather than this review. And they are not all the same kind of open:
-multi-device, the adversarial corpus, and integrating a chosen suite are work
-this repository can do, while the genesis-hash decision, real reachability
-evidence, second-implementation interoperability, and external cryptographic
-review cannot be closed from inside it.
+and start rather than this review. None can be declared closed by this
+implementation alone: the genesis-hash representation crosses repositories,
+the suite needs owner ratification and independent cryptographic review, the
+vectors need a second implementation, and real reachability evidence needs
+independent operators and networks.
 
 ## What a freeze would fix
 
@@ -74,26 +74,24 @@ scripted in [`M0R_PILOT_RUNBOOK.md`](M0R_PILOT_RUNBOOK.md) and is expected
 to end `insufficient-evidence`. The architecture makes the route decision a
 prerequisite for *starting* M1 rather than for accepting it.
 
-### 3. No encryption suite
+### 3. Encryption suite awaits owner ratification
 
-`pkg/e2ee` defines the contract a candidate must satisfy and a harness that can
-refute one. Choosing a construction is a freeze decision the architecture
-reserves, and inventing one here is forbidden. The message binding and the
-commit order are frozen in shape; the cipher is not chosen.
+`pkg/e2ee` now implements the candidate recommended in
+[`E2EE_SUITE_DECISION.md`](E2EE_SUITE_DECISION.md): an endpoint-authenticated,
+X3DH-shaped X25519 prekey handshake, HKDF/HMAC-SHA-256, AES-256-GCM, and the
+Double Ratchet. It clears the fourteen-property refutation harness and carries
+deterministic positive and adversarial wire vectors, with the primitives
+cross-checked against published RFC and NIST known answers. This closes the
+codeable implementation gap, not the freeze decision: the owner has not
+ratified the suite, and no independent implementation has consumed its vectors.
 
-### 4. Multi-device sessions and key rotation
+### 4. Nothing has checked this against a second implementation
 
-Devices can publish prekey bundles and be bound to a descriptor. There is no
-per-device session fan-out and no rotation model. This is an M0 decision,
-independent of transport, and it is the largest gap in the parts that are
-otherwise settled.
-
-### 5. Nothing has checked this against a second implementation
-
-The positive vectors exist. The adversarial corpus — the set of inputs a second
-implementation must *refuse* — does not, and no second implementation exists,
-so there is no interoperability evidence at all. A freeze without it fixes a
-format that exactly one program has ever agreed with.
+The positive vectors and adversarial corpus exist at the object, verification,
+and concrete E2EE-suite layers. The suite vector test is also a deterministic
+consumer harness. No independent implementation has consumed any of those
+artifacts, so there is still no interoperability evidence. A freeze without it
+would fix formats that exactly one program has ever agreed with.
 
 ## Limits that are stated rather than fixed
 

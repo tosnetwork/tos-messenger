@@ -127,6 +127,7 @@ than silently forking two implementations.
 | Shared-key exclusion | an endpoint key seen under more than one operator has all of its trials dropped and the key reported | `reachability.Aggregate` |
 | Operator identity | opaque `op_` prefix over a digest of a local operator name, so diversity is counted without collecting identity | `reachability.OperatorID` |
 | Suite identifier form | `tos.messaging.e2ee.<name>.v<n>`, so a suite can be negotiated, deprecated, and upgraded | `e2ee.AlgorithmPattern` |
+| Default one-to-one suite candidate | `tos.messaging.e2ee.x3dh-aes256gcm-dr.v1`: endpoint-signed X25519 identity + signed-prekey material, a three-DH asynchronous handshake, HKDF/HMAC-SHA-256, AES-256-GCM, and the Double Ratchet. Implemented and vectored for review, not frozen until owner ratification | `e2ee.NewDefaultSuite`, [`E2EE_SUITE_DECISION.md`](E2EE_SUITE_DECISION.md) |
 | Ciphertext binding | network tuple, suite, conversation, and both sides' Agent, endpoint, and device identifiers, with direction included | `e2ee.Binding` |
 | Ciphertext expansion bound | at most 512 bytes over the plaintext | `e2ee.MaxCiphertextOverheadBytes` |
 | Prekey bundle bounds | material at most 4 KiB, lifetime at most 30 days, at most 16 devices per published set | `pkg/e2ee` constants |
@@ -164,10 +165,11 @@ version bump rather than a silent reinterpretation.
 These remain entirely open, and this repository deliberately contains no
 implementation of them:
 
-- the one-to-one end-to-end encryption suite and library, and the hybrid
-  post-quantum migration schedule. `pkg/e2ee` fixes what a candidate must
-  provide and how it is refuted; it selects nothing and implements no
-  cryptography;
+- ratification of the one-to-one end-to-end encryption suite and the hybrid
+  post-quantum migration schedule. `pkg/e2ee` now implements and vectors the
+  default candidate in [`E2EE_SUITE_DECISION.md`](E2EE_SUITE_DECISION.md), but
+  its identifier remains a proposal until the owner ratifies it; the hybrid
+  successor and downgrade rules remain open;
 - the group key-management protocol, where MLS (RFC 9420) is the recorded
   default candidate that an alternative must be justified against. `pkg/room`
   commits room *membership* per epoch, and `pkg/group` now fixes the contract a

@@ -52,6 +52,7 @@ func (r Result) Passed() bool { return len(r.Failed()) == 0 }
 const (
 	CheckAlgorithmIdentifier = "algorithm-identifier"
 	CheckAsyncEstablishment  = "asynchronous-establishment"
+	CheckPeerAuthentication  = "peer-prekey-possession"
 	CheckReverseDirection    = "reverse-direction"
 	CheckBindingEnforced     = "binding-enforced"
 	CheckTamperDetected      = "tamper-detected"
@@ -83,6 +84,7 @@ func Verify(suite e2ee.Suite, binding e2ee.Binding) Result {
 	}{
 		{CheckAlgorithmIdentifier, checkAlgorithmIdentifier},
 		{CheckAsyncEstablishment, checkAsyncEstablishment},
+		{CheckPeerAuthentication, checkPeerAuthentication},
 		{CheckReverseDirection, checkReverseDirection},
 		{CheckBindingEnforced, checkBindingEnforced},
 		{CheckTamperDetected, checkTamperDetected},
@@ -144,21 +146,25 @@ func establish(suite e2ee.Suite, binding e2ee.Binding) (*pair, error) {
 	if err != nil {
 		return nil, err
 	}
-	public, private, err := suite.NewPrekeyMaterial()
+	initiatorPublic, initiatorPrivate, err := suite.NewPrekeyMaterial()
 	if err != nil {
-		return nil, errors.New("prekey material: " + err.Error())
+		return nil, errors.New("initiator prekey material: " + err.Error())
 	}
-	if len(public) == 0 {
+	acceptorPublic, acceptorPrivate, err := suite.NewPrekeyMaterial()
+	if err != nil {
+		return nil, errors.New("acceptor prekey material: " + err.Error())
+	}
+	if len(initiatorPublic) == 0 || len(acceptorPublic) == 0 {
 		return nil, errors.New("published prekey material is empty")
 	}
-	initiator, initial, err := suite.Initiate(public, forward)
+	initiator, initial, err := suite.Initiate(initiatorPrivate, acceptorPublic, forward)
 	if err != nil {
 		return nil, errors.New("initiate: " + err.Error())
 	}
 	if err := e2ee.ValidateState(initiator); err != nil {
 		return nil, errors.New("initiate produced unusable state: " + err.Error())
 	}
-	acceptor, err := suite.Accept(private, initial, forward)
+	acceptor, err := suite.Accept(acceptorPrivate, initiatorPublic, initial, forward)
 	if err != nil {
 		return nil, errors.New("accept: " + err.Error())
 	}
@@ -242,6 +248,60 @@ func checkAsyncEstablishment(suite e2ee.Suite, binding e2ee.Binding) error {
 	}
 	if !bytes.Equal(opened, plaintext) {
 		return errors.New("opened plaintext does not match")
+	}
+	return nil
+}
+
+// checkPeerAuthentication substitutes a third party's published material at
+// the accepting side. A candidate that still communicates has encrypted to a
+// self-declared initial message, not to the endpoint-signed prekey the binding
+// names, so first contact can be impersonated.
+func checkPeerAuthentication(suite e2ee.Suite, binding e2ee.Binding) error {
+	forward, err := binding.Bytes()
+	if err != nil {
+		return err
+	}
+	initiatorPublic, initiatorPrivate, err := suite.NewPrekeyMaterial()
+	if err != nil {
+		return err
+	}
+	acceptorPublic, acceptorPrivate, err := suite.NewPrekeyMaterial()
+	if err != nil {
+		return err
+	}
+	attackerPublic, attackerPrivate, err := suite.NewPrekeyMaterial()
+	if err != nil {
+		return err
+	}
+	initiator, initial, err := suite.Initiate(initiatorPrivate, acceptorPublic, forward)
+	if err != nil {
+		return err
+	}
+	acceptor, err := suite.Accept(acceptorPrivate, attackerPublic, initial, forward)
+	if err == nil {
+		ciphertext, _, sealErr := suite.Seal(initiator, []byte("possession proof"), forward)
+		if sealErr != nil {
+			return sealErr
+		}
+		if _, _, openErr := suite.Open(acceptor, ciphertext, forward); openErr == nil {
+			return errors.New("session ignored the initiator's endpoint-signed prekey material")
+		}
+	}
+
+	attacker, attackerInitial, err := suite.Initiate(attackerPrivate, acceptorPublic, forward)
+	if err != nil {
+		return err
+	}
+	honestAcceptor, err := suite.Accept(acceptorPrivate, initiatorPublic, attackerInitial, forward)
+	if err != nil {
+		return nil
+	}
+	ciphertext, _, err := suite.Seal(attacker, []byte("wrong private material"), forward)
+	if err != nil {
+		return err
+	}
+	if _, _, err := suite.Open(honestAcceptor, ciphertext, forward); err == nil {
+		return errors.New("session ignored possession of the initiator's private prekey material")
 	}
 	return nil
 }
