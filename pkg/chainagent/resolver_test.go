@@ -54,6 +54,33 @@ func TestResolveAgentPassesThrough(t *testing.T) {
 	}
 }
 
+func TestResolveAgentNormalizesNativeNetworkAtTheBoundary(t *testing.T) {
+	nativeNetwork := &nativev1.NetworkDomain{NetworkId: "tos-local", GenesisRootHash: "sha256:" + strings.Repeat("a", 64), GenesisFileHash: "sha256:" + strings.Repeat("b", 64)}
+	state := &nativev1.NativeStateV1{Network: nativeNetwork}
+	resolver := &Resolver{reader: &fakeReader{state: state, found: true}, sourceNetwork: nativeNetwork,
+		network: &nativev1.NetworkDomain{NetworkId: "tos-local", GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)}}
+	got, found, err := resolver.ResolveAgent(testAgent)
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	if got.Network.GenesisRootHash != strings.Repeat("a", 64) || got.Network.GenesisFileHash != strings.Repeat("b", 64) {
+		t.Fatalf("network was not normalized: %+v", got.Network)
+	}
+	if state.Network != nativeNetwork || state.Network.GenesisRootHash != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatal("upstream state was mutated")
+	}
+}
+
+func TestResolveAgentRefusesAnotherNativeNetworkBeforeNormalization(t *testing.T) {
+	wantNative := &nativev1.NetworkDomain{NetworkId: "tos-local", GenesisRootHash: "sha256:" + strings.Repeat("a", 64), GenesisFileHash: "sha256:" + strings.Repeat("b", 64)}
+	foreign := &nativev1.NativeStateV1{Network: &nativev1.NetworkDomain{NetworkId: "foreign", GenesisRootHash: wantNative.GenesisRootHash, GenesisFileHash: wantNative.GenesisFileHash}}
+	resolver := &Resolver{reader: &fakeReader{state: foreign, found: true}, sourceNetwork: wantNative,
+		network: &nativev1.NetworkDomain{NetworkId: "tos-local", GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)}}
+	if _, found, err := resolver.ResolveAgent(testAgent); err == nil || found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+}
+
 // A malformed identifier is refused before any read is issued.
 func TestResolveAgentRejectsMalformedID(t *testing.T) {
 	reader := &fakeReader{}

@@ -35,14 +35,15 @@ type Observer interface {
 
 // Daemon is one running installation.
 type Daemon struct {
-	config   Config
-	journal  *eventlog.Journal
-	dispatch *dispatch.Dispatcher
-	server   *localapi.Server
-	listener net.Listener
-	owner    net.Listener
-	salt     []byte
-	observer Observer
+	config    Config
+	journal   *eventlog.Journal
+	dispatch  *dispatch.Dispatcher
+	server    *localapi.Server
+	listener  net.Listener
+	owner     net.Listener
+	salt      []byte
+	observer  Observer
+	discovery *discoveryRuntime
 
 	closeOnce sync.Once
 }
@@ -53,15 +54,22 @@ type Daemon struct {
 // what makes a second daemon on the same state fail immediately rather than
 // two of them interleaving writes for a while first.
 func Open(config Config, observer Observer) (*Daemon, error) {
-	return open(config, observer, finalizedVerifier{})
+	return openWithDiscovery(config, observer, finalizedVerifier{}, productionDiscoveryBuilder{})
 }
 
 func open(config Config, observer Observer, verifier delegationVerifier) (*Daemon, error) {
+	return openWithDiscovery(config, observer, verifier, productionDiscoveryBuilder{})
+}
+
+func openWithDiscovery(config Config, observer Observer, verifier delegationVerifier, builder discoveryBuilder) (*Daemon, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
 	if verifier == nil {
 		return nil, errors.New("no finalized delegation verifier")
+	}
+	if builder == nil {
+		return nil, errors.New("no directory discovery builder")
 	}
 	journal, err := eventlog.Open(config.StateDir)
 	if err != nil {
@@ -99,6 +107,7 @@ func open(config Config, observer Observer, verifier delegationVerifier) (*Daemo
 
 	ownerKey, err := config.OwnerKey()
 	if err != nil {
+		_ = journal.Close()
 		return nil, err
 	}
 	server, err := localapi.NewServer(localapi.Config{
@@ -110,9 +119,16 @@ func open(config Config, observer Observer, verifier delegationVerifier) (*Daemo
 		return nil, err
 	}
 	instance.server = server
+	discovery, err := builder.Build(config, journal, observer)
+	if err != nil {
+		_ = journal.Close()
+		return nil, errors.New("build peer discovery: " + err.Error())
+	}
+	instance.discovery = discovery
 
 	listener, err := localapi.Listen(config.SocketPath)
 	if err != nil {
+		_ = discovery.Close()
 		_ = journal.Close()
 		return nil, err
 	}
@@ -122,6 +138,7 @@ func open(config Config, observer Observer, verifier delegationVerifier) (*Daemo
 	if err != nil {
 		_ = listener.Close()
 		_ = os.Remove(config.SocketPath)
+		_ = discovery.Close()
 		_ = journal.Close()
 		return nil, err
 	}
@@ -162,6 +179,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return errors.New("no daemon")
 	}
 	var group sync.WaitGroup
+	if d.discovery != nil {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			if err := d.discovery.runner.Run(ctx, d.discovery.peers, d.config.Discovery.RefreshInterval()); err != nil && ctx.Err() == nil {
+				d.report("directory", err)
+			}
+		}()
+	}
 	for _, endpoint := range []struct {
 		listener  net.Listener
 		principal localapi.Principal
@@ -206,6 +232,7 @@ func (d *Daemon) Close() error {
 		// only once it is done with the state it was serving.
 		_ = os.Remove(d.config.SocketPath)
 		_ = os.Remove(d.config.OwnerSocketPath)
+		_ = d.discovery.Close()
 		err = d.journal.Close()
 	})
 	return err

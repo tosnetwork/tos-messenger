@@ -17,6 +17,7 @@ import (
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
+	"google.golang.org/protobuf/proto"
 )
 
 // StateReader reads finalized typed object state by identifier. It is the narrow
@@ -32,7 +33,9 @@ type StateReader interface {
 
 // Resolver adapts a StateReader to identity.AgentResolver.
 type Resolver struct {
-	reader StateReader
+	reader        StateReader
+	network       *nativev1.NetworkDomain
+	sourceNetwork *nativev1.NetworkDomain
 }
 
 // New builds a resolver over a state reader.
@@ -46,7 +49,8 @@ func New(reader StateReader) (*Resolver, error) {
 // NewFromChain builds a resolver whose reader is a toschain simplified native
 // resolver over a configured chain adapter. The adapter, locator and checkpoint
 // path are the service protocol's, unchanged.
-func NewFromChain(adapter *toschain.Adapter, locator *nativecore.Locator, checkpointPath string) (*Resolver, error) {
+func NewFromChain(adapter *toschain.Adapter, locator *nativecore.Locator, checkpointPath string,
+	network *nativev1.NetworkDomain) (*Resolver, error) {
 	if adapter == nil {
 		return nil, errors.New("a chain-backed resolver needs a chain adapter")
 	}
@@ -54,7 +58,16 @@ func NewFromChain(adapter *toschain.Adapter, locator *nativecore.Locator, checkp
 	if err != nil {
 		return nil, err
 	}
-	return New(reader)
+	if network == nil {
+		return nil, errors.New("a chain-backed resolver needs the Messenger network representation")
+	}
+	return &Resolver{
+		reader: reader,
+		network: &nativev1.NetworkDomain{NetworkId: network.NetworkId,
+			GenesisRootHash: network.GenesisRootHash, GenesisFileHash: network.GenesisFileHash},
+		sourceNetwork: &nativev1.NetworkDomain{NetworkId: locator.Network.NetworkId,
+			GenesisRootHash: locator.Network.GenesisRootHash, GenesisFileHash: locator.Network.GenesisFileHash},
+	}, nil
 }
 
 // ResolveAgent implements identity.AgentResolver.
@@ -70,5 +83,20 @@ func (r *Resolver) ResolveAgent(agentID string) (*nativev1.NativeStateV1, bool, 
 	if !ids.Agent.MatchString(agentID) {
 		return nil, false, errors.New("invalid agent identifier")
 	}
-	return r.reader.ResolveState(context.Background(), agentID, "")
+	state, found, err := r.reader.ResolveState(context.Background(), agentID, "")
+	if err != nil || !found || state == nil || r.network == nil {
+		return state, found, err
+	}
+	if r.sourceNetwork != nil && (state.Network == nil || state.Network.NetworkId != r.sourceNetwork.NetworkId ||
+		state.Network.GenesisRootHash != r.sourceNetwork.GenesisRootHash ||
+		state.Network.GenesisFileHash != r.sourceNetwork.GenesisFileHash) {
+		return nil, false, errors.New("finalized Agent resolver returned another Native network")
+	}
+	copy, ok := proto.Clone(state).(*nativev1.NativeStateV1)
+	if !ok || copy == nil {
+		return nil, false, errors.New("could not copy finalized Agent state")
+	}
+	copy.Network = &nativev1.NetworkDomain{NetworkId: r.network.NetworkId,
+		GenesisRootHash: r.network.GenesisRootHash, GenesisFileHash: r.network.GenesisFileHash}
+	return copy, true, nil
 }

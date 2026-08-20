@@ -15,6 +15,7 @@ import (
 // bytes are trusted: Refresh verifies each object before asking for the next.
 type RefreshSource interface {
 	Delegation(context.Context, string) ([]byte, error)
+	DescriptorPolicy(context.Context, identity.Delegation) (DescriptorPolicy, error)
 	Locator(context.Context, DHTKey) ([]byte, error)
 	Descriptor(context.Context, string) ([]byte, error)
 	Prekeys(context.Context, Descriptor, Locator) ([]e2ee.Bundle, error)
@@ -32,6 +33,7 @@ type RefreshStage string
 
 const (
 	StageDelegation RefreshStage = "delegation"
+	StagePolicy     RefreshStage = "policy"
 	StageLocator    RefreshStage = "locator"
 	StageDescriptor RefreshStage = "descriptor"
 	StagePrekeys    RefreshStage = "prekeys"
@@ -64,7 +66,6 @@ type Refresher struct {
 	Resolver identity.AgentResolver
 	Network  *nativev1.NetworkDomain
 	Chain    identity.ChainPolicy
-	Policy   DescriptorPolicy
 	Admitter PublishedSetAdmitter
 	Now      func() time.Time
 }
@@ -100,6 +101,10 @@ func (r Refresher) Refresh(ctx context.Context, agentID string) (RefreshResult, 
 	if delegation.AgentID != agentID {
 		return RefreshResult{}, &RefreshError{Stage: StageDelegation, Err: errors.New("source returned another Agent's delegation")}
 	}
+	policy, err := r.Source.DescriptorPolicy(ctx, delegation)
+	if err != nil {
+		return RefreshResult{}, &RefreshError{Stage: StagePolicy, Err: err}
+	}
 	key, err := LocatorKey(delegation)
 	if err != nil {
 		return RefreshResult{}, &RefreshError{Stage: StageLocator, Err: err}
@@ -124,7 +129,7 @@ func (r Refresher) Refresh(ctx context.Context, agentID string) (RefreshResult, 
 		err = MatchesDescriptor(locator, descriptor)
 	}
 	if err == nil {
-		err = Bind(delegation, descriptor, r.Policy, now)
+		err = Bind(delegation, descriptor, policy, now)
 	}
 	if err != nil {
 		return RefreshResult{}, &RefreshError{Stage: StageDescriptor, Err: err}

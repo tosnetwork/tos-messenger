@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/group"
@@ -94,6 +95,20 @@ func buildVerifiers(t *testing.T) map[string]func([]byte) error {
 	now := verifyNow()
 	policy := trialPolicy(t)
 	return map[string]func([]byte) error{
+		"descriptor-policy-binding": func(b []byte) error {
+			candidate, err := directory.DecodeDescriptorPolicyJSON(b)
+			if err != nil {
+				return err
+			}
+			digest, err := candidate.Digest()
+			if err != nil {
+				return err
+			}
+			if digest != del.ContactDescriptorPolicyDigest {
+				return errors.New("descriptor policy does not match delegation commitment")
+			}
+			return nil
+		},
 		"mailbox-capability-grant-binding": func(b []byte) error {
 			grant, err := mailbox.DecodeGrantJSON(b)
 			if err != nil {
@@ -169,6 +184,7 @@ func buildVerifiers(t *testing.T) map[string]func([]byte) error {
 // case, the exact confusion this split exists to prevent.
 func verifyDecoders() map[string]func([]byte) error {
 	return map[string]func([]byte) error{
+		"descriptor-policy-binding": func(b []byte) error { _, err := directory.DecodeDescriptorPolicyJSON(b); return err },
 		"mailbox-capability-grant-binding": func(b []byte) error {
 			_, err := mailbox.DecodeGrantJSON(b)
 			return err
@@ -186,6 +202,17 @@ func verifyDecoders() map[string]func([]byte) error {
 		},
 		"reachability-trial": func(b []byte) error { _, err := reachability.DecodeTrialJSON(b); return err },
 	}
+}
+
+func mismatchedDescriptorPolicyJSON(t *testing.T) string {
+	t.Helper()
+	policy := descriptorPolicy()
+	policy.MaxLifetimeSeconds--
+	raw, err := directory.EncodeDescriptorPolicyJSON(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 func tamperedMailboxGrantSignatureJSON(t *testing.T) string {

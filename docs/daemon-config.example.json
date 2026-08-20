@@ -1,5 +1,5 @@
 {
-  "schema": "tos.messaging.daemon-config.v2",
+  "schema": "tos.messaging.daemon-config.v3",
 
   "state_dir": "/var/lib/tos-messengerd",
   "socket_path": "/run/tos-messengerd/runtime.sock",
@@ -27,6 +27,22 @@
   "native_registry_code_hash": "tvm-cell-sha256:c42a36d160f60ec70926f63cb06d7429306e332b2e3752b275971ad628c0c9f1",
   "chain_checkpoint_path": "/var/lib/tos-messengerd/chain.checkpoint",
   "delegation_path": "/etc/tos-messengerd/delegation.json",
+
+  "discovery": {
+    "mode": "tos-dht-https",
+    "dht_global_config_path": "/etc/tos-messengerd/tos-global.config.json",
+    "peers": [
+      {
+        "agent_id": "agent_5555555555555555555555555555555555555555555555555555555555555555",
+        "delegation_path": "/etc/tos-messengerd/peers/agent-5555.json",
+        "descriptor_policy_path": "/etc/tos-messengerd/peers/agent-5555-policy.json"
+      }
+    ],
+    "refresh_interval_seconds": 300,
+    "refresh_lead_seconds": 300,
+    "https_request_timeout_seconds": 10,
+    "https_connect_timeout_seconds": 5
+  },
 
   "agent_id": "agent_2222222222222222222222222222222222222222222222222222222222222222",
   "endpoint_id": "mep_3333333333333333333333333333333333333333333333333333333333333333",

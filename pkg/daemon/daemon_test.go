@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/dirlock"
+	"github.com/tosnetwork/tos-messenger/internal/securefile"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
@@ -50,6 +51,7 @@ func testConfig(t *testing.T) Config {
 		NativeRegistryCodeHash: registryCode,
 		ChainCheckpointPath:    filepath.Join(root, "state", "chain.checkpoint"),
 		DelegationPath:         filepath.Join(root, "delegation.json"),
+		Discovery:              DiscoveryConfig{Mode: DiscoveryNone},
 		AgentID:                "agent_" + strings.Repeat("2", 64),
 		EndpointID:             "mep_" + strings.Repeat("3", 64),
 		DeviceID:               "dev_" + strings.Repeat("4", 64),
@@ -87,6 +89,33 @@ type recorder struct {
 	swept      []dispatch.Summary
 	maintained int
 	failures   []string
+}
+
+type fakeDirectoryRunner struct {
+	started chan []string
+}
+
+func (r *fakeDirectoryRunner) Run(ctx context.Context, peers []string, _ time.Duration) error {
+	r.started <- append([]string(nil), peers...)
+	<-ctx.Done()
+	return nil
+}
+
+type fakeDiscoveryBuilder struct {
+	runner *fakeDirectoryRunner
+	closed *bool
+	err    error
+}
+
+func (b fakeDiscoveryBuilder) Build(Config, *eventlog.Journal, Observer) (*discoveryRuntime, error) {
+	if b.err != nil {
+		return nil, b.err
+	}
+	return &discoveryRuntime{
+		runner: b.runner,
+		peers:  []string{"agent_" + strings.Repeat("5", 64)},
+		close:  func() { *b.closed = true },
+	}, nil
 }
 
 // testOwnerPublicHex is the key the owner signs decisions with. The private
@@ -161,6 +190,52 @@ func TestDaemonServesAndReleasesItsState(t *testing.T) {
 	}
 }
 
+func TestDaemonOwnsConfiguredDiscoveryLifecycle(t *testing.T) {
+	config := testConfig(t)
+	config.Discovery = DiscoveryConfig{
+		Mode: DiscoveryTOSDHTHTTPS, DHTGlobalConfigPath: "/etc/tos-messengerd/global.json",
+		Peers: []PeerDelegationConfig{{AgentID: "agent_" + strings.Repeat("5", 64),
+			DelegationPath: "/etc/tos-messengerd/peer.json", DescriptorPolicyPath: "/etc/tos-messengerd/peer-policy.json"}},
+	}
+	closed := false
+	runner := &fakeDirectoryRunner{started: make(chan []string, 1)}
+	instance, err := openWithDiscovery(config, nil, acceptingVerifier{}, fakeDiscoveryBuilder{runner: runner, closed: &closed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- instance.Run(ctx) }()
+	select {
+	case peers := <-runner.started:
+		if len(peers) != 1 || peers[0] != config.Discovery.Peers[0].AgentID {
+			t.Fatalf("peers=%v", peers)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("directory runner did not start")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !closed {
+		t.Fatal("directory network resources were not closed")
+	}
+}
+
+func TestDiscoveryBuildFailureReleasesState(t *testing.T) {
+	config := testConfig(t)
+	_, err := openWithDiscovery(config, nil, acceptingVerifier{}, fakeDiscoveryBuilder{err: errors.New("bad discovery")})
+	if err == nil {
+		t.Fatal("discovery failure was ignored")
+	}
+	journal, err := eventlog.Open(config.StateDir)
+	if err != nil {
+		t.Fatalf("state lock was retained: %v", err)
+	}
+	_ = journal.Close()
+}
+
 func TestSecondDaemonRefusesTheSameState(t *testing.T) {
 	config := testConfig(t)
 	first, err := openTest(config, nil)
@@ -203,17 +278,17 @@ func TestDelegationFileMustBeBoundedAndRegular(t *testing.T) {
 	if err := os.WriteFile(regular, []byte("{}"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if raw, err := readBoundedRegularFile(regular, 2); err != nil || string(raw) != "{}" {
+	if raw, err := securefile.ReadBoundedRegular(regular, 2); err != nil || string(raw) != "{}" {
 		t.Fatalf("regular file refused: %q %v", raw, err)
 	}
 	link := filepath.Join(root, "delegation-link.json")
 	if err := os.Symlink(regular, link); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	if _, err := readBoundedRegularFile(link, 2); err == nil {
+	if _, err := securefile.ReadBoundedRegular(link, 2); err == nil {
 		t.Fatal("delegation symlink was followed")
 	}
-	if _, err := readBoundedRegularFile(regular, 1); err == nil {
+	if _, err := securefile.ReadBoundedRegular(regular, 1); err == nil {
 		t.Fatal("oversized delegation file was accepted")
 	}
 }
@@ -365,6 +440,13 @@ func TestSweepWithoutATransportIsSilent(t *testing.T) {
 
 func TestConfigurationMustBeStated(t *testing.T) {
 	base := testConfig(t)
+	enableDiscovery := func(c *Config) {
+		c.Discovery = DiscoveryConfig{
+			Mode: DiscoveryTOSDHTHTTPS, DHTGlobalConfigPath: "/etc/tos-messengerd/global.json",
+			Peers: []PeerDelegationConfig{{AgentID: "agent_" + strings.Repeat("5", 64),
+				DelegationPath: "/etc/tos-messengerd/peer.json", DescriptorPolicyPath: "/etc/tos-messengerd/peer-policy.json"}},
+		}
+	}
 	cases := map[string]func(*Config){
 		"no schema":                      func(c *Config) { c.Schema = "" },
 		"relative state":                 func(c *Config) { c.StateDir = "state" },
@@ -379,6 +461,23 @@ func TestConfigurationMustBeStated(t *testing.T) {
 		"unselected native registry":     func(c *Config) { c.NativeRegistryCodeHash = "tvm-cell-sha256:" + strings.Repeat("a", 64) },
 		"checkpoint outside state":       func(c *Config) { c.ChainCheckpointPath = filepath.Join(filepath.Dir(c.StateDir), "other.checkpoint") },
 		"relative delegation":            func(c *Config) { c.DelegationPath = "delegation.json" },
+		"no discovery mode":              func(c *Config) { c.Discovery.Mode = "" },
+		"unused disabled discovery":      func(c *Config) { c.Discovery.DHTGlobalConfigPath = "/tmp/global.json" },
+		"relative dht config": func(c *Config) {
+			enableDiscovery(c)
+			c.Discovery.DHTGlobalConfigPath = "global.json"
+		},
+		"no discovery peers":     func(c *Config) { enableDiscovery(c); c.Discovery.Peers = nil },
+		"local discovery peer":   func(c *Config) { enableDiscovery(c); c.Discovery.Peers[0].AgentID = c.AgentID },
+		"relative peer policy":   func(c *Config) { enableDiscovery(c); c.Discovery.Peers[0].DescriptorPolicyPath = "policy.json" },
+		"fast directory refresh": func(c *Config) { enableDiscovery(c); c.Discovery.RefreshIntervalSeconds = 1 },
+		"lead past refresh": func(c *Config) {
+			enableDiscovery(c)
+			c.Discovery.RefreshIntervalSeconds = 60
+			c.Discovery.RefreshLeadSeconds = 61
+		},
+		"overflowing directory duration": func(c *Config) { enableDiscovery(c); c.Discovery.RefreshIntervalSeconds = ^uint64(0) },
+		"excessive HTTPS timeout":        func(c *Config) { enableDiscovery(c); c.Discovery.HTTPSRequestTimeoutSeconds = 31 },
 		"overflowing chain timeout":      func(c *Config) { c.ChainQueryTimeoutSeconds = ^uint64(0) },
 		"oversized chain response":       func(c *Config) { c.ChainMaxResponseBytes = 16<<20 + 1 },
 		"bad registry hash":              func(c *Config) { c.Registries[0].CodeHash = "sha256:" + strings.Repeat("a", 64) },
@@ -429,6 +528,7 @@ func TestUnknownConfigurationKeysAreRefused(t *testing.T) {
 		"native_registry_code_hash": "` + registryCode + `",
 		"chain_checkpoint_path": "/var/lib/tos-messengerd/chain.checkpoint",
 		"delegation_path": "/etc/tos-messengerd/delegation.json",
+		"discovery": {"mode": "none"},
 		"agent_id": "agent_` + strings.Repeat("2", 64) + `",
 		"endpoint_id": "mep_` + strings.Repeat("3", 64) + `",
 		"device_id": "dev_` + strings.Repeat("4", 64) + `",

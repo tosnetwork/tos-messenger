@@ -49,7 +49,9 @@ delegation, checks every prekey signature, matches the entire set to the
 descriptor digest, and durably enforces succession/revocation. A compromised
 HTTPS origin can deny service, but cannot substitute identity or key material.
 
-`directory.NetworkRefreshSource` composes an out-of-band finalized delegation
-source, `TOSDHT`, and `HTTPSObjects`. Delegation bootstrap remains separate by
-construction: the Endpoint public key is needed to derive the DHT key, so the
-DHT locator cannot discover that delegation from only an Agent identifier.
+`directory.NetworkRefreshSource` composes an out-of-band delegation and
+descriptor-policy source, `TOSDHT`, and `HTTPSObjects`. The daemon's explicit
+bounded file bootstrap and lifecycle wiring are documented in
+[`DISCOVERY_BOOTSTRAP.md`](DISCOVERY_BOOTSTRAP.md). The Endpoint public key is
+needed to derive the DHT key, so the DHT locator still cannot discover that
+delegation from only an Agent identifier.

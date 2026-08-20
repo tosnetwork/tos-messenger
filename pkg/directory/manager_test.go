@@ -36,21 +36,21 @@ func TestManagerCachesUntilDeadlineAndInvalidates(t *testing.T) {
 	if _, err := manager.Ensure(context.Background(), agentID); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(source.calls); got != 4 {
+	if got := len(source.calls); got != 5 {
 		t.Fatalf("fresh cache caused retrieval: calls=%d", got)
 	}
 	manager.Invalidate(agentID)
 	if _, err := manager.Ensure(context.Background(), agentID); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(source.calls); got != 8 {
+	if got := len(source.calls); got != 10 {
 		t.Fatalf("invalidation did not cause retrieval: calls=%d", got)
 	}
 	now = time.Unix(int64(baseUnix+3300), 0)
 	if _, err := manager.Ensure(context.Background(), agentID); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(source.calls); got != 12 {
+	if got := len(source.calls); got != 15 {
 		t.Fatalf("deadline did not cause retrieval: calls=%d", got)
 	}
 }
@@ -68,6 +68,23 @@ func TestManagerRunRefreshesImmediatelyAndStops(t *testing.T) {
 	observer.mutex.Unlock()
 	if calls != 1 {
 		t.Fatalf("observer calls=%d", calls)
+	}
+}
+
+func TestManagerRunRechecksFinalizedAuthorityDespiteFreshCache(t *testing.T) {
+	source, refresher, _ := refreshFixture(t)
+	manager := &Manager{Refresher: refresher, Lead: 5 * time.Minute}
+	if _, err := manager.Ensure(context.Background(), agentID); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	observer := &recordingObserver{cancel: cancel}
+	manager.Observer = observer
+	if err := manager.Run(ctx, []string{agentID}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(source.calls); got != 10 {
+		t.Fatalf("scheduled refresh reused cache: calls=%d", got)
 	}
 }
 

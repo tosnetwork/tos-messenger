@@ -42,6 +42,7 @@ The adapter supplies the DHT locator operation of `RefreshSource`.
 `HTTPSObjects` now supplies the bounded descriptor and digest-bound prekey-set
 operations under the versioned publication profile documented in
 [`HTTPS_OBJECT_SOURCE.md`](HTTPS_OBJECT_SOURCE.md), and
-`NetworkRefreshSource` composes both with an injected finalized delegation
-source. Out-of-band delegation bootstrap, daemon peer configuration, and live
-multi-node deployment evidence remain separate work.
+`NetworkRefreshSource` composes both with explicit delegation and committed
+descriptor-policy bootstrap. Daemon config v3 now builds and owns that chain;
+see [`DISCOVERY_BOOTSTRAP.md`](DISCOVERY_BOOTSTRAP.md). Live independently
+operated multi-node deployment evidence remains separate work.

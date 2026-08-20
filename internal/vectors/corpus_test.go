@@ -69,6 +69,7 @@ const (
 var decoders = map[string]func([]byte) error{
 	"endpoint-delegation":  func(b []byte) error { _, err := identity.DecodeJSON(b); return err },
 	"contact-descriptor":   func(b []byte) error { _, err := directory.DecodeDescriptorJSON(b); return err },
+	"descriptor-policy":    func(b []byte) error { _, err := directory.DecodeDescriptorPolicyJSON(b); return err },
 	"dht-locator":          func(b []byte) error { _, err := directory.DecodeLocator(b); return err },
 	"prekey-bundle":        func(b []byte) error { _, err := e2ee.DecodeBundleJSON(b); return err },
 	"prekey-bundle-set":    func(b []byte) error { _, err := e2ee.DecodeBundleSetJSON(b); return err },
@@ -184,6 +185,7 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	jsonBaselines := map[string][]byte{
 		"endpoint-delegation":      validDelegationJSON(t),
 		"contact-descriptor":       validDescriptorJSON(t),
+		"descriptor-policy":        validDescriptorPolicyJSON(t),
 		"prekey-bundle":            validBundleJSON(t),
 		"prekey-bundle-set":        validBundleSetJSON(t),
 		"messaging-event":          validEventJSON(t),
@@ -257,6 +259,7 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	// Verify layer. Each baseline must itself pass its verifier, or the
 	// mutations prove nothing -- the same discipline the decode baselines get.
 	verifyBaselines := map[string][]byte{
+		"descriptor-policy-binding":        validDescriptorPolicyJSON(t),
 		"mailbox-capability-grant-binding": validMailboxGrantJSON(t),
 		"mailbox-access-request-binding":   validMailboxRequestJSON(t),
 		"prekey-bundle-binding":            boundBundleJSON(t),
@@ -273,6 +276,9 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 			t.Fatalf("the %s verify baseline does not pass: %v", target, err)
 		}
 	}
+	addVerify("descriptor-policy-binding/wrong-commitment", "descriptor-policy-binding",
+		mismatchedDescriptorPolicyJSON(t),
+		"a valid policy document is not this Agent's policy unless it reproduces the digest committed by the finalized delegation")
 
 	addVerify("mailbox-capability-grant-binding/tampered-endpoint-signature", "mailbox-capability-grant-binding",
 		tamperedMailboxGrantSignatureJSON(t),

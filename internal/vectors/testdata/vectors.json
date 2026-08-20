@@ -7,8 +7,8 @@
   },
   {
     "name": "descriptor-policy",
-    "wire": "",
-    "canonical_sha256": "",
+    "wire": "{\"schema\":\"tos.messaging.descriptor-policy.v1\",\"max_envelope_bytes\":131072,\"max_lifetime_seconds\":86400,\"allow_https_endpoint\":true,\"require_adnl\":false}",
+    "canonical_sha256": "sha256:579c9ccc2ffce6284ca260b19a444836ef77dc714125da0d6b45270d7917f84a",
     "digest": "sha256:579c9ccc2ffce6284ca260b19a444836ef77dc714125da0d6b45270d7917f84a"
   },
   {

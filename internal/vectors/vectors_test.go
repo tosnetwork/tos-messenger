@@ -191,7 +191,15 @@ func build(t *testing.T) []Vector {
 	if err != nil {
 		t.Fatalf("descriptor policy: %v", err)
 	}
-	vectors = append(vectors, Vector{Name: "descriptor-policy", Digest: policyDigest})
+	policyWire, err := directory.EncodeDescriptorPolicyJSON(descriptorPolicy())
+	if err != nil {
+		t.Fatalf("descriptor policy wire: %v", err)
+	}
+	descriptorPolicyCanonical, err := directory.DescriptorPolicyCanonicalBytes(descriptorPolicy())
+	if err != nil {
+		t.Fatalf("descriptor policy canonical: %v", err)
+	}
+	add("descriptor-policy", policyWire, descriptorPolicyCanonical, policyDigest)
 	vectors = append(vectors, Vector{Name: "empty-relay-set", Digest: directory.EmptyRelaySetDigest()})
 
 	// Contact descriptor.

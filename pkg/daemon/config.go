@@ -27,7 +27,7 @@ import (
 )
 
 // ConfigSchema is the strict schema of a daemon configuration.
-const ConfigSchema = "tos.messaging.daemon-config.v2"
+const ConfigSchema = "tos.messaging.daemon-config.v3"
 
 // TransportMode names how this installation carries messages.
 type TransportMode string
@@ -40,6 +40,21 @@ const (
 )
 
 var transports = map[TransportMode]struct{}{TransportNone: {}}
+
+// DiscoveryMode names whether this installation refreshes provisioned peers.
+type DiscoveryMode string
+
+const (
+	DiscoveryNone        DiscoveryMode = "none"
+	DiscoveryTOSDHTHTTPS DiscoveryMode = "tos-dht-https"
+)
+
+const (
+	DefaultDirectoryRefreshInterval = 5 * time.Minute
+	DefaultDirectoryRefreshLead     = 5 * time.Minute
+	MinDirectoryRefreshInterval     = 30 * time.Second
+	MaxDirectoryRefreshInterval     = 24 * time.Hour
+)
 
 // Defaults for the schedule. They are conservative on purpose: an installation
 // with no transport spends its time doing maintenance, and maintenance that
@@ -92,6 +107,11 @@ type Config struct {
 	ChainCheckpointPath         string   `json:"chain_checkpoint_path"`
 	DelegationPath              string   `json:"delegation_path"`
 
+	// Discovery is stated separately from Transport: refreshing verified
+	// identity and prekeys is route-neutral and does not authorize carrying a
+	// message over the same network path.
+	Discovery DiscoveryConfig `json:"discovery"`
+
 	// AgentID, EndpointID and DeviceID are who this installation speaks for.
 	// Outbound events must say they came from here, so an installation that
 	// does not know its own identity cannot send at all.
@@ -122,6 +142,90 @@ type Config struct {
 	SweepIntervalSeconds       uint64 `json:"sweep_interval_seconds,omitempty"`
 	MaintenanceIntervalSeconds uint64 `json:"maintenance_interval_seconds,omitempty"`
 	RetentionSeconds           uint64 `json:"retention_seconds,omitempty"`
+}
+
+// DiscoveryConfig provisions the out-of-band information that cannot be
+// derived from an Agent identifier: a peer delegation document and the local
+// DHT bootstrap table. Neither replaces finalized verification.
+type DiscoveryConfig struct {
+	Mode                       DiscoveryMode          `json:"mode"`
+	DHTGlobalConfigPath        string                 `json:"dht_global_config_path,omitempty"`
+	Peers                      []PeerDelegationConfig `json:"peers,omitempty"`
+	RefreshIntervalSeconds     uint64                 `json:"refresh_interval_seconds,omitempty"`
+	RefreshLeadSeconds         uint64                 `json:"refresh_lead_seconds,omitempty"`
+	HTTPSRequestTimeoutSeconds uint64                 `json:"https_request_timeout_seconds,omitempty"`
+	HTTPSConnectTimeoutSeconds uint64                 `json:"https_connect_timeout_seconds,omitempty"`
+}
+
+type PeerDelegationConfig struct {
+	AgentID              string `json:"agent_id"`
+	DelegationPath       string `json:"delegation_path"`
+	DescriptorPolicyPath string `json:"descriptor_policy_path"`
+}
+
+func (d DiscoveryConfig) RefreshInterval() time.Duration {
+	if d.RefreshIntervalSeconds == 0 {
+		return DefaultDirectoryRefreshInterval
+	}
+	return time.Duration(d.RefreshIntervalSeconds) * time.Second
+}
+
+func (d DiscoveryConfig) RefreshLead() time.Duration {
+	if d.RefreshLeadSeconds == 0 {
+		return DefaultDirectoryRefreshLead
+	}
+	return time.Duration(d.RefreshLeadSeconds) * time.Second
+}
+
+func (d DiscoveryConfig) Validate(localAgentID string) error {
+	switch d.Mode {
+	case DiscoveryNone:
+		if d.DHTGlobalConfigPath != "" || len(d.Peers) != 0 || d.RefreshIntervalSeconds != 0 ||
+			d.RefreshLeadSeconds != 0 || d.HTTPSRequestTimeoutSeconds != 0 || d.HTTPSConnectTimeoutSeconds != 0 {
+			return errors.New("discovery none cannot carry unused settings")
+		}
+		return nil
+	case DiscoveryTOSDHTHTTPS:
+	default:
+		return errors.New("discovery mode must be stated explicitly")
+	}
+	if !filepath.IsAbs(d.DHTGlobalConfigPath) || filepath.Clean(d.DHTGlobalConfigPath) != d.DHTGlobalConfigPath {
+		return errors.New("dht_global_config_path must be absolute and clean")
+	}
+	if len(d.Peers) == 0 || len(d.Peers) > 4096 {
+		return errors.New("discovery peer set must contain 1 to 4096 peers")
+	}
+	seen := make(map[string]struct{}, len(d.Peers))
+	for _, peer := range d.Peers {
+		if !identity.AgentPattern.MatchString(peer.AgentID) || peer.AgentID == localAgentID {
+			return errors.New("invalid discovery peer Agent identifier")
+		}
+		if !filepath.IsAbs(peer.DelegationPath) || filepath.Clean(peer.DelegationPath) != peer.DelegationPath {
+			return errors.New("peer delegation_path must be absolute and clean")
+		}
+		if !filepath.IsAbs(peer.DescriptorPolicyPath) || filepath.Clean(peer.DescriptorPolicyPath) != peer.DescriptorPolicyPath {
+			return errors.New("peer descriptor_policy_path must be absolute and clean")
+		}
+		if _, duplicate := seen[peer.AgentID]; duplicate {
+			return errors.New("duplicate discovery peer")
+		}
+		seen[peer.AgentID] = struct{}{}
+	}
+	if d.RefreshIntervalSeconds > uint64(MaxDirectoryRefreshInterval/time.Second) ||
+		d.RefreshLeadSeconds > uint64(MaxDirectoryRefreshInterval/time.Second) {
+		return errors.New("directory refresh duration exceeds one day")
+	}
+	interval := d.RefreshInterval()
+	if interval < MinDirectoryRefreshInterval || interval > MaxDirectoryRefreshInterval {
+		return errors.New("directory refresh interval is outside its bound")
+	}
+	if lead := d.RefreshLead(); lead < 0 || lead > interval {
+		return errors.New("directory refresh lead exceeds its interval")
+	}
+	if d.HTTPSRequestTimeoutSeconds > 30 || d.HTTPSConnectTimeoutSeconds > 10 {
+		return errors.New("discovery HTTPS timeout exceeds its bound")
+	}
+	return nil
 }
 
 // Network returns the configured network tuple.
@@ -311,6 +415,9 @@ func (c Config) Validate() error {
 	}
 	if !filepath.IsAbs(c.DelegationPath) || filepath.Clean(c.DelegationPath) != c.DelegationPath {
 		return errors.New("delegation_path must be an absolute, clean path")
+	}
+	if err := c.Discovery.Validate(c.AgentID); err != nil {
+		return err
 	}
 	if err := c.Identity().Validate(); err != nil {
 		return err

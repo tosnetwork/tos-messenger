@@ -16,6 +16,7 @@ import (
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
+	"github.com/tosnetwork/tos-messenger/pkg/identity"
 )
 
 const (
@@ -263,6 +264,10 @@ type DelegationSource interface {
 	Delegation(context.Context, string) ([]byte, error)
 }
 
+type PolicySource interface {
+	DescriptorPolicy(context.Context, identity.Delegation) (DescriptorPolicy, error)
+}
+
 type LocatorSource interface {
 	Locator(context.Context, DHTKey) ([]byte, error)
 }
@@ -272,8 +277,16 @@ type LocatorSource interface {
 // the remaining network objects.
 type NetworkRefreshSource struct {
 	Delegations DelegationSource
+	Policies    PolicySource
 	Locators    LocatorSource
 	Objects     *HTTPSObjects
+}
+
+func (s NetworkRefreshSource) DescriptorPolicy(ctx context.Context, delegation identity.Delegation) (DescriptorPolicy, error) {
+	if s.Policies == nil {
+		return DescriptorPolicy{}, errors.New("no descriptor policy source")
+	}
+	return s.Policies.DescriptorPolicy(ctx, delegation)
 }
 
 func (s NetworkRefreshSource) Delegation(ctx context.Context, agentID string) ([]byte, error) {

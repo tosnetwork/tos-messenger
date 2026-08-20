@@ -42,6 +42,10 @@ nobody made:
 - the daemon-owned **finalized checkpoint file** (exactly
   `state_dir/chain.checkpoint`) and the local **endpoint delegation file**.
   The latter must be a non-empty regular file no larger than 64 KiB;
+- the **discovery mode**, separately from transport. `none` carries no unused
+  settings. `tos-dht-https` pins one bounded local DHT global configuration and
+  a finite peer list mapping every non-local Agent to delegation and committed
+  descriptor-policy files, with explicit refresh and HTTPS budgets;
 - **who this installation speaks for** — its Agent, endpoint and device — since
   an outbound event must say it came from here; and
 - the **owner's public key**, because the two sockets are not by themselves a
@@ -64,8 +68,9 @@ misspelled setting that is silently dropped is a setting an operator believes
 is in force.
 
 `docs/daemon-config.example.json` is a complete file with placeholder values.
-The finalized-state fields made this schema `tos.messaging.daemon-config.v2`;
-v1 files are rejected instead of being silently treated as chain-authoritative.
+Peer discovery makes this schema `tos.messaging.daemon-config.v3`; older files
+are rejected instead of silently running with discovery disabled or applying a
+daemon-wide descriptor policy peers never committed.
 
 `-check` validates all of these bounds, endpoint URLs, code/hash pairs and
 paths without contacting the chain. Normal startup is fail-closed: after
@@ -77,6 +82,14 @@ expiry, a foreign network/registry/account, or an endpoint mismatch prevents
 the sockets from opening and releases the state lock. The verified
 delegation's `allowed_outbound_event_classes` is then installed in the
 dispatcher; the runtime cannot queue a valid-but-undelegated event kind.
+
+With `tos-dht-https`, startup also requires a bounded regular DHT bootstrap
+file with a cryptographically accepted node, then owns an ephemeral ADNL DHT
+client and hardened HTTPS object client. The background refresh chain verifies
+each peer's current finalized delegation and exact policy commitment before the
+DHT locator, descriptor, and prekeys can update the durable device ledger.
+Failures are reported, never extend stale state, and do not become transport.
+See [`DISCOVERY_BOOTSTRAP.md`](DISCOVERY_BOOTSTRAP.md).
 
 ## What `"transport": "none"` means
 

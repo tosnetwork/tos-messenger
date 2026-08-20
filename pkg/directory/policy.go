@@ -56,8 +56,18 @@ func (p DescriptorPolicy) Validate() error {
 
 // Digest is the value a delegation commits.
 func (p DescriptorPolicy) Digest() (string, error) {
-	if err := p.Validate(); err != nil {
+	preimage, err := DescriptorPolicyCanonicalBytes(p)
+	if err != nil {
 		return "", err
+	}
+	return canon.Digest(preimage), nil
+}
+
+// DescriptorPolicyCanonicalBytes returns the exact preimage committed by a
+// delegation, independently of the JSON publication wrapper.
+func DescriptorPolicyCanonicalBytes(p DescriptorPolicy) ([]byte, error) {
+	if err := p.Validate(); err != nil {
+		return nil, err
 	}
 	buffer := bytes.NewBufferString(canon.DomainDescriptorPolicy)
 	canon.Text(buffer, DescriptorPolicySchema)
@@ -65,7 +75,7 @@ func (p DescriptorPolicy) Digest() (string, error) {
 	canon.Uint64(buffer, p.MaxLifetimeSeconds)
 	canon.Uint32(buffer, boolean(p.AllowHTTPSEndpoint))
 	canon.Uint32(buffer, boolean(p.RequireADNL))
-	return canon.Digest(buffer.Bytes()), nil
+	return buffer.Bytes(), nil
 }
 
 // Permits reports whether a descriptor stays inside the policy.

@@ -96,6 +96,11 @@ func (m *Manager) Run(ctx context.Context, agentIDs []string, interval time.Dura
 			if ctx.Err() != nil {
 				return
 			}
+			// A scheduled refresh is a finalized-authority recheck, not a
+			// cache read. Without invalidation, a long-lived descriptor could
+			// postpone revocation until its near-expiry refresh deadline even
+			// while this loop wakes every few minutes.
+			m.Invalidate(agentID)
 			_, _ = m.Ensure(ctx, agentID)
 		}
 	}

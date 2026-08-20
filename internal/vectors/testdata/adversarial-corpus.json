@@ -56,6 +56,41 @@
     "reason": "an unknown field means the sender and receiver disagree about the object's shape"
   },
   {
+    "name": "descriptor-policy-binding/wrong-commitment",
+    "layer": "verify",
+    "target": "descriptor-policy-binding",
+    "wire": "{\"schema\":\"tos.messaging.descriptor-policy.v1\",\"max_envelope_bytes\":131072,\"max_lifetime_seconds\":86399,\"allow_https_endpoint\":true,\"require_adnl\":false}",
+    "reason": "a valid policy document is not this Agent's policy unless it reproduces the digest committed by the finalized delegation"
+  },
+  {
+    "name": "descriptor-policy/empty",
+    "layer": "decode",
+    "target": "descriptor-policy",
+    "wire": "",
+    "reason": "an empty document is not an object"
+  },
+  {
+    "name": "descriptor-policy/trailing-json",
+    "layer": "decode",
+    "target": "descriptor-policy",
+    "wire": "{\"schema\":\"tos.messaging.descriptor-policy.v1\",\"max_envelope_bytes\":131072,\"max_lifetime_seconds\":86400,\"allow_https_endpoint\":true,\"require_adnl\":false}{\"x\":1}",
+    "reason": "trailing data lets two byte streams decode to one object"
+  },
+  {
+    "name": "descriptor-policy/truncated",
+    "layer": "decode",
+    "target": "descriptor-policy",
+    "wire": "{\"schema\":\"tos.messaging.descriptor-policy.v1\",\"max_envelope_bytes\":131072,\"max_lifetime_seconds\":86400,\"allow_https_endpoint\":true,\"require_adnl\":false",
+    "reason": "a truncated document is not the object it was cut from"
+  },
+  {
+    "name": "descriptor-policy/unknown-field",
+    "layer": "decode",
+    "target": "descriptor-policy",
+    "wire": "{\"unknown_field\":1,\"schema\":\"tos.messaging.descriptor-policy.v1\",\"max_envelope_bytes\":131072,\"max_lifetime_seconds\":86400,\"allow_https_endpoint\":true,\"require_adnl\":false}",
+    "reason": "an unknown field means the sender and receiver disagree about the object's shape"
+  },
+  {
     "name": "dht-locator/truncated",
     "layer": "decode",
     "target": "dht-locator",

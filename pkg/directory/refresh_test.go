@@ -27,6 +27,13 @@ func (s *refreshSource) Delegation(context.Context, string) ([]byte, error) {
 	}
 	return s.delegation, nil
 }
+func (s *refreshSource) DescriptorPolicy(context.Context, identity.Delegation) (DescriptorPolicy, error) {
+	s.calls = append(s.calls, StagePolicy)
+	if s.fail == StagePolicy {
+		return DescriptorPolicy{}, errors.New("policy unavailable")
+	}
+	return testPolicy(), nil
+}
 func (s *refreshSource) Locator(context.Context, DHTKey) ([]byte, error) {
 	s.calls = append(s.calls, StageLocator)
 	if s.fail == StageLocator {
@@ -100,7 +107,7 @@ func refreshFixture(t *testing.T) (*refreshSource, Refresher, *refreshAdmitter) 
 	source := &refreshSource{delegation: delegationRaw, locator: locatorRaw, descriptor: descriptorRaw, bundles: bundles}
 	admitter := &refreshAdmitter{}
 	refresher := Refresher{Source: source, Resolver: liveResolver(t, delegation), Network: testNetwork(),
-		Chain: testChain(), Policy: testPolicy(), Admitter: admitter,
+		Chain: testChain(), Admitter: admitter,
 		Now: func() time.Time { return time.Unix(int64(baseUnix)+60, 0) }}
 	return source, refresher, admitter
 }
@@ -114,7 +121,7 @@ func TestRefreshVerifiesAndCommitsTheWholeChain(t *testing.T) {
 	if admitter.calls != 1 || result.Succession.Accepted.Digest == "" {
 		t.Fatal("published set was not committed")
 	}
-	want := []RefreshStage{StageDelegation, StageLocator, StageDescriptor, StagePrekeys}
+	want := []RefreshStage{StageDelegation, StagePolicy, StageLocator, StageDescriptor, StagePrekeys}
 	if len(source.calls) != len(want) {
 		t.Fatalf("calls=%v", source.calls)
 	}
@@ -133,7 +140,7 @@ func TestRefreshVerifiesAndCommitsTheWholeChain(t *testing.T) {
 }
 
 func TestRefreshStopsAtTheFailedBoundary(t *testing.T) {
-	for _, stage := range []RefreshStage{StageDelegation, StageLocator, StageDescriptor, StagePrekeys} {
+	for _, stage := range []RefreshStage{StageDelegation, StagePolicy, StageLocator, StageDescriptor, StagePrekeys} {
 		t.Run(string(stage), func(t *testing.T) {
 			source, refresher, admitter := refreshFixture(t)
 			source.fail = stage
@@ -157,7 +164,7 @@ func TestRefreshRejectsAStaleLocatorBeforeFetchingDescriptor(t *testing.T) {
 	if !errors.As(err, &refreshErr) || refreshErr.Stage != StageLocator {
 		t.Fatalf("error=%v", err)
 	}
-	if len(source.calls) != 2 || admitter.calls != 0 {
+	if len(source.calls) != 3 || admitter.calls != 0 {
 		t.Fatalf("calls=%v admits=%d", source.calls, admitter.calls)
 	}
 }

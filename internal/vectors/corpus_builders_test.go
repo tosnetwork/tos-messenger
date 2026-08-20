@@ -68,6 +68,15 @@ func validDescriptorJSON(t *testing.T) []byte {
 	return encoded
 }
 
+func validDescriptorPolicyJSON(t *testing.T) []byte {
+	t.Helper()
+	raw, err := directory.EncodeDescriptorPolicyJSON(descriptorPolicy())
+	if err != nil {
+		t.Fatalf("descriptor policy: %v", err)
+	}
+	return raw
+}
+
 func validBundleJSON(t *testing.T) []byte {
 	t.Helper()
 	del := delegation(t)
