@@ -34,6 +34,73 @@ func TestEndToEndADNLEstablishmentIPv6(t *testing.T) {
 // the address family differs.
 func establishOverLoopback(t *testing.T, host string) {
 	t.Helper()
+	results := runADNLPair(t, host, nil)
+	for role, result := range results {
+		if !result.Established {
+			t.Fatalf("no ADNL session was established for role %s: failure=%q", role, result.Failure)
+		}
+		if result.Failure != reachability.FailureNone {
+			t.Fatalf("an established session reported a failure: %q", result.Failure)
+		}
+		if result.EstablishMillis == 0 {
+			t.Fatal("an established session reported no latency")
+		}
+		// Without a hold window the run measures establishment only, exactly
+		// as before: the survival and reconnect fields must keep their
+		// unmeasured zeros rather than invent a measurement.
+		if result.SurvivalSeconds != 0 {
+			t.Fatalf("survival was recorded without a hold window: %d", result.SurvivalSeconds)
+		}
+		if result.ReconnectMillis != 0 {
+			t.Fatalf("a reconnect was recorded without being requested: %d", result.ReconnectMillis)
+		}
+		// The attestation names this probe, so the trial built from this
+		// result files under adnl and nowhere else.
+		if result.Observation.Probe != string(reachability.ProbeADNL) {
+			t.Fatalf("the coordinator attested to %q", result.Observation.Probe)
+		}
+		if err := reachability.VerifyObservation(result.Observation); err != nil {
+			t.Fatalf("the observation does not verify: %v", err)
+		}
+	}
+}
+
+// The route decision reads more than the first round trip: whether a session
+// stays alive under keepalives, and how quickly the initiator re-establishes
+// after a deliberate drop. On loopback the session must survive its whole
+// hold window on both ends, and only the initiating role may carry a
+// reconnect number, because pair joining takes the max of the two halves.
+func TestEndToEndADNLHoldSurvivalAndReconnect(t *testing.T) {
+	hold := 3 * time.Second
+	results := runADNLPair(t, "127.0.0.1", func(config *Config) {
+		config.HoldWindow = hold
+		config.KeepaliveInterval = 300 * time.Millisecond
+		config.MeasureReconnect = true
+	})
+	for role, result := range results {
+		if !result.Established {
+			t.Fatalf("no ADNL session was established for role %s: failure=%q", role, result.Failure)
+		}
+		if result.SurvivalSeconds < 1 {
+			t.Fatalf("role %s measured no survival", role)
+		}
+		if result.SurvivalSeconds != uint64(hold/time.Second) {
+			t.Fatalf("role %s did not survive its full loopback hold window: %d", role, result.SurvivalSeconds)
+		}
+	}
+	if results[RoleA].ReconnectMillis == 0 {
+		t.Fatal("the initiator measured no reconnect")
+	}
+	if results[RoleB].ReconnectMillis != 0 {
+		t.Fatalf("the responder invented a reconnect: %d", results[RoleB].ReconnectMillis)
+	}
+}
+
+// runADNLPair runs both endpoints of one ADNL attempt against a live
+// coordinator on the given loopback host, applies the same configuration
+// adjustment to both, and returns each role's result.
+func runADNLPair(t *testing.T, host string, adjust func(*Config)) map[Role]Result {
+	t.Helper()
 	skipUnderRace(t)
 	loopback := net.JoinHostPort(host, "0")
 	coordinator := testCoordinator(t)
@@ -59,46 +126,36 @@ func establishOverLoopback(t *testing.T, host string) {
 		PollInterval: 50 * time.Millisecond,
 		LingerWindow: 500 * time.Millisecond,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if adjust != nil {
+		adjust(&config)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	type outcome struct {
+		role   Role
 		result Result
 		err    error
 	}
-	results := make(chan outcome, 2)
+	outcomes := make(chan outcome, 2)
 	for _, role := range []Role{RoleA, RoleB} {
 		go func(role Role) {
 			local := config
 			local.Role = role
 			local.EndpointKeyHex = testEndpointKey(role)
 			result, err := RunADNL(ctx, local)
-			results <- outcome{result: result, err: err}
+			outcomes <- outcome{role: role, result: result, err: err}
 		}(role)
 	}
+	results := make(map[Role]Result, 2)
 	for index := 0; index < 2; index++ {
-		received := <-results
+		received := <-outcomes
 		if received.err != nil {
 			t.Fatalf("probe returned an error: %v", received.err)
 		}
-		if !received.result.Established {
-			t.Fatalf("no ADNL session was established: failure=%q", received.result.Failure)
-		}
-		if received.result.Failure != reachability.FailureNone {
-			t.Fatalf("an established session reported a failure: %q", received.result.Failure)
-		}
-		if received.result.EstablishMillis == 0 {
-			t.Fatal("an established session reported no latency")
-		}
-		// The attestation names this probe, so the trial built from this
-		// result files under adnl and nowhere else.
-		if received.result.Observation.Probe != string(reachability.ProbeADNL) {
-			t.Fatalf("the coordinator attested to %q", received.result.Observation.Probe)
-		}
-		if err := reachability.VerifyObservation(received.result.Observation); err != nil {
-			t.Fatalf("the observation does not verify: %v", err)
-		}
+		results[received.role] = received.result
 	}
+	return results
 }
 
 // hasIPv6Loopback reports whether ::1 can actually be bound here, so the IPv6
@@ -210,6 +267,44 @@ func TestCoordinatorRefusesMismatchedProbes(t *testing.T) {
 	second := sendPair(RoleB, reachability.ProbeADNL, testEndpointKey(RoleB))
 	if second.Kind != KindError {
 		t.Fatalf("mismatched probes were paired: %+v", second)
+	}
+}
+
+// A measurement window that cannot work is refused rather than silently
+// ignored: a run that recorded "not measured" for something the operator asked
+// to measure would look like evidence of nothing when it is actually a
+// misconfiguration.
+func TestConfigRefusesUnusableMeasurementWindows(t *testing.T) {
+	base := Config{
+		EndpointKeyHex: testEndpointKey(RoleA), Probe: reachability.ProbeADNL,
+		Coordinators: []string{"127.0.0.1:9"},
+		SessionID:    "ses_00000000000000000000000000000000",
+		Role:         RoleA,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	negative := base
+	negative.HoldWindow = -time.Second
+	if _, err := RunADNL(ctx, negative); err == nil {
+		t.Fatal("a negative hold window was accepted")
+	}
+	tooSlow := base
+	tooSlow.HoldWindow = time.Second
+	tooSlow.KeepaliveInterval = 2 * time.Second
+	if _, err := RunADNL(ctx, tooSlow); err == nil {
+		t.Fatal("a keepalive interval larger than its hold window was accepted")
+	}
+	unheld := base
+	unheld.MeasureReconnect = true
+	if _, err := RunADNL(ctx, unheld); err == nil {
+		t.Fatal("reconnect measurement without a hold window was accepted")
+	}
+	wrongProbe := base
+	wrongProbe.Probe = reachability.ProbeUDP
+	wrongProbe.HoldWindow = time.Second
+	if _, err := Run(ctx, wrongProbe); err == nil {
+		t.Fatal("the udp probe accepted a hold window it cannot measure")
 	}
 }
 

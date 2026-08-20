@@ -52,6 +52,11 @@ func main() {
 	pairTimeout := flag.Duration("pair-timeout", probe.DefaultPairTimeout, "how long to wait for the peer")
 	punchTimeout := flag.Duration("punch-timeout", probe.DefaultPunchTimeout, "how long to attempt a direct path")
 
+	var phases sessionPhases
+	flag.DurationVar(&phases.hold, "hold", 0, "how long past establishment to keep the adnl session alive and measure survival, 0 for establishment only")
+	flag.DurationVar(&phases.keepalive, "keepalive", 0, "keepalive ping interval of the hold phase, defaulted when 0")
+	flag.BoolVar(&phases.reconnect, "reconnect", false, "deliberately drop and re-establish the session after the hold phase (initiator only, requires -hold)")
+
 	var labels declared
 	flag.StringVar(&labels.operator, "operator", "", "operator name, hashed into an opaque identifier")
 	flag.StringVar(&labels.site, "site", "", "name of the network this endpoint runs on, hashed into an opaque identifier")
@@ -63,7 +68,7 @@ func main() {
 	flag.Parse()
 
 	trial, err := measure(context.Background(), *coordinators, *session, *role, *listen, *commit, *identity,
-		reachability.ProbeKind(*probeKind), *pairTimeout, *punchTimeout, labels)
+		reachability.ProbeKind(*probeKind), *pairTimeout, *punchTimeout, phases, labels)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tos-reachability:", err)
 		os.Exit(1)
@@ -77,11 +82,23 @@ func main() {
 		fmt.Fprintln(os.Stderr, "tos-reachability:", err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "outcome=%s failure=%s establish_ms=%d\n", trial.Outcome, trial.Failure, trial.EstablishMillis)
+	fmt.Fprintf(os.Stderr, "outcome=%s failure=%s establish_ms=%d survival_s=%d reconnect_ms=%d\n",
+		trial.Outcome, trial.Failure, trial.EstablishMillis, trial.SurvivalSeconds, trial.ReconnectMillis)
+}
+
+// sessionPhases carries the measurement phases that run after establishment.
+// They are collected in one place because they travel together: reconnect
+// requires a hold window, and both are refused for the udp probe, which has no
+// session to hold.
+type sessionPhases struct {
+	hold      time.Duration
+	keepalive time.Duration
+	reconnect bool
 }
 
 func measure(ctx context.Context, coordinators, session, role, listen, commit, identity string,
-	probeKind reachability.ProbeKind, pairTimeout, punchTimeout time.Duration, labels declared) (reachability.Trial, error) {
+	probeKind reachability.ProbeKind, pairTimeout, punchTimeout time.Duration,
+	phases sessionPhases, labels declared) (reachability.Trial, error) {
 	addresses := splitAddresses(coordinators)
 	if len(addresses) == 0 {
 		return reachability.Trial{}, errors.New("at least one coordinator is required")
@@ -117,15 +134,18 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 	}
 	endpointPublicHex := hex.EncodeToString(endpointPublic)
 	configuration := probe.Config{
-		Coordinators:   addresses,
-		SessionID:      session,
-		Role:           probe.Role(role),
-		ListenAddr:     listen,
-		PairTimeout:    pairTimeout,
-		PunchTimeout:   punchTimeout,
-		Commit:         commit,
-		EndpointKeyHex: endpointPublicHex,
-		Probe:          probeKind,
+		Coordinators:      addresses,
+		SessionID:         session,
+		Role:              probe.Role(role),
+		ListenAddr:        listen,
+		PairTimeout:       pairTimeout,
+		PunchTimeout:      punchTimeout,
+		HoldWindow:        phases.hold,
+		KeepaliveInterval: phases.keepalive,
+		MeasureReconnect:  phases.reconnect,
+		Commit:            commit,
+		EndpointKeyHex:    endpointPublicHex,
+		Probe:             probeKind,
 	}
 	// The two runners measure different questions. The UDP one answers
 	// whether datagrams pass; the ADNL one answers whether the session a
@@ -186,16 +206,8 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		RxBytes:          result.RxBytes,
 		EstablishMillis:  result.EstablishMillis,
 	}
-	if result.Established {
-		trial.Outcome = reachability.OutcomeDirect
-		trial.Failure = reachability.FailureNone
-	} else {
-		// This probe measures the direct path only. It cannot claim a proxy,
-		// Relay, or HTTPS fallback it never attempted, so a trial without a
-		// direct session is recorded as a failure with its cause.
-		trial.Outcome = reachability.OutcomeFailed
-		trial.Failure = result.Failure
-		trial.EstablishMillis = 0
+	if err := classify(&trial, result); err != nil {
+		return reachability.Trial{}, err
 	}
 	signed, err := reachability.SignTrial(trial, endpointKey)
 	if err != nil {
@@ -205,6 +217,28 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		return reachability.Trial{}, err
 	}
 	return signed, nil
+}
+
+// classify translates what the probe measured into the trial's outcome
+// vocabulary.
+//
+// A direct session carries its survival and reconnect measurements. A trial
+// without one is a classified failure: this collector cannot claim a Relay or
+// HTTPS fallback it never attempted, so the failure keeps its cause. Zeroing
+// the establishment latency on failure is what the schema requires -- a failed
+// trial has no establishment to report.
+func classify(trial *reachability.Trial, result probe.Result) error {
+	if !result.Established {
+		trial.Outcome = reachability.OutcomeFailed
+		trial.Failure = result.Failure
+		trial.EstablishMillis = 0
+		return nil
+	}
+	trial.Outcome = reachability.OutcomeDirect
+	trial.Failure = reachability.FailureNone
+	trial.SurvivalSeconds = result.SurvivalSeconds
+	trial.ReconnectMillis = result.ReconnectMillis
+	return nil
 }
 
 // loadOrCreateKey keeps one host's endpoint identity stable. A key that

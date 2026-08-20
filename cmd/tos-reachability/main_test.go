@@ -32,23 +32,23 @@ func TestMeasureRefusesUnusableInput(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	session := "ses_0123456789abcdef0123456789abcdef"
 
-	if _, err := measure(ctx, "", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, labels); err == nil {
+	if _, err := measure(ctx, "", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, labels); err == nil {
 		t.Fatal("expected a missing coordinator to be refused")
 	}
 	blank := labels
 	blank.operator = ""
-	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, blank); err == nil {
+	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, blank); err == nil {
 		t.Fatal("expected a missing operator to be refused")
 	}
 	noSite := labels
 	noSite.site = ""
-	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, noSite); err == nil {
+	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, noSite); err == nil {
 		t.Fatal("expected a missing site to be refused")
 	}
-	if _, err := measure(ctx, "127.0.0.1:1", "ses_short", "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, labels); err == nil {
+	if _, err := measure(ctx, "127.0.0.1:1", "ses_short", "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, labels); err == nil {
 		t.Fatal("expected an invalid session to be refused")
 	}
-	if _, err := measure(ctx, "127.0.0.1:1", session, "c", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, labels); err == nil {
+	if _, err := measure(ctx, "127.0.0.1:1", session, "c", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, labels); err == nil {
 		t.Fatal("expected an invalid role to be refused")
 	}
 }
@@ -61,7 +61,7 @@ func TestMeasureRefusesToRecordAnUnclassifiedTrial(t *testing.T) {
 	_, err := measure(context.Background(), "127.0.0.1:9",
 		"ses_0123456789abcdef0123456789abcdef", "a", "127.0.0.1:0",
 		strings.Repeat("a", 40), identityFile(t), reachability.ProbeUDP,
-		200*time.Millisecond, 200*time.Millisecond, labels)
+		200*time.Millisecond, 200*time.Millisecond, sessionPhases{}, labels)
 	if err == nil {
 		t.Fatal("expected an unclassified trial to be refused")
 	}
@@ -124,13 +124,13 @@ func TestADNLTrialEndToEnd(t *testing.T) {
 	go func() {
 		trial, err := measure(ctx, coordinatorAddress, session, "a", "127.0.0.1:0",
 			strings.Repeat("a", 40), identityFile(t), reachability.ProbeADNL,
-			8*time.Second, 10*time.Second, labels)
+			8*time.Second, 10*time.Second, sessionPhases{}, labels)
 		results <- outcome{trial: trial, err: err}
 	}()
 	go func() {
 		trial, err := measure(ctx, coordinatorAddress, session, "b", "127.0.0.1:0",
 			strings.Repeat("b", 40), identityFile(t), reachability.ProbeADNL,
-			8*time.Second, 10*time.Second, peerLabels)
+			8*time.Second, 10*time.Second, sessionPhases{}, peerLabels)
 		results <- outcome{trial: trial, err: err}
 	}()
 	policy := testPolicyWith(coordinatorID)
@@ -150,6 +150,40 @@ func TestADNLTrialEndToEnd(t *testing.T) {
 		if err := reachability.VerifyTrial(policy, received.trial); err != nil {
 			t.Fatalf("the trial does not verify: %v", err)
 		}
+		// No hold window was requested, so the trial must carry the unmeasured
+		// zeros rather than an invented survival or reconnect.
+		if received.trial.SurvivalSeconds != 0 || received.trial.ReconnectMillis != 0 {
+			t.Fatalf("an establishment-only trial carried measurements: survival=%d reconnect=%d",
+				received.trial.SurvivalSeconds, received.trial.ReconnectMillis)
+		}
+	}
+}
+
+// classify is the single translation from what the probe measured to the
+// trial vocabulary the schema validates, so its cases are pinned directly.
+func TestClassifyOutcomes(t *testing.T) {
+	direct := reachability.Trial{EstablishMillis: 42}
+	if err := classify(&direct, probe.Result{
+		Established: true, SurvivalSeconds: 7, ReconnectMillis: 90,
+	}); err != nil {
+		t.Fatalf("classify direct: %v", err)
+	}
+	if direct.Outcome != reachability.OutcomeDirect || direct.Failure != reachability.FailureNone {
+		t.Fatalf("direct misclassified: %q/%q", direct.Outcome, direct.Failure)
+	}
+	if direct.SurvivalSeconds != 7 || direct.ReconnectMillis != 90 {
+		t.Fatal("a direct trial dropped its survival or reconnect measurement")
+	}
+
+	failed := reachability.Trial{EstablishMillis: 42}
+	if err := classify(&failed, probe.Result{Failure: reachability.FailureHandshake}); err != nil {
+		t.Fatalf("classify failed: %v", err)
+	}
+	if failed.Outcome != reachability.OutcomeFailed || failed.Failure != reachability.FailureHandshake {
+		t.Fatalf("failure misclassified: %q/%q", failed.Outcome, failed.Failure)
+	}
+	if failed.EstablishMillis != 0 {
+		t.Fatal("a failed trial kept an establishment latency")
 	}
 }
 

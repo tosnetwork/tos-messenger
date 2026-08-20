@@ -20,6 +20,22 @@ import (
 
 var silenceADNLLogs sync.Once
 
+const (
+	// keepalivePingTimeout bounds one keepalive or reconnect round trip. It is
+	// the bound the establishment pings already use, so "the session answered"
+	// means the same thing in every phase.
+	keepalivePingTimeout = 2 * time.Second
+	// keepaliveDeathLimit is how many consecutive failed keepalives judge the
+	// session dead. One lost datagram is UDP behaving normally; several in a
+	// row, each given a full round-trip timeout, is the session gone. The death
+	// time recorded is the last successful ping, not the moment of the verdict,
+	// because the verdict's lateness is this tool's, not the network's.
+	keepaliveDeathLimit = 3
+	// doneSignalGrace pads the done-signal wait past the last phase a peer can
+	// legitimately still be in, covering the signalling round trips themselves.
+	doneSignalGrace = 2 * time.Second
+)
+
 // arrival is one usable session, with the address it exists over.
 type arrival struct {
 	addr netip.AddrPort
@@ -35,6 +51,14 @@ type arrival struct {
 // directions with sizes and timing a NAT or a middlebox may treat differently
 // from a single probe datagram, and freezing a transport on datagram evidence
 // alone would be measuring the wrong protocol.
+//
+// Establishment alone is still not the route decision's whole question. A NAT
+// that admits a handshake and then forgets the mapping under keepalives kills
+// the session minutes later, and a session that cannot be re-established after
+// a drop is a different deployment reality than one that can. When a hold
+// window is configured, both ends therefore keep the confirmed session alive
+// with paced pings and record how long it survived, and the initiator can
+// additionally drop its channel state on purpose and time the reconnect.
 //
 // The flow reuses the coordinator rendezvous, then hands the socket's port to
 // a real ADNL gateway. The roles are deliberately asymmetric from there, and
@@ -278,15 +302,139 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 		return
 	}
 
+	if r.config.HoldWindow > 0 {
+		alive := r.holdSession(ctx, confirmed)
+		// Reconnect is measured only on the initiating side, and only over a
+		// session the hold phase showed was still alive: re-establishing a
+		// session the network had already killed would time the network's
+		// recovery, not the deliberate drop this phase performs. The responder
+		// leaves the field zero, and pair joining takes the max of the two
+		// halves, so the pair still carries one number.
+		if alive && r.config.MeasureReconnect && r.config.Role == RoleA {
+			r.measureReconnect(ctx, confirmed)
+		}
+	}
+
 	// The gateway has to outlive this endpoint's own success: closing the
 	// moment the session came up would pull it out from under a peer that is
 	// still measuring, and that error is not random -- it lands on whichever
 	// endpoint is slower, which is exactly the bias a success rate must not
-	// carry. The done signal travels through the coordinator, not over the
-	// session under test, because a layer must not carry its own test's
-	// control plane: "the session failed" and "the signalling failed" have to
-	// stay distinguishable.
-	r.awaitPeerDone(ctx, deadline)
+	// carry. The wait is therefore budgeted for every phase the peer may still
+	// be in, not only for establishment. The done signal travels through the
+	// coordinator, not over the session under test, because a layer must not
+	// carry its own test's control plane: "the session failed" and "the
+	// signalling failed" have to stay distinguishable.
+	r.awaitPeerDone(ctx, deadline.Add(measurementBudget(r.config)))
+}
+
+// measurementBudget is how long past the shared establishment deadline the
+// peer may legitimately still be measuring. Its hold phase starts at its own
+// establishment, which can land as late as the deadline itself; its last
+// keepalive can still be in flight at the window's edge; and its reconnect
+// phase is bounded by the punch timeout. The reconnect share is budgeted on
+// both sides even though only the initiator reconnects, because an endpoint
+// cannot see its peer's flags -- and the done signal ends the wait early, so
+// the surplus is only ever paid when the peer actually uses it.
+func measurementBudget(config Config) time.Duration {
+	if config.HoldWindow <= 0 {
+		return 0
+	}
+	return config.HoldWindow + keepalivePingTimeout + config.PunchTimeout + doneSignalGrace
+}
+
+// holdSession keeps the confirmed session alive with paced pings until the
+// hold window elapses or the session is judged dead, and records the survival
+// span. It reports whether the session was still alive when the phase ended.
+//
+// Both roles run this: a session exists only while both ends have it, and the
+// aggregation takes the shorter half, so a side that did not measure would
+// silently remove its pair from the survival percentile.
+func (r *runner) holdSession(ctx context.Context, peer adnl.Peer) bool {
+	holdUntil := r.establishedAt.Add(r.config.HoldWindow)
+	lastAlive := r.establishedAt
+	failures := 0
+	ticker := time.NewTicker(r.config.KeepaliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// A torn-down run is tooling, not the network. Recording the span
+			// measured so far would understate sessions that were still alive,
+			// so the field keeps its unmeasured zero.
+			return false
+		case <-ticker.C:
+		}
+		if !time.Now().Before(holdUntil) {
+			// Death is only ever judged at the failure limit, so a window that
+			// ends with fewer misses than the limit counts as survived to its
+			// end: at the keepalive's granularity that is what was observed.
+			r.result.SurvivalSeconds = clampedSeconds(r.config.HoldWindow)
+			return true
+		}
+		attempt, cancel := context.WithTimeout(ctx, keepalivePingTimeout)
+		_, err := peer.Ping(attempt)
+		cancel()
+		if err == nil {
+			lastAlive = time.Now()
+			failures = 0
+			continue
+		}
+		failures++
+		if failures >= keepaliveDeathLimit {
+			r.result.SurvivalSeconds = clampedSeconds(lastAlive.Sub(r.establishedAt))
+			return false
+		}
+	}
+}
+
+// clampedSeconds converts a measured span to whole seconds with a floor of
+// one, because zero already means "not measured" in the trial schema and a
+// session that was measured and died at once has to stay distinguishable from
+// one that was never measured at all.
+func clampedSeconds(span time.Duration) uint64 {
+	if span < time.Second {
+		return 1
+	}
+	return uint64(span / time.Second)
+}
+
+// measureReconnect deliberately drops the initiator's channel state and times
+// the re-establishment against the address that carried the session, using
+// fresh ping round trips -- the same act that defined establishment, so the
+// two latencies are comparable.
+//
+// A reconnect that fails inside its window leaves the field at zero, which
+// the schema reads as "not measured". That is honest but lossy: a failed
+// reconnect is currently indistinguishable from an unmeasured one, because
+// the trial record has no slot for a reconnect failure, and inventing one by
+// changing the trial's direct outcome would misfile a session that was
+// genuinely established and genuinely survived.
+func (r *runner) measureReconnect(ctx context.Context, peer adnl.Peer) {
+	dropped := time.Now()
+	deadline := dropped.Add(r.config.PunchTimeout)
+	peer.Reinit()
+	failures := 0
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return
+		}
+		attempt, cancel := context.WithTimeout(ctx, keepalivePingTimeout)
+		_, err := peer.Ping(attempt)
+		cancel()
+		if err == nil {
+			elapsed := time.Since(dropped).Milliseconds()
+			if elapsed < 1 {
+				elapsed = 1
+			}
+			r.result.ReconnectMillis = uint64(elapsed)
+			return
+		}
+		failures++
+		if failures%2 == 0 {
+			peer.Reinit()
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // dial is the initiator's loop: try every candidate until one carries a
@@ -357,12 +505,13 @@ func (r *runner) awaitInbound(ctx context.Context, established <-chan arrival,
 	}
 }
 
-// record marks the establishment.
+// record marks the establishment and anchors the hold window to it.
 func (r *runner) record(started time.Time, peer netip.AddrPort) {
 	r.result.Established = true
 	r.result.Failure = reachability.FailureNone
 	r.result.PeerAddress = peer
-	r.result.EstablishMillis = uint64(time.Since(started).Milliseconds())
+	r.establishedAt = time.Now()
+	r.result.EstablishMillis = uint64(r.establishedAt.Sub(started).Milliseconds())
 	if r.result.EstablishMillis == 0 {
 		r.result.EstablishMillis = 1
 	}

@@ -24,6 +24,9 @@ const (
 	// DefaultLingerWindow is how long an endpoint keeps answering the peer
 	// after its own path is established.
 	DefaultLingerWindow = 2 * time.Second
+	// DefaultKeepaliveInterval paces the hold phase's keepalive pings. It only
+	// matters when a hold window is configured.
+	DefaultKeepaliveInterval = 2 * time.Second
 )
 
 // Config configures one measured endpoint.
@@ -37,7 +40,23 @@ type Config struct {
 	PunchTimeout time.Duration
 	PollInterval time.Duration
 	LingerWindow time.Duration
-	Commit       string
+	// HoldWindow is how long past a confirmed establishment the ADNL session is
+	// kept alive and measured. Zero measures establishment only, which is the
+	// default and the historical behavior. Establishment answers whether a
+	// session comes up; the hold window answers whether it stays up, which is a
+	// different property of the same middleboxes.
+	HoldWindow time.Duration
+	// KeepaliveInterval paces the hold phase's pings. It is meaningful only
+	// when HoldWindow is set, and it must fit inside the window, because an
+	// interval the window cannot contain would measure nothing while claiming
+	// to.
+	KeepaliveInterval time.Duration
+	// MeasureReconnect asks the initiating side to deliberately drop its
+	// channel state after the hold phase and time the re-establishment. It
+	// requires a hold window: a reconnect measured against a session that was
+	// never shown to still be alive would time an unknown baseline.
+	MeasureReconnect bool
+	Commit           string
 	// EndpointKeyHex is the public key this endpoint will sign its trial with.
 	// It is presented to the coordinator so the attestation names a party, not
 	// only a session.
@@ -54,6 +73,17 @@ type Result struct {
 	AddressFamily   reachability.AddressFamily
 	Established     bool
 	EstablishMillis uint64
+	// SurvivalSeconds is measured from establishment to the last successful
+	// keepalive, floored at one second so a session that was measured and died
+	// at once stays distinguishable from a session that was never measured:
+	// zero is the schema's "not measured". Surviving the whole hold window
+	// records the window's full length.
+	SurvivalSeconds uint64
+	// ReconnectMillis is the initiating side's time from a deliberate channel
+	// drop to the first confirming round trip. The responder leaves it zero;
+	// pair joining takes the max of the two halves, so the pair still carries
+	// one number.
+	ReconnectMillis uint64
 	PeerAddress     netip.AddrPort
 	Failure         reachability.FailureClass
 	PeerCommit      string
@@ -109,6 +139,9 @@ type runner struct {
 	result          Result
 	selfPublic      bool
 	learned         []netip.AddrPort
+	// establishedAt is the moment the confirming round trip completed; the hold
+	// window and the survival measurement are both anchored to it.
+	establishedAt time.Time
 }
 
 // observe answers a peer probe that arrives while this endpoint is still
@@ -226,6 +259,24 @@ func validateConfig(config *Config) error {
 	}
 	if config.LingerWindow < 0 {
 		return errors.New("invalid probe linger window")
+	}
+	if config.HoldWindow < 0 || config.KeepaliveInterval < 0 {
+		return errors.New("invalid probe hold windows")
+	}
+	if config.KeepaliveInterval == 0 {
+		config.KeepaliveInterval = DefaultKeepaliveInterval
+	}
+	if config.HoldWindow > 0 && config.KeepaliveInterval > config.HoldWindow {
+		return errors.New("the keepalive interval must fit inside the hold window")
+	}
+	if config.MeasureReconnect && config.HoldWindow == 0 {
+		return errors.New("reconnect measurement requires a hold window")
+	}
+	// The datagram probe has no session to hold or reconnect. Ignoring the
+	// request would record "not measured" for something the operator asked to
+	// measure, so it is refused instead.
+	if config.Probe == reachability.ProbeUDP && (config.HoldWindow > 0 || config.MeasureReconnect) {
+		return errors.New("the udp probe measures datagram establishment only")
 	}
 	if config.Commit != "" && !commitPattern.MatchString(config.Commit) {
 		return errors.New("invalid probe commit")
