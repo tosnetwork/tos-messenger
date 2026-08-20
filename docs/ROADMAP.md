@@ -119,8 +119,8 @@ repository, and one ✅ or one 🟡 would misstate both halves.
 | Action policy evaluator (effects, ceilings, provenance typing) | ✅ | `pkg/firewall` |
 | Authenticated owner decision queue (challenge + signature, bounded, expiring) | ✅ | `pkg/localapi`, `pkg/eventlog` |
 | One-shot side-effect authorization | ✅ | Owner-granted actions and policy-allowed **spends and tool calls** become durable grants consumed by `actions.claim` exactly once. Tool calls require a canonical runtime-supplied `idem_` key committed into the Action ID: a retry reproduces the spent grant, while two legitimate identical invocations use distinct keys. Low-risk message/local effects remain deliberately inline |
-| OpenFox provenance enforcement | ⬜ | `DerivedFrom` is the runtime's own claim. Until a trusted runtime wrapper binds model context to action provenance, a compromised runtime can under-report and be judged at the looser ceiling |
-| Wallet/tool adapter enforcement | ⬜ | Nothing executes through the firewall yet; there is no wallet and no tool adapter |
+| OpenFox provenance enforcement | ✅ | OpenFox `fbb052df` derives provenance from runtime-owned inbound/session metadata, persists it outside model-visible provider payloads, and binds the complete durable context to every tool proposal. Legacy/unattributed input, lossy summaries, conflicting origins, and more than 32 origins fail closed. The production Messenger channel still has to supply the authenticated origin; the plaintext lab channel deliberately cannot |
+| Wallet/tool adapter enforcement | 🟡 | OpenFox `fbb052df` classifies built-in, MCP, hardware, skill, messaging, and sub-Agent tools and checks the daemon before `Execute`; unknown injected tools fail closed, retries use runtime-derived keys, owner holds are polled, and grants are claimed once. `servicebridge.AuthorizedCustodySigner` commits exact quote/asset/mandate terms before funding and separately protects settlement key use. A production buyer composition must still make the custody wrapper mandatory rather than injectable by convention |
 
 ## Commerce, split honestly
 
