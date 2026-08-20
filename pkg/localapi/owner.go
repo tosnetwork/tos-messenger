@@ -123,9 +123,17 @@ func DecisionBytes(request Request, challenge string) ([]byte, error) {
 	// A mandate is placed by value, so what is signed is the authorisation
 	// itself rather than a name for it.
 	if request.Mandate != nil {
+		genesisRoot, rootErr := hex.DecodeString(request.Mandate.Asset.GenesisRootHash)
+		genesisFile, fileErr := hex.DecodeString(request.Mandate.Asset.GenesisFileHash)
+		if rootErr != nil || fileErr != nil || len(genesisRoot) != 32 || len(genesisFile) != 32 {
+			return nil, errors.New("invalid mandate network hashes")
+		}
 		canon.Text(buffer, request.Mandate.Objective)
 		canon.Text(buffer, request.Mandate.Authority)
 		canon.Text(buffer, request.Mandate.CapabilityClass)
+		canon.Text(buffer, request.Mandate.Asset.NetworkID)
+		canon.Bytes(buffer, genesisRoot)
+		canon.Bytes(buffer, genesisFile)
 		canon.Uint32(buffer, uint32(request.Mandate.Asset.Workchain))
 		canon.Text(buffer, request.Mandate.Asset.AccountID)
 		canon.Text(buffer, request.Mandate.Asset.MasterCodeHash)

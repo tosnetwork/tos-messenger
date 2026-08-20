@@ -22,6 +22,34 @@ The runtime socket carries inbox draining and event submission and no approval
 operation at all. The owner socket carries the decisions and does no Agent
 work.
 
+`tos-messenger-owner` makes the action-decision path operational without
+requiring the online machine to load the owner's private key. The challenge is
+single-use and expires after two minutes, so the three commands form one short
+ceremony:
+
+```sh
+# Online, on the Messenger host.
+tos-messenger-owner -socket /run/tos-messengerd/owner.sock pending
+tos-messenger-owner -socket /run/tos-messengerd/owner.sock \
+  prepare-grant act_... > prepared.json
+
+# Offline or on the isolated owner signer. The key file is exactly 128
+# lowercase hex digits (the standard 64-byte Ed25519 private key), mode 0600.
+tos-messenger-owner sign -key owner.key -decision prepared.json > signed.json
+
+# Back online before the challenge expires.
+tos-messenger-owner -socket /run/tos-messengerd/owner.sock \
+  submit -decision signed.json
+```
+
+Use `prepare-deny -reason TEXT act_...` for a refusal. The prepared envelope
+contains the exact domain-separated signing bytes as hex; `sign` recomputes
+them from the strict request and refuses any mismatch. `submit` repeats that
+check and the daemon finally verifies the signature and consumes its challenge.
+Production deployments should replace the file-backed offline example with a
+hardware or separately custodied Ed25519 signer. Keeping `owner.key` readable
+by the Agent runtime collapses the approval boundary even if its mode is 0600.
+
 When `publication.mode` is `prekeys`, the third socket exposes only the current
 fixed public generation and admission of one already Endpoint-signed public
 bundle. It exposes no approval operation, private material, other device's
