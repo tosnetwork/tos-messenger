@@ -234,6 +234,17 @@ rule afterwards:
 sudo iptables -D OUTPUT -p udp -d <host-ip> -m multiport ! --dports 7691,7692,7693 -j DROP
 ```
 
+The adnl probe can also speak through the node's own ADNL stack instead of
+the in-process gateway: `-adnl-probe /path/to/tos-adnl-probe` runs the native
+sidecar (JSON over stdin/stdout, protocol `tos-adnl-probe/1`), and the trial's
+collector manifest then names `tos-native-adnl`, the sidecar's own commit and
+toolchain, and the sha256 of the sidecar binary. The sidecar runner refuses
+`-tunnel` and IPv6 sockets — the native transport supports neither, and those
+cells stay with the gateway runner. `-echo-sizes 1024,8176` (adnl only, each
+size 1..8176) adds sized echo round trips after the measured phases; their
+verdicts appear on the stderr summary as `echo=1024:ok:3ms,...` and are
+cross-check harness evidence, never part of the signed trial.
+
 ## 7. Aggregate
 
 Collect both logs onto one machine and concatenate:
