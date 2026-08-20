@@ -52,6 +52,22 @@ func RunADNLSidecar(ctx context.Context, config Config) (Result, error) {
 	if config.SidecarPath == "" {
 		return Result{}, errors.New("the sidecar runner needs a sidecar binary path")
 	}
+	// The sidecar protocol freezes hard bounds on every window it accepts,
+	// and it validates them before touching any session state -- an
+	// out-of-range timeout answered after a channel reset would record a
+	// control-plane mistake as a network failure. Refusing here keeps the
+	// two implementations byte-for-byte agreed on the bounds and turns an
+	// operator's oversized flag into a loud tooling error instead of a
+	// protocol error mid-measurement.
+	if config.PunchTimeout < time.Millisecond || config.PunchTimeout > sidecarMaxTimeout {
+		return Result{}, errors.New("the sidecar protocol bounds timeouts to [1ms, 120s]")
+	}
+	if config.HoldWindow > sidecarMaxHoldWindow {
+		return Result{}, errors.New("the sidecar protocol bounds the hold window to at most 600s")
+	}
+	if config.HoldWindow > 0 && config.KeepaliveInterval > sidecarMaxTimeout {
+		return Result{}, errors.New("the sidecar protocol bounds the keepalive interval to at most 120s")
+	}
 
 	sidecar, err := StartSidecar(ctx, config.SidecarPath)
 	if err != nil {
@@ -163,6 +179,15 @@ func ipv4Candidates(peers []netip.AddrPort) []string {
 	}
 	return candidates
 }
+
+// The sidecar protocol's frozen window bounds. They are protocol constants
+// shared with the native implementation, not tunables: both sides validate
+// against exactly these values, so a run that would be refused over there is
+// refused here first, as a tooling error rather than a measurement.
+const (
+	sidecarMaxTimeout    = 120 * time.Second
+	sidecarMaxHoldWindow = 600 * time.Second
+)
 
 // sidecarUnsupportedCandidate is the sidecar's distinct refusal for a
 // candidate set that was non-empty but entirely outside what its

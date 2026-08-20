@@ -477,6 +477,28 @@ func TestConfigRefusesWhatTheRunnersCannotMeasure(t *testing.T) {
 	if _, err := RunADNLSidecar(ctx, pathless); err == nil {
 		t.Fatal("the sidecar runner accepted a run without a sidecar binary")
 	}
+	// The sidecar protocol freezes its window bounds; a run outside them must
+	// be refused here as tooling, before the sidecar could answer the same
+	// refusal mid-measurement.
+	overlong := base
+	overlong.SidecarPath = "/no/such/sidecar"
+	overlong.PunchTimeout = 121 * time.Second
+	if _, err := RunADNLSidecar(ctx, overlong); err == nil {
+		t.Fatal("the sidecar runner accepted a timeout past the protocol bound")
+	}
+	overheld := base
+	overheld.SidecarPath = "/no/such/sidecar"
+	overheld.HoldWindow = 601 * time.Second
+	if _, err := RunADNLSidecar(ctx, overheld); err == nil {
+		t.Fatal("the sidecar runner accepted a hold window past the protocol bound")
+	}
+	overpaced := base
+	overpaced.SidecarPath = "/no/such/sidecar"
+	overpaced.HoldWindow = 300 * time.Second
+	overpaced.KeepaliveInterval = 121 * time.Second
+	if _, err := RunADNLSidecar(ctx, overpaced); err == nil {
+		t.Fatal("the sidecar runner accepted a keepalive past the protocol bound")
+	}
 	udpSidecar := base
 	udpSidecar.Probe = reachability.ProbeUDP
 	udpSidecar.SidecarPath = "/no/such/sidecar"
