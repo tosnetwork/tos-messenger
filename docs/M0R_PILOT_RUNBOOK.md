@@ -1,7 +1,8 @@
 # M0-R pilot runbook
 
-This runs the entire measurement chain — coordinator, both probes, report —
-with **one operator and two endpoints**, end to end, against real machines.
+This runs the entire measurement chain — coordinators, both probes, the
+tunnel relay, report — with **one operator and two endpoints**, end to end,
+against real machines.
 
 Be clear about what that is before starting. A pilot validates the
 *operational* path: that the binaries run where they need to run, that the
@@ -19,7 +20,7 @@ they are debugging networks, not tooling.
 
 | Piece | Requirement |
 |---|---|
-| Coordinator host | One machine with a public IP and two open inbound UDP ports (defaults below use 7691 and 7692). A cheap VPS is fine |
+| Coordinator host | One machine with a public IP and three open inbound UDP ports (defaults below use 7691 and 7692 for the coordinators and 7693 for the tunnel relay). A cheap VPS is fine. The coordinators' cold filter sockets need no inbound rule — they only ever send |
 | Endpoint A | Any machine with outbound UDP — ideally behind ordinary home NAT |
 | Endpoint B | A second machine in a *different* network situation — ideally the datacenter host itself, or a phone hotspot, so the pair is asymmetric like the pairs the study is about |
 | Build | Go 1.26.5, built from a **clean git checkout** — the trial records the commit from build information, and a record that cannot name what it measured is refused |
@@ -36,27 +37,40 @@ On every machine, from the repository root:
 
 ```sh
 git status            # must be clean; the commit goes into every trial
-GOWORK=off go build ./cmd/tos-reachability-coordinator ./cmd/tos-reachability ./cmd/tos-reachability-report
+GOWORK=off go build ./cmd/tos-reachability-coordinator ./cmd/tos-reachability ./cmd/tos-reachability-tunnel ./cmd/tos-reachability-report
 ```
 
 ## 2. Run the coordinators (public host)
 
 ```sh
-./tos-reachability-coordinator -listen :7691 -key /var/lib/tos-reachability/coordinator.key
-./tos-reachability-coordinator -listen :7692 -key /var/lib/tos-reachability/coordinator.key
+./tos-reachability-coordinator -listen :7691 -key /var/lib/tos-reachability/coordinator-7691.key
+./tos-reachability-coordinator -listen :7692 -key /var/lib/tos-reachability/coordinator-7692.key
 ```
 
 Each prints one line at start:
 
 ```
-coordinator_id=srv_… public_key=… listening=…
+coordinator_id=srv_… public_key=… listening=… filter_port_source=…
 ```
+
+`filter_port_source` is the cold second-port socket the NAT filtering
+receipts are probed from; it is on by default (`-filter-listen`, which must
+share the primary address). If the host holds a second public address, add
+`-filter-secondary-listen` on one instance to also exercise the
+`other-address` cold source — a pilot without one still validates the
+second-port path, which is all a single-address host can honestly measure.
+The cold sockets are write-only, so no inbound firewall rule is needed for
+them.
 
 **Record the `coordinator_id`.** It goes into the policy, and a study only
 counts attestations from coordinators the policy predeclared — this line is
 the thing that has to travel out of band before any measurement is worth
-anything. The key file keeps the identity stable across restarts; both
-instances may share one key, so one `srv_` identifier covers both ports.
+anything. The key file keeps the identity stable across restarts. Give each
+instance **its own key** and predeclare both `srv_` identifiers: the verifier
+derives the NAT mapping class from bind reflections of *distinct*
+coordinators, so two instances wearing one identity leave that derivation
+`undetermined` and the cross-check idle. Sharing one key still runs, but it
+validates less of the evidence chain than a pilot is for.
 
 Long-running deployments should use a systemd unit rather than a shell:
 
@@ -66,7 +80,7 @@ Description=TOS reachability coordinator (%i)
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/tos-reachability-coordinator -listen :%i -key /var/lib/tos-reachability/coordinator.key
+ExecStart=/usr/local/bin/tos-reachability-coordinator -listen :%i -key /var/lib/tos-reachability/coordinator-%i.key
 DynamicUser=yes
 StateDirectory=tos-reachability
 Restart=on-failure
@@ -77,8 +91,8 @@ WantedBy=multi-user.target
 
 installed as `tos-reachability-coordinator@.service` and started with
 `systemctl enable --now tos-reachability-coordinator@7691
-tos-reachability-coordinator@7692` (adjust `-key` to
-`/var/lib/tos-reachability/coordinator.key`, which `StateDirectory` creates).
+tos-reachability-coordinator@7692` (the per-instance key lives under
+`/var/lib/tos-reachability/`, which `StateDirectory` creates).
 
 ## 3. Write the pilot policy
 
@@ -128,8 +142,11 @@ Three rules that are easy to break and quietly ruin the evidence:
   operator name on both endpoints is correct for a pilot: that *is* the fact
   the report will refuse to decide from.
 
-Each run prints `outcome=… failure=… establish_ms=…` to stderr and appends
-one signed JSON trial to `-out`.
+Each run prints `outcome=… failure=… establish_ms=… survival_s=…
+reconnect_ms=…` to stderr and appends one signed JSON trial to `-out`. The
+trial also carries the coordinator-signed bind reflections and filtering
+receipts (`bind_observations`, `filtering_observations`) the verifier derives
+the NAT classes from.
 
 ## 5. One ADNL pair
 
@@ -152,7 +169,67 @@ same command.
 Run a few sessions of each probe. Repetition is cheap and exercises the
 retry and rate-limit paths a single lucky run skips.
 
-## 6. Aggregate
+Then run at least one ADNL session with a short hold and a reconnect, which
+exercises the post-establishment phases. Add `-hold 30s` on **both** sides —
+survival needs both halves, and a pair where only one end held contributes
+nothing to the survival percentile — and `-reconnect` on role `a` only, since
+only the initiator can deliberately drop and re-dial (`-reconnect` without
+`-hold` is refused, and all three phase flags are refused with `-probe udp`):
+
+```sh
+SESSION="ses_$(openssl rand -hex 16)"
+./tos-reachability -probe adnl -hold 30s -reconnect \
+  -coordinators host:7691,host:7692 \
+  -session "$SESSION" -role a -identity ./endpoint-a.key \
+  … # labels and -out as before
+```
+
+Role `b` runs the same with `-role b` and **without** `-reconnect`. Expect
+both halves to report `survival_s=30` (or the measured shorter span) and the
+initiator's half a nonzero `reconnect_ms`; the responder's `reconnect_ms=0`
+means "not measured", which is correct. Keepalives are paced by `-keepalive`
+(2s when unset), so the run takes the hold window plus margins — start both
+sides inside the pair window as usual and let them finish.
+
+## 6. One tunnel fallback pair
+
+The proxy-fallback path runs only when the direct phase ends without a
+session, so a pilot has to make the direct path fail while leaving the
+coordinators and the relay reachable. Manufacturing that failure is fine
+here, for exactly the reason the pilot contributes nothing to a study: this
+run validates the fallback tooling, not any network.
+
+Start the relay on the public host (it needs no key — it attests to nothing,
+and a trial that went through it is recognisable by its own outcome):
+
+```sh
+./tos-reachability-tunnel -listen :7693
+```
+
+On endpoint A, block direct UDP toward the public host except the
+coordinator and relay ports, so the ADNL handshake toward the peer's
+rendezvous port is dropped while the measurement infrastructure stays
+reachable:
+
+```sh
+sudo iptables -I OUTPUT -p udp -d <host-ip> -m multiport ! --dports 7691,7692,7693 -j DROP
+```
+
+Then run one ADNL pair as in step 5 (a fresh session, no `-hold` or
+`-reconnect` — survival and reconnect are direct-session properties and are
+never measured over the tunnel), adding `-tunnel host:7693` on **both**
+sides: the fallback is a double registration, so a side without the flag
+never registers and the relay forwards nothing. Expect
+`outcome=proxy-fallback` with `failure=handshake-timeout` on both halves —
+the fallback keeps the failure class of the direct phase it fell back from,
+which is what the trial schema requires of that outcome. Remove the firewall
+rule afterwards:
+
+```sh
+sudo iptables -D OUTPUT -p udp -d <host-ip> -m multiport ! --dports 7691,7692,7693 -j DROP
+```
+
+## 7. Aggregate
 
 Collect both logs onto one machine and concatenate:
 
@@ -166,7 +243,7 @@ Exit codes are the contract: `0` = the report supports a route decision,
 `1` = valid report, no route decision, `2` = malformed input or tooling
 failure. **A pilot that exits 0 is a bug report, not a success** — file it.
 
-## 7. Success criteria
+## 8. Success criteria
 
 The pilot is operationally validated when all of these hold, for both
 probes:
@@ -174,6 +251,15 @@ probes:
 - [ ] every run produced a trial record without manual intervention;
 - [ ] `outcome=direct-established` on paths where it plausibly should be
       (and a *classified* failure, never `internal-error`, elsewhere);
+- [ ] the held ADNL pair carries a nonzero `survival_seconds` on **both**
+      halves and a nonzero `reconnect_millis` on the initiator's;
+- [ ] the forced-fallback pair reports `outcome=proxy-fallback` carrying the
+      direct phase's failure class, on both halves;
+- [ ] trials carry `filtering_observations` from the `same-address-other-port`
+      cold source (and from `other-address` if a secondary address was
+      configured) — an endpoint the coordinator could not probe back is a
+      finding about that NAT, not automatically a tooling failure, so judge
+      this one against where the endpoint sits;
 - [ ] the report exits `1` with finding `insufficient-evidence`;
 - [ ] `unverified_trials` is 0 — every signature and attestation held;
 - [ ] `incomplete_pairs` is 0 — every session produced both halves and they
@@ -183,7 +269,7 @@ probes:
 - [ ] the ADNL report's kind is `route-decision` and the UDP report's is
       `network-feasibility`.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
@@ -195,8 +281,12 @@ probes:
 | `incomplete_pairs > 0` | both endpoints used the same identity file, or one side's record never made it into the combined log |
 | report exit `2` | truncated or hand-edited JSONL, or a policy the tooling refuses — read the stderr line |
 | coordinator silent | it answers only well-formed probe datagrams and never amplifies; check the port with the endpoint tool itself, not with netcat |
+| `reconnect requires a hold window` (or a phase flag refused with `-probe udp`) | `-reconnect` needs `-hold`, and the udp probe has no session to hold, reconnect, or tunnel — the phase flags belong to `-probe adnl` |
+| `survival_s=0` on one half of a held pair | that side ran without `-hold`; both sides must hold, or the pair drops out of the survival percentile |
+| fallback run stays `outcome=failed` | one side is missing `-tunnel` (registration is double, so half a registration forwards nothing), the relay is unreachable, or the direct block also cut the relay port — the fallback runs inside its own bounded window, so a relay that never answers leaves the direct failure standing |
+| no `filtering_observations` in a trial | the coordinator ran with `-filter-listen` set empty, or the cold probes were filtered or lost — silence is not evidence, and the trial stays valid with filtering `undetermined` |
 
-## 9. After the pilot
+## 10. After the pilot
 
 What stands between this and a real study is not tooling:
 

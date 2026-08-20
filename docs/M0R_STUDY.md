@@ -163,8 +163,9 @@ provenance survives.
 ## What is measured and what is declared
 
 The tool measures the address family, the pair's public reachability, the NAT
-mapping behavior, the latency, the byte counts, and the commits both endpoints
-were running. None of these are flags.
+mapping behavior, the filtering receipts, the latency, the byte counts, the
+session survival and reconnect latency when the hold phase is run, and the
+commits both endpoints were running. None of these are flags.
 
 The operator declares only what the tool cannot observe: the carrier class, the
 UDP policy of the environment, the mobility event being exercised, the endpoint
@@ -202,12 +203,19 @@ from a key file, so restarting does not change who it is:
 
 ```sh
 tos-reachability-coordinator -listen :7691 -key coordinator.key
-# coordinator_id=srv_... public_key=... listening=:7691
+# coordinator_id=srv_... public_key=... listening=:7691 filter_port_source=...
 ```
 
 The printed identifier goes into the policy's `coordinators` list, out of band.
 A study counts attestations only from coordinators it predeclared, so a policy
 carrying somebody else's identifier predeclares nothing.
+
+The `filter_port_source` line names the cold second-port socket the filtering
+receipts come from; `-filter-listen` places it (on by default, and it must
+share the primary address), and `-filter-secondary-listen` adds a cold source
+on a second address the host holds, which is what a receipt proving
+endpoint-independent filtering requires. The cold sockets are write-only —
+probes leave through them and nothing is read from or answered on them.
 
 Run both endpoints of a pair with a shared session identifier:
 
@@ -226,6 +234,13 @@ tos-reachability -coordinators host-1:7691,host-2:7691 -session "$SESSION" \
   -carrier carrier-grade-nat -endpoint-class edge-arm \
   -out study.jsonl
 ```
+
+These examples run the default `udp` probe; `-probe adnl` selects the session
+probe a route decision needs, and it alone accepts the post-establishment
+flags — `-hold` (paced by `-keepalive`) for the survival phase, `-reconnect`
+for the initiator's deliberate drop, and `-tunnel` naming the relay of the
+fallback phase. The udp probe refuses all three, because it has no session to
+hold, reconnect, or tunnel.
 
 Operator and site names are hashed into opaque identifiers. The report counts
 how many distinct self-declared operator identifiers and networks contributed

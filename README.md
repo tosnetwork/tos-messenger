@@ -42,7 +42,7 @@ decision:
 | `pkg/e2ee/conformance` | Refutes a candidate suite: ten properties a black-box run can disprove |
 | `pkg/e2ee` (devices) | The multi-device model: device-set succession with rollback and revocation defences, deterministic per-pair session identifiers, and the per-event fan-out to every live device of both parties |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
-| `pkg/probe` | M0-R measurement transport: rendezvous coordinator and UDP establishment probe |
+| `pkg/probe` | M0-R measurement transport: rendezvous coordinator with cold-source filter probing, the UDP and ADNL collectors with their post-establishment phases, and the tunnel relay the proxy-fallback phase measures against |
 | `internal/canon` | Domain-separated length-prefixed canonical encoding shared by every signed object |
 | `internal/ids` | Every identifier pattern, defined once |
 | `internal/vectors` | The canonical forms a second implementation checks itself against, and the adversarial corpus of inputs it must refuse |
@@ -57,8 +57,9 @@ Commands:
 
 | Command | Purpose |
 |---|---|
-| `cmd/tos-reachability-coordinator` | Rendezvous service for a measured pair |
+| `cmd/tos-reachability-coordinator` | Rendezvous service for a measured pair, and the cold sources filtering evidence is probed from |
 | `cmd/tos-reachability` | Runs one endpoint of one pair and appends a trial record |
+| `cmd/tos-reachability-tunnel` | Double-registration UDP forwarder for the study's proxy-fallback phase; measurement infrastructure, never the Relay milestone |
 | `cmd/tos-reachability-report` | Aggregates a study log against a predeclared policy; exits non-zero when the study supports no decision |
 | `cmd/tos-messengerd` | Runs one installation. See [`docs/RUNNING.md`](docs/RUNNING.md) |
 
