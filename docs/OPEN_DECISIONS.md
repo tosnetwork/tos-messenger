@@ -187,11 +187,12 @@ implementation of them:
 - private-room transport, beyond the per-device fan-out default;
 - concrete one-time invite-token encoding and direct/Relay parity tests for the
   selected allow-list/invite/owner-hold first-contact default;
-- daemon configuration/lifecycle wiring for the separate device-facing API,
-  generation planning, and native-DHT publication scheduling, without
-  centralizing device secrets (the API and collector are public-only, while the
-  DHT adapter accepts an isolated `crypto.Signer` and verifies its signatures),
-  plus live independently operated publication and cross-observer fork exchange;
+- stock-command assembly of operator-specific HTTPS root, Descriptor policy,
+  DHT client, and external Endpoint signer configuration. The device API,
+  generation planner, deterministic HTTPS→DHT scheduler, verified signer client,
+  and explicit `daemon.OpenWithGenerationPublisher` composition now exist
+  without centralizing device secrets; live independently operated publication
+  and cross-observer fork exchange remain evidence gaps;
 - Mailbox Relay sender privacy, quota tokens, and anti-spam model;
 - mobile push privacy within the contentless wake-up constraint; and
 - public channel ordering and moderation policy; and

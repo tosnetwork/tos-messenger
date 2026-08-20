@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"encoding/json"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
@@ -31,18 +33,49 @@ func publicationFixture(t *testing.T, config *Config, now time.Time) (identity.D
 		DeviceIDs: []string{config.DeviceID}, AlgorithmID: e2ee.DefaultCandidateAlgorithmID,
 		GenerationLifetimeSeconds: 120, ReplenishBeforeSeconds: 30, CheckIntervalSeconds: 10,
 	}
+	policy := directory.DescriptorPolicy{MaxEnvelopeBytes: 64 << 10, MaxLifetimeSeconds: 3600, AllowHTTPSEndpoint: true}
+	policyDigest, err := policy.Digest()
+	if err != nil {
+		t.Fatalf("policy digest: %v", err)
+	}
 	delegation := identity.Delegation{
 		Network: config.Network(), AgentID: config.AgentID, EndpointID: endpointID,
 		IdentityPublicKey: key.Public().(ed25519.PublicKey), AllowedProtocolVersions: []uint32{1},
 		AllowedOutboundEventClasses: []string{"text"}, NotBeforeUnix: uint64(now.Add(-time.Minute).Unix()),
 		ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()), MaximumSessionLifetimeSeconds: 3600,
-		ContactDescriptorPolicyDigest: "sha256:" + strings.Repeat("d", 64),
+		ContactDescriptorPolicyDigest: policyDigest,
 		InboxAdmissionPolicyDigest:    "sha256:" + strings.Repeat("e", 64),
 	}
 	if err := identity.Validate(delegation); err != nil {
 		t.Fatalf("delegation: %v", err)
 	}
 	return delegation, key
+}
+
+type daemonPublicationSink struct {
+	calls []string
+}
+
+func (s *daemonPublicationSink) PutPrekeySet(context.Context, string, []byte) error {
+	s.calls = append(s.calls, "prekeys")
+	return nil
+}
+
+func (s *daemonPublicationSink) PutDescriptor(context.Context, string, []byte) error {
+	s.calls = append(s.calls, "descriptor")
+	return nil
+}
+
+type daemonLocatorSink struct {
+	calls    int
+	locators []directory.Locator
+}
+
+func (s *daemonLocatorSink) PublishLocator(_ context.Context, _ identity.Delegation,
+	locator directory.Locator, _ crypto.Signer) (int, error) {
+	s.calls++
+	s.locators = append(s.locators, locator)
+	return 2, nil
 }
 
 func TestPrekeyPlannerFinalizesThenRotatesWithoutPrivateMaterial(t *testing.T) {
@@ -165,6 +198,70 @@ func TestDaemonServesAndRemovesPrekeyDeviceSocket(t *testing.T) {
 	}
 	if _, err := os.Stat(config.Publication.DeviceSocketPath); !os.IsNotExist(err) {
 		t.Fatalf("prekey socket was not removed: %v", err)
+	}
+}
+
+func TestDaemonPublishesFinalizedGenerationInDependencyOrder(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	config := testConfig(t)
+	delegation, key := publicationFixture(t, &config, now)
+	journal, err := eventlog.Open(config.StateDir)
+	if err != nil {
+		t.Fatalf("open journal: %v", err)
+	}
+	defer journal.Close()
+	runtime, err := newPrekeyRuntime(config, delegation, journal, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("runtime: %v", err)
+	}
+	collection, _, err := runtime.planner.contributions.CurrentPrekeyCollection(delegation, now)
+	if err != nil {
+		t.Fatalf("collection: %v", err)
+	}
+	bundle, err := e2ee.SignBundle(e2ee.Bundle{
+		Network: delegation.Network, AgentID: delegation.AgentID, EndpointID: delegation.EndpointID,
+		DeviceID: config.DeviceID, AlgorithmID: collection.Plan.AlgorithmID, Material: []byte("public-prekey"),
+		IssuedAtUnix: collection.Plan.IssuedAtUnix, ExpiresAtUnix: collection.Plan.ExpiresAtUnix,
+	}, key)
+	if err != nil {
+		t.Fatalf("bundle: %v", err)
+	}
+	if _, _, err := runtime.planner.contributions.AddPrekeyContribution(delegation, bundle, now); err != nil {
+		t.Fatalf("contribution: %v", err)
+	}
+	if _, _, err := runtime.planner.contributions.FinalizePrekeyCollection(delegation, runtime.planner.publications, now); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	delegationDigest, err := identity.Digest(delegation)
+	if err != nil {
+		t.Fatalf("delegation digest: %v", err)
+	}
+	objects := new(daemonPublicationSink)
+	locators := new(daemonLocatorSink)
+	runtime.publisher = &directory.GenerationPublisher{
+		Objects: objects, Locators: locators, Signer: key, Delegation: delegation,
+		Policy: directory.DescriptorPolicy{MaxEnvelopeBytes: 64 << 10, MaxLifetimeSeconds: 3600, AllowHTTPSEndpoint: true},
+		Descriptor: directory.Descriptor{
+			Network: delegation.Network, AgentID: delegation.AgentID, EndpointID: delegation.EndpointID,
+			DelegationDigest: delegationDigest, SupportedMessagingVersions: []uint32{1},
+			HTTPSEndpoint:              "https://endpoint.example/messaging",
+			MailboxRelaySetDigest:      directory.EmptyRelaySetDigest(),
+			InboxAdmissionPolicyDigest: delegation.InboxAdmissionPolicyDigest, MaximumEnvelopeBytes: 64 << 10,
+		},
+		PublishInterval: time.Minute,
+	}
+	if err := runtime.publishCurrent(context.Background()); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if len(objects.calls) != 2 || objects.calls[0] != "prekeys" || objects.calls[1] != "descriptor" || locators.calls != 1 {
+		t.Fatalf("publication order: objects=%v locators=%d", objects.calls, locators.calls)
+	}
+	first := append([]byte(nil), locators.locators[0].EndpointSignature...)
+	if err := runtime.publishCurrent(context.Background()); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if locators.calls != 2 || !bytes.Equal(first, locators.locators[1].EndpointSignature) {
+		t.Fatal("daemon retry changed the inner signed locator")
 	}
 }
 

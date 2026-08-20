@@ -25,7 +25,7 @@ decision:
 | Package | Responsibility |
 |---|---|
 | `pkg/identity` | Messaging Endpoint delegation: canonical bytes, digest, strict codec, and the verifier that resolves it against finalized Agent state |
-| `pkg/directory` | Signed Messaging Contact Descriptor and committed policy, explicit file bootstrap, DHT locator/key mapping, strict production `tosutils-go` DHT read/write plus hardened HTTPS adapters, and route-neutral refresh with finalized revocation and durable device-set admission |
+| `pkg/directory` | Signed Messaging Contact Descriptor and committed policy, explicit file bootstrap, DHT locator/key mapping, strict production `tosutils-go` DHT read/write plus hardened HTTPS adapters, deterministic prekey→Descriptor→locator activation, and route-neutral refresh with finalized revocation and durable device-set admission |
 | `pkg/envelope` | Outer Relay Envelope and inner typed Messaging Event, including content-addressed Event IDs |
 | `pkg/mailbox` | Route-neutral offline storage state machine: crash-safe opaque envelope storage, Endpoint-authorized scoped capability grants, operation/body-bound requests with durable replay claims, signed StoredAck, quotas, expiry, retrieval deletion, and independently verified multi-Relay fan-out |
 | `pkg/attachments` | Route-neutral AES-256-GCM private attachment chunks, secret E2EE references, ordered ciphertext manifests, resume planning, recipient bounds, and fail-closed authentication |
@@ -38,7 +38,9 @@ decision:
 | `pkg/localapi` | The owner-private socket an Agent runtime drives, and the only place an owner approval exists |
 | `pkg/tosaddr` | Recomputes TOS account addresses through the protocol SDK, so finalized state must come from the account it belongs to |
 | `pkg/payload` | A typed body for every event kind, in canonical binary |
-| `pkg/daemon` | Assembly: one state directory, one socket, one schedule |
+| `pkg/prekeyapi` | Capability-separated device socket exposing one public generation plan and accepting only exact Endpoint-signed public contributions |
+| `pkg/signerapi` | Strict bounded client for an externally custodied Endpoint Ed25519 signer; every returned signature is checked under the finalized public key |
+| `pkg/daemon` | Assembly: one state directory, separated runtime/owner/device sockets, maintenance and public-generation schedules |
 | `pkg/negotiation` | The layer between what an Agent says and what the system may do: mandates, exact amounts, the intent boundary, and the negotiation state machine |
 | `pkg/eventlog` (mandates, budgets, negotiations) | The owner's standing authorisations, placed and withdrawn on the owner's socket and resolved from the store when a spend is judged |
 | `pkg/e2ee` | The pure-state suite contract, message bindings and published prekeys, plus the approved and implemented default construction awaiting independent review and second-language evidence before wire freeze |

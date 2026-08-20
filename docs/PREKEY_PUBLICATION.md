@@ -95,21 +95,37 @@ tombstones at 256, within bounded journal records. At either bound a further
 transition fails closed rather than forgetting a still-valid answering key or
 an old revocation.
 
-## Deliberate boundary
+## Daemon scheduling and deliberate boundary
 
 The route-neutral lifecycle now supplies device-local custody, public-only
 Endpoint aggregation, durable fixed-roster public-contribution collection,
 signer isolation, the production static HTTPS object sink, ordered Descriptor
 activation, replenishment, retired-secret selection, pruning, rollback
-refusal, and local/peer equivocation classification. Daemon wiring still needs
-generation/publication configuration and scheduling. The narrow device-facing
-submission API now exists separately in `pkg/prekeyapi`; it exposes only the
-public plan and accepts only matching signed public bundles. The production DHT
-adapter keeps native key-description and value signing behind the selected
-`crypto.Signer`, including immediate signature verification before network
-use. Centralizing every device secret in the daemon is explicitly not an
-acceptable shortcut. Live independently operated publication and
-cross-observer fork exchange remain deployment evidence.
+refusal, and local/peer equivocation classification. `directory.GenerationPublisher`
+composes the exact durable generation into prekeys → Descriptor → signed locator
+→ native-DHT publication, and `daemon.OpenWithGenerationPublisher` schedules it
+at startup and at a bounded interval. Descriptor validity advances in
+deterministic half-policy-lifetime buckets within the durable generation; the
+publish interval must fit inside that renewal window. Retries inside one bucket
+produce the same signed Descriptor and inner locator while the DHT adapter
+refreshes its outer cache TTL. Thus a crash retry creates no new immutable
+object, a long generation cannot outlive its Descriptor, and a failing
+dependency never exposes a dangling locator.
+
+The narrow device-facing submission API exists separately in `pkg/prekeyapi`;
+it exposes only the public plan and accepts only matching signed public bundles.
+The production DHT adapter keeps native key-description and value signing behind
+the selected `crypto.Signer`, including immediate signature verification before
+network use. `pkg/signerapi` supplies a strict bounded Unix client for a
+separately custodied Endpoint signer and verifies every 64-byte response under
+the live 32-byte delegated key; no private bytes enter daemon configuration.
+
+The stock command still needs operator-specific assembly of the HTTPS root,
+descriptor template/policy, DHT client, and external signer into that explicit
+publisher boundary. Centralizing every device secret or loading an Endpoint
+seed from daemon JSON is not an acceptable shortcut. Live independently
+operated publication and cross-observer fork exchange remain deployment
+evidence.
 
 No canonical preimage or wire schema changed. The existing bundle and
 bundle-set vectors remain the applicable interoperation artifacts.

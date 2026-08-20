@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
@@ -56,14 +57,29 @@ type Daemon struct {
 // what makes a second daemon on the same state fail immediately rather than
 // two of them interleaving writes for a while first.
 func Open(config Config, observer Observer) (*Daemon, error) {
-	return openWithDiscovery(config, observer, finalizedVerifier{}, productionDiscoveryBuilder{})
+	return openWithDiscoveryAndPublisher(config, observer, finalizedVerifier{}, productionDiscoveryBuilder{}, nil)
+}
+
+// OpenWithGenerationPublisher assembles the daemon with an externally
+// custodied Endpoint signer and explicit public sinks. The daemon never
+// accepts private-key bytes through this boundary.
+func OpenWithGenerationPublisher(config Config, observer Observer, publisher *directory.GenerationPublisher) (*Daemon, error) {
+	if publisher == nil {
+		return nil, errors.New("no public generation publisher")
+	}
+	return openWithDiscoveryAndPublisher(config, observer, finalizedVerifier{}, productionDiscoveryBuilder{}, publisher)
 }
 
 func open(config Config, observer Observer, verifier delegationVerifier) (*Daemon, error) {
-	return openWithDiscovery(config, observer, verifier, productionDiscoveryBuilder{})
+	return openWithDiscoveryAndPublisher(config, observer, verifier, productionDiscoveryBuilder{}, nil)
 }
 
 func openWithDiscovery(config Config, observer Observer, verifier delegationVerifier, builder discoveryBuilder) (*Daemon, error) {
+	return openWithDiscoveryAndPublisher(config, observer, verifier, builder, nil)
+}
+
+func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier delegationVerifier,
+	builder discoveryBuilder, publisher *directory.GenerationPublisher) (*Daemon, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -133,6 +149,21 @@ func openWithDiscovery(config Config, observer Observer, verifier delegationVeri
 		_ = discovery.Close()
 		_ = journal.Close()
 		return nil, err
+	}
+	if publisher != nil {
+		if prekeys == nil {
+			_ = discovery.Close()
+			_ = journal.Close()
+			return nil, errors.New("public generation publisher requires prekey publication mode")
+		}
+		owned := *publisher
+		owned.Delegation = delegation
+		if err := owned.Validate(); err != nil {
+			_ = discovery.Close()
+			_ = journal.Close()
+			return nil, errors.New("configure public generation publisher: " + err.Error())
+		}
+		prekeys.publisher = &owned
 	}
 	instance.prekeys = prekeys
 
@@ -247,6 +278,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 			defer group.Done()
 			d.prekeys.planner.Run(ctx, func(err error) { d.report("plan prekeys", err) })
 		}()
+		if d.prekeys.publisher != nil {
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				d.prekeys.runPublisher(ctx, func(err error) { d.report("publish prekeys", err) })
+			}()
+		}
 	}
 
 	group.Add(1)

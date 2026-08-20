@@ -6,17 +6,57 @@ import (
 	"net"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
 )
 
 // prekeyRuntime owns only public generation state and the device contribution
-// socket. In particular, it has no signer and no device private-key store.
+// socket. Its optional publisher has a narrow signing capability, never
+// private-key bytes or a device private-key store; the planner has neither.
 type prekeyRuntime struct {
-	server   *prekeyapi.Server
-	listener net.Listener
-	planner  *prekeyPlanner
+	server    *prekeyapi.Server
+	listener  net.Listener
+	planner   *prekeyPlanner
+	publisher *directory.GenerationPublisher
+}
+
+func (r *prekeyRuntime) publishCurrent(ctx context.Context) error {
+	if r == nil || r.publisher == nil {
+		return nil
+	}
+	now := r.planner.now().Truncate(time.Second)
+	publication, found, err := r.planner.publications.CurrentPrekeyPublication(r.planner.delegation.EndpointID)
+	if err != nil || !found {
+		return err
+	}
+	if now.Unix() < 0 || publication.ExpiresAt <= uint64(now.Unix()) {
+		return nil
+	}
+	_, _, err = r.publisher.Publish(ctx, directory.PublicGeneration{
+		SetDigest: publication.SetDigest, JSON: append([]byte(nil), publication.BundleSetJSON...),
+		IssuedAt: publication.IssuedAt, ExpiresAt: publication.ExpiresAt,
+	}, now)
+	return err
+}
+
+func (r *prekeyRuntime) runPublisher(ctx context.Context, failed func(error)) {
+	if err := r.publishCurrent(ctx); err != nil && failed != nil {
+		failed(err)
+	}
+	ticker := time.NewTicker(r.publisher.PublishInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.publishCurrent(ctx); err != nil && failed != nil {
+				failed(err)
+			}
+		}
+	}
 }
 
 type prekeyPlanner struct {

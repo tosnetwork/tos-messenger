@@ -31,6 +31,14 @@ installation's device), algorithm identifier, 60-second-to-30-day lifetime,
 positive replenishment lead, and a check interval no longer than that lead.
 Use `publication.mode = "none"` with no unused fields to disable it.
 
+The library-level production composition `daemon.OpenWithGenerationPublisher`
+accepts an explicit HTTPS object sink, native-DHT locator sink, committed
+Descriptor policy/template, bounded publish interval, and `crypto.Signer`.
+`pkg/signerapi.Client` can supply that signer through a separate Unix service
+while pinning and verifying the finalized Endpoint public key. The stock
+`tos-messengerd` command does not yet infer these operator-specific resources or
+load private-key bytes; deployments must assemble the publisher explicitly.
+
 ## What must be stated
 
 Nothing about acceptance has a default, because a default here is a decision
