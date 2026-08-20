@@ -327,6 +327,16 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 	if admission == AdmitInviteOrHold {
 		admission = AdmitHoldForApproval
 	}
+	// Moderation changes presentation of an already accepted room message. It
+	// cannot sit in the generic owner-hold queue, because approving that queue
+	// only changes admission state and would bypass the role/revision ledger.
+	// Operators must explicitly admit current moderators as contacts (or by a
+	// valid one-time invite) before their decision can take effect.
+	if inbound.Event.Kind == "room.moderation" && admission != AdmitAllow {
+		decision := g.refuse(inbound, fault.CodeAdmissionRequired, class)
+		decision.Delegation = delegation
+		return decision, nil
+	}
 	if admission != AdmitAllow && admission != AdmitHoldForApproval {
 		code, err := codeFor(admission)
 		if err != nil {
@@ -357,6 +367,43 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 			time.Unix(int64(inbound.ReceivedAtUnix), 0),
 		); err != nil {
 			decision := g.refuse(inbound, fault.CodeAdmissionRequired, class)
+			decision.Delegation = delegation
+			return decision, nil
+		}
+	}
+	if inbound.Event.Kind == "room.moderation" {
+		if g.config.Rooms == nil {
+			decision := g.refuse(inbound, fault.CodeNotAuthentic, class)
+			decision.Delegation = delegation
+			return decision, nil
+		}
+		authority, found, err := g.config.Rooms.CurrentAuthorityDelegation(inbound.Event.RoomID)
+		if err != nil {
+			return Decision{}, err
+		}
+		if !found {
+			decision := g.refuse(inbound, fault.CodeNotAuthentic, class)
+			decision.Delegation = delegation
+			return decision, nil
+		}
+		rawAuthority, err := identity.EncodeJSON(authority)
+		if err != nil {
+			return Decision{}, err
+		}
+		liveAuthority, err := identity.Verify(g.config.Resolver, g.config.Network, g.config.Chain,
+			rawAuthority, time.Unix(int64(inbound.ReceivedAtUnix), 0))
+		if err != nil {
+			decision := g.refuse(inbound, fault.CodeNotAuthentic, class)
+			decision.Delegation = delegation
+			return decision, nil
+		}
+		moderation, err := g.config.Journal.OpenModeration()
+		if err != nil {
+			return Decision{}, err
+		}
+		if _, _, err := moderation.Apply(inbound.Event, delegation, liveAuthority,
+			time.Unix(int64(inbound.ReceivedAtUnix), 0)); err != nil {
+			decision := g.refuse(inbound, fault.CodeNotAuthentic, class)
 			decision.Delegation = delegation
 			return decision, nil
 		}

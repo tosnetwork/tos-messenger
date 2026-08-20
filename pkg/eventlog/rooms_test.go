@@ -3,6 +3,8 @@ package eventlog
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,42 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/room"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
+
+func TestRoomAuthorityDelegationSurvivesRestartAndDamageFailsClosed(t *testing.T) {
+	ledger, journal, root := openRoomLedger(t)
+	now := time.Unix(1_800_000_000, 0)
+	delegation, _ := roomDelegation(t, roomAgent(1), 0x51)
+	founded := mustFound(t, roomAgent(1), roomAgent(2))
+	if _, err := advanceRoom(t, ledger, founded, 1, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	ledger, _ = reopened.OpenRooms()
+	stored, found, err := ledger.CurrentAuthorityDelegation(ledgerRoom)
+	if err != nil || !found || stored.AgentID != delegation.AgentID ||
+		stored.EndpointID != delegation.EndpointID || !bytes.Equal(stored.IdentityPublicKey, delegation.IdentityPublicKey) {
+		t.Fatalf("authority delegation: found=%v stored=%+v err=%v", found, stored, err)
+	}
+	record, _, err := ledger.read(ledgerRoom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.AuthorityDelegationJSON = []byte(`{}`)
+	raw, _ := json.Marshal(record)
+	if err := os.WriteFile(ledger.path(ledgerRoom), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ledger.CurrentAuthorityDelegation(ledgerRoom); err == nil {
+		t.Fatal("damaged authority delegation remained usable")
+	}
+}
 
 var ledgerRoom = "room_" + strings.Repeat("e", 64)
 
@@ -269,7 +307,11 @@ func roomDelegation(t *testing.T, agentID string, seed byte) (identity.Delegatio
 	if err != nil {
 		t.Fatal(err)
 	}
-	return identity.Delegation{Network: network, AgentID: agentID, EndpointID: endpointID, IdentityPublicKey: key.Public().(ed25519.PublicKey), NotBeforeUnix: 1, ExpiresAtUnix: 2_000_000_000}, key
+	return identity.Delegation{Network: network, AgentID: agentID, EndpointID: endpointID,
+		IdentityPublicKey: key.Public().(ed25519.PublicKey), AllowedProtocolVersions: []uint32{1},
+		AllowedOutboundEventClasses: []string{"room"}, NotBeforeUnix: 1, ExpiresAtUnix: 2_000_000_000,
+		MaximumSessionLifetimeSeconds: 3600, ContactDescriptorPolicyDigest: "sha256:" + strings.Repeat("c", 64),
+		InboxAdmissionPolicyDigest: "sha256:" + strings.Repeat("d", 64)}, key
 }
 
 func TestRoomLedgerEnforcesAndPersistsSignedAuthorityTransfer(t *testing.T) {

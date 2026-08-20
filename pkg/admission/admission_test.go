@@ -271,7 +271,10 @@ func seedRoom(members ...string) func(*testing.T, *eventlog.RoomLedger) {
 			t.Fatalf("derive room authority: %v", err)
 		}
 		delegation := identity.Delegation{Network: testNetwork(), AgentID: membership.Members[0], EndpointID: endpointID,
-			IdentityPublicKey: key.Public().(ed25519.PublicKey), NotBeforeUnix: baseUnix, ExpiresAtUnix: baseUnix + 100}
+			IdentityPublicKey: key.Public().(ed25519.PublicKey), AllowedProtocolVersions: []uint32{1},
+			AllowedOutboundEventClasses: []string{"room"}, NotBeforeUnix: baseUnix, ExpiresAtUnix: baseUnix + 100,
+			MaximumSessionLifetimeSeconds: 60, ContactDescriptorPolicyDigest: "sha256:" + strings.Repeat("c", 64),
+			InboxAdmissionPolicyDigest: "sha256:" + strings.Repeat("d", 64)}
 		authorization, err := room.SignMembershipAuthorization(room.MembershipAuthorization{
 			Network: testNetwork(), RoomID: membership.RoomID, Epoch: membership.Epoch, MembershipDigest: membership.Digest,
 			Authority:    room.Authority{AgentID: delegation.AgentID, EndpointID: delegation.EndpointID},
@@ -353,6 +356,105 @@ func TestRoomMembershipOverlay(t *testing.T) {
 			t.Fatalf("a room event was blocked with no overlay configured: %+v", decision)
 		}
 	})
+}
+
+func TestAdmissionAppliesAuthorizedRoomModerationBeforeQueueing(t *testing.T) {
+	now := time.Unix(int64(baseUnix)+30, 0)
+	policy := OpenInbox()
+	journal, err := eventlog.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	sender, _ := testDelegation(t)
+	sender.AllowedOutboundEventClasses = []string{"room", "text"}
+	senderRaw, err := identity.EncodeJSON(sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	senderDigest, _ := identity.Digest(sender)
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x11}, ed25519.SeedSize))
+	rooms, _ := journal.OpenRooms()
+	membership, err := room.Found(overlayRoom, []string{senderID, localID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := room.Authority{AgentID: sender.AgentID, EndpointID: sender.EndpointID}
+	authorization, err := room.SignMembershipAuthorization(room.MembershipAuthorization{
+		Network: testNetwork(), RoomID: overlayRoom, Epoch: 1, MembershipDigest: membership.Digest,
+		Authority: authority, IssuedAtUnix: baseUnix + 1, ExpiresAtUnix: baseUnix + 3600,
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rooms.Advance(membership, authorization, sender, now); err != nil {
+		t.Fatal(err)
+	}
+	rolePolicy, err := room.SignRolePolicy(room.RolePolicy{Network: testNetwork(), RoomID: overlayRoom,
+		MembershipEpoch: 1, MembershipDigest: membership.Digest, Revision: 1,
+		Assignments: []room.RoleAssignment{{AgentID: senderID, Role: room.RoleAdministrator}},
+		Authority:   authority, IssuedAtUnix: baseUnix + 1, ExpiresAtUnix: baseUnix + 3600}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles, _ := journal.OpenRoomRoles()
+	if _, err := roles.Advance(rolePolicy, sender, now); err != nil {
+		t.Fatal(err)
+	}
+	local, localRaw, localState := localState(t, policy)
+	gate, err := New(Config{Network: testNetwork(), Chain: testChain(),
+		Resolver: stubResolver{states: map[string]*nativev1.NativeStateV1{
+			senderID: nativeState(&nativev1.AgentStateV1{AgentId: senderID,
+				Policy: &nativev1.ControllerPolicyV1{Threshold: 1}, DelegationDigests: []string{senderDigest}}),
+			localID: localState}}, Journal: journal, Devices: mustDevices(t, journal), Rooms: rooms,
+		Policy: policy, LocalDelegationJSON: localRaw, LocalAgentID: local.AgentID,
+		LocalEndpointID: local.EndpointID, Now: func() time.Time { return now },
+		InstallSalt: bytes.Repeat([]byte{0x5a}, MinInstallSaltBytes)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageBody, _ := payload.Encode(payload.RoomMessage{RoomID: overlayRoom, Epoch: 1,
+		MediaType: "text/plain; charset=utf-8", Body: "moderate me"})
+	target := testEvent(t, sender, func(event *envelope.Event) {
+		event.RoomID, event.Kind, event.Content = overlayRoom, "room.message", messageBody
+	})
+	if decision, err := gate.Admit(inbound(target, senderRaw)); err != nil || decision.Outcome != Accepted {
+		t.Fatalf("target: decision=%+v err=%v", decision, err)
+	}
+	moderationBody, _ := payload.Encode(payload.RoomModeration{RoomID: overlayRoom, MembershipEpoch: 1,
+		RolePolicyRevision: 1, TargetEventID: target.EventID, DecisionRevision: 1,
+		Action: "hide", Reason: "policy"})
+	moderation := testEvent(t, sender, func(event *envelope.Event) {
+		event.RoomID, event.Kind, event.Content = overlayRoom, "room.moderation", moderationBody
+	})
+	if decision, err := gate.Admit(inbound(moderation, senderRaw)); err != nil || decision.Outcome != Accepted {
+		t.Fatalf("moderation: decision=%+v err=%v", decision, err)
+	}
+	ledger, _ := journal.OpenModeration()
+	visible, decision, found, err := ledger.Visibility(target.EventID)
+	if err != nil || !found || visible || decision.DecisionEventID != moderation.EventID {
+		t.Fatalf("visibility: visible=%v found=%v decision=%+v err=%v", visible, found, decision, err)
+	}
+	queued, err := journal.ListPending(now.Add(time.Minute), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range queued {
+		if record.EventID == target.EventID {
+			t.Fatal("admission-verified hidden target remained runtime-visible")
+		}
+	}
+
+	gapBody, _ := payload.Encode(payload.RoomModeration{RoomID: overlayRoom, MembershipEpoch: 1,
+		RolePolicyRevision: 1, TargetEventID: target.EventID, DecisionRevision: 3,
+		Action: "restore", Reason: "skip"})
+	gap := testEvent(t, sender, func(event *envelope.Event) {
+		event.RoomID, event.Kind, event.Content = overlayRoom, "room.moderation", gapBody
+	})
+	if decision, err := gate.Admit(inbound(gap, senderRaw)); err != nil ||
+		decision.Outcome != Rejected || decision.Code != fault.CodeNotAuthentic {
+		t.Fatalf("revision gap crossed admission: decision=%+v err=%v", decision, err)
+	}
 }
 
 func inbound(event envelope.Event, delegationJSON []byte) Inbound {

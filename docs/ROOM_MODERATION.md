@@ -24,5 +24,15 @@ makes it eligible again. A target already consumed by a runtime cannot be
 unseen; downstream user interfaces need an explicit retraction presentation
 if they display applied history.
 
+The production admission gate now executes this ledger before accepting a
+`room.moderation` Event. Each room epoch stores the exact authority delegation
+that authorized it; admission re-verifies that delegation against current
+finalized Agent state, then applies the current role policy and exact target
+revision. A moderation Event is refused when the room overlay or authority
+delegation is absent/damaged/revoked, when it would enter the generic owner-hold
+path, or when any role, epoch, room, target or revision binding fails. The
+moderation decision is committed before the Event is queued, so a crash can
+only cause an idempotent retry—not delivery of an unchecked decision.
+
 This is the private-room effect. Public-channel moderation, independent Relay
 ordering, and transport delivery remain separate milestones.

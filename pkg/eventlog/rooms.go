@@ -16,7 +16,7 @@ const (
 	roomDir = "rooms"
 
 	// RoomRecordSchema is the on-disk schema of one room's current epoch.
-	RoomRecordSchema = "tos.messaging.room-ledger.v2"
+	RoomRecordSchema = "tos.messaging.room-ledger.v3"
 )
 
 var (
@@ -48,7 +48,11 @@ type RoomRecord struct {
 	Members             []string `json:"members"`
 	AuthorityAgentID    string   `json:"authority_agent_id"`
 	AuthorityEndpointID string   `json:"authority_messaging_endpoint_id"`
-	UpdatedAtUnix       uint64   `json:"updated_at_unix"`
+	// AuthorityDelegationJSON is the exact already-verified delegation used
+	// for this epoch. Later moderation must re-check its window and signature;
+	// an Agent ID and endpoint alone contain no verification key.
+	AuthorityDelegationJSON []byte `json:"authority_delegation_json"`
+	UpdatedAtUnix           uint64 `json:"updated_at_unix"`
 }
 
 // RoomLedger records room membership epochs, one record per room.
@@ -99,6 +103,10 @@ func (l *RoomLedger) Advance(next room.Membership, authorization room.Membership
 		return RoomTransition{}, errors.New("invalid time")
 	}
 	if err := room.VerifyMembershipAuthorization(next, authorization, delegation, now); err != nil {
+		return RoomTransition{}, err
+	}
+	authorityDelegationJSON, err := json.Marshal(delegation)
+	if err != nil {
 		return RoomTransition{}, err
 	}
 	actor := authorization.Authority
@@ -158,7 +166,8 @@ func (l *RoomLedger) Advance(next room.Membership, authorization room.Membership
 		MembershipDigest: commitment.MembershipDigest,
 		Members:          next.Members,
 		AuthorityAgentID: actor.AgentID, AuthorityEndpointID: actor.EndpointID,
-		UpdatedAtUnix: uint64(now.Unix()),
+		AuthorityDelegationJSON: authorityDelegationJSON,
+		UpdatedAtUnix:           uint64(now.Unix()),
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -186,6 +195,10 @@ func (l *RoomLedger) TransferAuthority(next room.Membership, transfer room.Autho
 	if _, err := next.Announce(); err != nil {
 		return RoomTransition{}, err
 	}
+	authorityDelegationJSON, err := json.Marshal(nextDelegation)
+	if err != nil {
+		return RoomTransition{}, err
+	}
 	l.journal.mutex.Lock()
 	defer l.journal.mutex.Unlock()
 	record, found, err := l.read(next.RoomID)
@@ -211,7 +224,8 @@ func (l *RoomLedger) TransferAuthority(next room.Membership, transfer room.Autho
 		Schema: RoomRecordSchema, RoomID: next.RoomID, Epoch: next.Epoch,
 		MembershipDigest: next.Digest, Members: next.Members,
 		AuthorityAgentID: transfer.To.AgentID, AuthorityEndpointID: transfer.To.EndpointID,
-		UpdatedAtUnix: uint64(now.Unix()),
+		AuthorityDelegationJSON: authorityDelegationJSON,
+		UpdatedAtUnix:           uint64(now.Unix()),
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -377,6 +391,31 @@ func (l *RoomLedger) CurrentAuthority(roomID string) (room.Authority, bool, erro
 	return room.Authority{AgentID: record.AuthorityAgentID, EndpointID: record.AuthorityEndpointID}, true, nil
 }
 
+// CurrentAuthorityDelegation returns the exact verified delegation captured
+// with the current epoch. Callers must still check its live time window.
+func (l *RoomLedger) CurrentAuthorityDelegation(roomID string) (identity.Delegation, bool, error) {
+	if l == nil || l.journal == nil {
+		return identity.Delegation{}, false, errors.New("no room ledger")
+	}
+	if err := l.journal.usable(); err != nil {
+		return identity.Delegation{}, false, err
+	}
+	if !ids.Room.MatchString(roomID) {
+		return identity.Delegation{}, false, errors.New("invalid room identifier")
+	}
+	l.journal.mutex.Lock()
+	defer l.journal.mutex.Unlock()
+	record, found, err := l.read(roomID)
+	if err != nil || !found {
+		return identity.Delegation{}, found, err
+	}
+	delegation, err := decodeRoomAuthorityDelegation(record.AuthorityDelegationJSON)
+	if err != nil {
+		return identity.Delegation{}, false, errors.New("invalid room authority delegation")
+	}
+	return delegation, true, nil
+}
+
 func (l *RoomLedger) read(roomID string) (RoomRecord, bool, error) {
 	raw, err := os.ReadFile(l.path(roomID))
 	if errors.Is(err, os.ErrNotExist) {
@@ -399,6 +438,10 @@ func (l *RoomLedger) read(roomID string) (RoomRecord, bool, error) {
 	if err := authority.Validate(); err != nil {
 		return RoomRecord{}, false, err
 	}
+	delegation, err := decodeRoomAuthorityDelegation(record.AuthorityDelegationJSON)
+	if err != nil || delegation.AgentID != authority.AgentID || delegation.EndpointID != authority.EndpointID {
+		return RoomRecord{}, false, errors.New("room authority delegation does not match its authority")
+	}
 	// The digest is recomputed from the stored members on every read, so a
 	// record edited underneath this process to swap a member without updating
 	// the commitment is refused rather than answered from.
@@ -417,6 +460,14 @@ func (l *RoomLedger) read(roomID string) (RoomRecord, bool, error) {
 		return RoomRecord{}, false, errors.New("room authority is not a current member")
 	}
 	return record, true, nil
+}
+
+func decodeRoomAuthorityDelegation(raw []byte) (identity.Delegation, error) {
+	var delegation identity.Delegation
+	if len(raw) == 0 || json.Unmarshal(raw, &delegation) != nil || delegation.Network == nil {
+		return identity.Delegation{}, errors.New("invalid room authority delegation")
+	}
+	return delegation, nil
 }
 
 func (l *RoomLedger) path(roomID string) string {
