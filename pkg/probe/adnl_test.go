@@ -15,9 +15,29 @@ import (
 // hands each rendezvous port to a real gateway, and requires a completed
 // handshake and round trip in both directions.
 func TestEndToEndADNLEstablishment(t *testing.T) {
+	establishOverLoopback(t, "127.0.0.1")
+}
+
+// The reachability policy includes IPv6 endpoints, so the collector has to
+// establish over IPv6 and not merely IPv4. This is the IPv4 test's mirror on
+// the ::1 loopback; it skips cleanly where the host offers no usable IPv6
+// loopback rather than failing on the environment.
+func TestEndToEndADNLEstablishmentIPv6(t *testing.T) {
+	if !hasIPv6Loopback() {
+		t.Skip("no usable IPv6 loopback on this host; ADNL IPv6 establishment cannot be exercised")
+	}
+	establishOverLoopback(t, "::1")
+}
+
+// establishOverLoopback runs the two-endpoint establishment on one loopback
+// host, so the IPv4 and IPv6 cases share exactly the same assertions and only
+// the address family differs.
+func establishOverLoopback(t *testing.T, host string) {
+	t.Helper()
 	skipUnderRace(t)
+	loopback := net.JoinHostPort(host, "0")
 	coordinator := testCoordinator(t)
-	listener, err := net.ListenPacket("udp", "127.0.0.1:0")
+	listener, err := net.ListenPacket("udp", loopback)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -32,7 +52,7 @@ func TestEndToEndADNLEstablishment(t *testing.T) {
 		EndpointKeyHex: testEndpointKey(RoleA), Probe: reachability.ProbeADNL,
 		Coordinators: []string{listener.LocalAddr().String()},
 		SessionID:    session,
-		ListenAddr:   "127.0.0.1:0",
+		ListenAddr:   loopback,
 		BindTimeout:  3 * time.Second,
 		PairTimeout:  8 * time.Second,
 		PunchTimeout: 10 * time.Second,
@@ -79,6 +99,17 @@ func TestEndToEndADNLEstablishment(t *testing.T) {
 			t.Fatalf("the observation does not verify: %v", err)
 		}
 	}
+}
+
+// hasIPv6Loopback reports whether ::1 can actually be bound here, so the IPv6
+// test skips on hosts with IPv6 disabled instead of failing on them.
+func hasIPv6Loopback() bool {
+	conn, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // Each runner measures exactly the probe it implements. Running one under the

@@ -6,9 +6,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -117,7 +117,7 @@ func RunADNL(ctx context.Context, config Config) (Result, error) {
 		return instance.result, nil
 	}
 
-	instance.establishADNL(ctx, transportPrivate, ed25519.PublicKey(peerKey), local.Port, peers)
+	instance.establishADNL(ctx, transportPrivate, ed25519.PublicKey(peerKey), local, peers)
 	return instance.result, nil
 }
 
@@ -146,9 +146,54 @@ func (r *runner) punchBurst(peers []netip.AddrPort) {
 	}
 }
 
+// wildcardBind returns the address the gateway binds to: the rendezvous port on
+// a wildcard host of the family the socket already runs over.
+//
+// The bound socket is where the peer's mapping points, so its family is the one
+// in use, and the wildcard has to match it -- a hardcoded IPv4 wildcard could
+// never receive the IPv6 half of the reachability policy. tonutils' StartServer
+// splits the listen address on ":" and rejects anything that is not host:port,
+// so the IPv6 wildcard is given as ":port" (which net.ListenPacket binds
+// dual-family) rather than "[::]:port", a form that parser cannot accept. The
+// port is validated so a malformed socket address fails closed instead of
+// producing an unbindable string.
+func wildcardBind(local *net.UDPAddr) (string, error) {
+	if local == nil {
+		return "", errors.New("no local address to bind the gateway")
+	}
+	if local.Port <= 0 || local.Port > 65535 {
+		return "", errors.New("local address has no usable port")
+	}
+	port := strconv.Itoa(local.Port)
+	if local.IP.To4() != nil {
+		// Unchanged IPv4 path: an explicit IPv4 wildcard.
+		return net.JoinHostPort("0.0.0.0", port), nil
+	}
+	// Empty host binds the wildcard across families, which covers the IPv6
+	// endpoints; JoinHostPort renders it as ":port", the only IPv6-capable form
+	// StartServer's ":"-split accepts.
+	return net.JoinHostPort("", port), nil
+}
+
 // establishADNL runs the gateway phase.
+//
+// local is the socket the rendezvous ran over. Its port is the one the peer's
+// mapping points at, so the gateway has to reclaim exactly it, and its address
+// family is the family the session runs over, so the wildcard the gateway binds
+// follows it rather than a hardcoded IPv4.
 func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.PrivateKey,
-	peerKey ed25519.PublicKey, port int, peers []netip.AddrPort) {
+	peerKey ed25519.PublicKey, local *net.UDPAddr, peers []netip.AddrPort) {
+	if local == nil {
+		r.result.Failure = reachability.FailureInternal
+		return
+	}
+	bind, err := wildcardBind(local)
+	if err != nil {
+		r.result.Failure = reachability.FailureInternal
+		return
+	}
+	port := local.Port
+
 	silenceADNLLogs.Do(func() {
 		// The responder's punch datagrams are not ADNL, and the peer's gateway
 		// drops them; the drop must not spam whatever process embeds this.
@@ -157,18 +202,26 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 
 	gateway := adnl.NewGateway(transportKey)
 	// The gateway advertises the address the coordinator observed for this
-	// endpoint. Listening happens on the wildcard, because the socket has to
-	// receive on whatever interface the rendezvous ran over; the advertised
-	// address is the one the peer's NAT mapping actually points at, which the
-	// endpoint cannot know locally and the coordinator just told it.
+	// endpoint, so the peer's NAT mapping -- which the endpoint cannot know
+	// locally and the coordinator just told it -- is what the address list names.
+	// The ADNL address list is IPv4-only on the wire (its UDP address type
+	// serializes a 4-byte IP), so an IPv6 observation cannot travel in it and is
+	// dropped from the list; that is not a loss here, because establishment turns
+	// on the initiator dialling an explicit candidate and the responder answering
+	// the packet's source, not on the advertised list, which stays empty for an
+	// IPv6 session. Listening still happens on the wildcard of the family in use.
 	advertised := make([]*address.UDP, 0, len(r.result.Observed))
 	for _, observed := range r.result.Observed {
+		ip := observed.Addr().Unmap()
+		if !ip.Is4() {
+			continue
+		}
 		advertised = append(advertised, &address.UDP{
-			IP:   observed.Addr().AsSlice(),
+			IP:   ip.AsSlice(),
 			Port: int32(observed.Port()),
 		})
 	}
-	if len(advertised) == 0 {
+	if len(advertised) == 0 && local.IP.To4() != nil {
 		advertised = append(advertised, &address.UDP{IP: net.IPv4(127, 0, 0, 1), Port: int32(port)})
 	}
 	gateway.SetAddressList(advertised)
@@ -203,7 +256,7 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 		}()
 		return nil
 	})
-	if err := gateway.StartServer(fmt.Sprintf("0.0.0.0:%d", port)); err != nil {
+	if err := gateway.StartServer(bind); err != nil {
 		r.result.Failure = reachability.FailureInternal
 		return
 	}
