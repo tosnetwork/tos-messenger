@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/ids"
+	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/room"
 )
 
@@ -15,7 +16,7 @@ const (
 	roomDir = "rooms"
 
 	// RoomRecordSchema is the on-disk schema of one room's current epoch.
-	RoomRecordSchema = "tos.messaging.room-ledger.v1"
+	RoomRecordSchema = "tos.messaging.room-ledger.v2"
 )
 
 var (
@@ -40,12 +41,14 @@ var (
 // read so a tampered record fails closed rather than answering from a set its
 // own commitment disowns.
 type RoomRecord struct {
-	Schema           string   `json:"schema"`
-	RoomID           string   `json:"room_id"`
-	Epoch            uint64   `json:"epoch"`
-	MembershipDigest string   `json:"membership_digest"`
-	Members          []string `json:"members"`
-	UpdatedAtUnix    uint64   `json:"updated_at_unix"`
+	Schema              string   `json:"schema"`
+	RoomID              string   `json:"room_id"`
+	Epoch               uint64   `json:"epoch"`
+	MembershipDigest    string   `json:"membership_digest"`
+	Members             []string `json:"members"`
+	AuthorityAgentID    string   `json:"authority_agent_id"`
+	AuthorityEndpointID string   `json:"authority_messaging_endpoint_id"`
+	UpdatedAtUnix       uint64   `json:"updated_at_unix"`
 }
 
 // RoomLedger records room membership epochs, one record per room.
@@ -67,6 +70,9 @@ type RoomTransition struct {
 	Joined []string
 	// Departed are members absent now that were present at the prior epoch.
 	Departed []string
+	// Authority is the only Agent/Endpoint allowed to serialize the next
+	// membership transition.
+	Authority room.Authority
 }
 
 // Advance judges a successor membership against the record and, when it
@@ -82,7 +88,7 @@ type RoomTransition struct {
 // An epoch at or below the record is a rollback; an epoch beyond the next is a
 // gap this installation cannot verify, because it holds only the current member
 // set and derives each successor from it.
-func (l *RoomLedger) Advance(next room.Membership, now time.Time) (RoomTransition, error) {
+func (l *RoomLedger) Advance(next room.Membership, authorization room.MembershipAuthorization, delegation identity.Delegation, now time.Time) (RoomTransition, error) {
 	if l == nil {
 		return RoomTransition{}, errors.New("no room ledger")
 	}
@@ -92,6 +98,10 @@ func (l *RoomLedger) Advance(next room.Membership, now time.Time) (RoomTransitio
 	if now.IsZero() || now.Unix() < 0 {
 		return RoomTransition{}, errors.New("invalid time")
 	}
+	if err := room.VerifyMembershipAuthorization(next, authorization, delegation, now); err != nil {
+		return RoomTransition{}, err
+	}
+	actor := authorization.Authority
 	// A membership whose digest does not match its members is rejected before
 	// anything is compared, so a forged successor cannot be measured against the
 	// record at all.
@@ -111,6 +121,9 @@ func (l *RoomLedger) Advance(next room.Membership, now time.Time) (RoomTransitio
 		if next.Epoch != 1 {
 			return RoomTransition{}, errors.New("a room's first epoch must be epoch 1")
 		}
+		if !next.Contains(actor.AgentID) {
+			return RoomTransition{}, errors.New("a room's founding authority must be a member")
+		}
 	} else {
 		if next.RoomID != record.RoomID {
 			return RoomTransition{}, errors.New("the successor names another room")
@@ -120,6 +133,12 @@ func (l *RoomLedger) Advance(next room.Membership, now time.Time) (RoomTransitio
 		}
 		if next.Epoch != record.Epoch+1 {
 			return RoomTransition{}, ErrRoomGap
+		}
+		if actor.AgentID != record.AuthorityAgentID || actor.EndpointID != record.AuthorityEndpointID {
+			return RoomTransition{}, errors.New("only the current room authority may advance membership")
+		}
+		if !next.Contains(actor.AgentID) {
+			return RoomTransition{}, errors.New("the current authority cannot leave without a signed transfer")
 		}
 		prior = record.Members
 	}
@@ -138,7 +157,8 @@ func (l *RoomLedger) Advance(next room.Membership, now time.Time) (RoomTransitio
 		Epoch:            next.Epoch,
 		MembershipDigest: commitment.MembershipDigest,
 		Members:          next.Members,
-		UpdatedAtUnix:    uint64(now.Unix()),
+		AuthorityAgentID: actor.AgentID, AuthorityEndpointID: actor.EndpointID,
+		UpdatedAtUnix: uint64(now.Unix()),
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -147,7 +167,60 @@ func (l *RoomLedger) Advance(next room.Membership, now time.Time) (RoomTransitio
 	if err := l.journal.replace(l.path(next.RoomID), encoded); err != nil {
 		return RoomTransition{}, err
 	}
-	return RoomTransition{Membership: next, Joined: joined, Departed: departed}, nil
+	return RoomTransition{Membership: next, Joined: joined, Departed: departed, Authority: actor}, nil
+}
+
+// TransferAuthority atomically accepts one current-Endpoint-signed,
+// single-epoch authority transfer and its successor membership. The successor
+// may keep the same members; only this path may advance such an epoch.
+func (l *RoomLedger) TransferAuthority(next room.Membership, transfer room.AuthorityTransfer, currentDelegation, nextDelegation identity.Delegation, now time.Time) (RoomTransition, error) {
+	if l == nil {
+		return RoomTransition{}, errors.New("no room ledger")
+	}
+	if err := l.journal.usable(); err != nil {
+		return RoomTransition{}, err
+	}
+	if now.IsZero() || now.Unix() < 0 {
+		return RoomTransition{}, errors.New("invalid time")
+	}
+	if _, err := next.Announce(); err != nil {
+		return RoomTransition{}, err
+	}
+	l.journal.mutex.Lock()
+	defer l.journal.mutex.Unlock()
+	record, found, err := l.read(next.RoomID)
+	if err != nil {
+		return RoomTransition{}, err
+	}
+	if !found {
+		return RoomTransition{}, errors.New("cannot transfer authority for an unknown room")
+	}
+	if next.Epoch <= record.Epoch {
+		return RoomTransition{}, ErrRoomRollback
+	}
+	if next.Epoch != record.Epoch+1 {
+		return RoomTransition{}, ErrRoomGap
+	}
+	prior := room.Membership{RoomID: record.RoomID, Epoch: record.Epoch, Members: record.Members, Digest: record.MembershipDigest}
+	current := room.Authority{AgentID: record.AuthorityAgentID, EndpointID: record.AuthorityEndpointID}
+	if err := room.VerifyAuthorityTransfer(current, prior, next, transfer, currentDelegation, nextDelegation, now); err != nil {
+		return RoomTransition{}, err
+	}
+	joined, departed := diffMembers(record.Members, next.Members)
+	record = RoomRecord{
+		Schema: RoomRecordSchema, RoomID: next.RoomID, Epoch: next.Epoch,
+		MembershipDigest: next.Digest, Members: next.Members,
+		AuthorityAgentID: transfer.To.AgentID, AuthorityEndpointID: transfer.To.EndpointID,
+		UpdatedAtUnix: uint64(now.Unix()),
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return RoomTransition{}, err
+	}
+	if err := l.journal.replace(l.path(next.RoomID), encoded); err != nil {
+		return RoomTransition{}, err
+	}
+	return RoomTransition{Membership: next, Joined: joined, Departed: departed, Authority: transfer.To}, nil
 }
 
 // RoomStanding reports how a claim of (room, epoch, member) stands against the
@@ -284,6 +357,26 @@ func (l *RoomLedger) Current(roomID string) (room.Membership, bool, error) {
 	return membership, true, nil
 }
 
+// CurrentAuthority returns the durable serializer for a room.
+func (l *RoomLedger) CurrentAuthority(roomID string) (room.Authority, bool, error) {
+	if l == nil {
+		return room.Authority{}, false, errors.New("no room ledger")
+	}
+	if err := l.journal.usable(); err != nil {
+		return room.Authority{}, false, err
+	}
+	if !ids.Room.MatchString(roomID) {
+		return room.Authority{}, false, errors.New("invalid room identifier")
+	}
+	l.journal.mutex.Lock()
+	defer l.journal.mutex.Unlock()
+	record, found, err := l.read(roomID)
+	if err != nil || !found {
+		return room.Authority{}, found, err
+	}
+	return room.Authority{AgentID: record.AuthorityAgentID, EndpointID: record.AuthorityEndpointID}, true, nil
+}
+
 func (l *RoomLedger) read(roomID string) (RoomRecord, bool, error) {
 	raw, err := os.ReadFile(l.path(roomID))
 	if errors.Is(err, os.ErrNotExist) {
@@ -302,6 +395,10 @@ func (l *RoomLedger) read(roomID string) (RoomRecord, bool, error) {
 	if record.Schema != RoomRecordSchema || record.RoomID != roomID {
 		return RoomRecord{}, false, errors.New("room record describes another room")
 	}
+	authority := room.Authority{AgentID: record.AuthorityAgentID, EndpointID: record.AuthorityEndpointID}
+	if err := authority.Validate(); err != nil {
+		return RoomRecord{}, false, err
+	}
 	// The digest is recomputed from the stored members on every read, so a
 	// record edited underneath this process to swap a member without updating
 	// the commitment is refused rather than answered from.
@@ -311,6 +408,13 @@ func (l *RoomLedger) read(roomID string) (RoomRecord, bool, error) {
 	}
 	if digest != record.MembershipDigest {
 		return RoomRecord{}, false, errors.New("room record's digest does not match its members")
+	}
+	foundAuthority := false
+	for _, member := range record.Members {
+		foundAuthority = foundAuthority || member == record.AuthorityAgentID
+	}
+	if !foundAuthority {
+		return RoomRecord{}, false, errors.New("room authority is not a current member")
 	}
 	return record, true, nil
 }

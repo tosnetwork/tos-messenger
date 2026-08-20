@@ -29,7 +29,7 @@ const (
 	MLSCipherSuite uint16 = 0x0001
 	// MLSDeviceCredentialSchema identifies the endpoint-signed authority object.
 	// The profile remains a candidate until the freeze evidence in ROADMAP exists.
-	MLSDeviceCredentialSchema    = "tos.messaging.mls-device-credential.v1"
+	MLSDeviceCredentialSchema    = "tos.messaging.mls-device-credential.v2"
 	MaxKeyPackageBytes           = 64 << 10
 	MaxCredentialLifetimeSeconds = 30 * 24 * 60 * 60
 )
@@ -41,10 +41,11 @@ const (
 //
 // This interface is not an MLS implementation and does not bless one. A
 // Driver is admissible only when its KeyPackage parser enforces suite 0x0001
-// and matches the LeafNode signature key to DeviceCredential.
+// and matches both the BasicCredential identity and LeafNode signature key to
+// DeviceCredential.
 type Driver interface {
 	CipherSuite() uint16
-	ValidateKeyPackage(keyPackage []byte, expectedLeafSignatureKey ed25519.PublicKey) error
+	ValidateKeyPackage(keyPackage, expectedBasicCredentialIdentity []byte, expectedLeafSignatureKey ed25519.PublicKey) error
 	Join(keyPackagePrivateState, welcome []byte) (opaqueState []byte, err error)
 	Commit(opaqueState []byte, operations []LeafOperation) (nextState, commit []byte, welcomes map[string][]byte, err error)
 	Apply(opaqueState, commit []byte) (nextState []byte, err error)
@@ -154,9 +155,9 @@ func CredentialSigningBytes(c DeviceCredential) ([]byte, error) {
 	}
 	b := bytes.NewBufferString(canon.DomainMLSDeviceCredential)
 	canon.Text(b, MLSDeviceCredentialSchema)
-	canon.Text(b, c.Network.NetworkId)
-	canon.Text(b, c.Network.GenesisRootHash)
-	canon.Text(b, c.Network.GenesisFileHash)
+	if err := appendMLSNetwork(b, c.Network); err != nil {
+		return nil, err
+	}
 	canon.Text(b, c.AgentID)
 	canon.Text(b, c.EndpointID)
 	canon.Text(b, c.DeviceID)

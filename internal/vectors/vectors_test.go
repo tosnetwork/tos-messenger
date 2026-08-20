@@ -357,6 +357,21 @@ func build(t *testing.T) []Vector {
 		t.Fatalf("MLS KeyPackage ref: %v", err)
 	}
 	add("mls-device-credential-candidate", mlsWire, mlsCanonical, mlsRef)
+	mlsBasicIdentity, err := group.BasicCredentialIdentity(mlsCredential)
+	if err != nil {
+		t.Fatalf("MLS BasicCredential identity: %v", err)
+	}
+	add("mls-basic-credential-identity-candidate", mlsBasicIdentity, mlsBasicIdentity, "")
+	mlsRoomID := "room_" + strings.Repeat("8", 64)
+	mlsGroupID, err := group.MLSGroupID(del.Network, mlsRoomID)
+	if err != nil {
+		t.Fatalf("MLS group id: %v", err)
+	}
+	mlsGroupCanonical, err := group.MLSGroupIDCanonicalBytes(del.Network, mlsRoomID)
+	if err != nil {
+		t.Fatalf("MLS group id canonical: %v", err)
+	}
+	add("mls-group-id-candidate", mlsGroupID, mlsGroupCanonical, "")
 
 	// Ciphertext binding.
 	binding := e2ee.Binding{

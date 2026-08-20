@@ -123,6 +123,12 @@ const (
 	// same member set commit different digests and cannot be mistaken for each
 	// other.
 	DomainRoomMembership = "tos.messaging.room-membership.v1\x00"
+	// DomainRoomAuthorityTransfer namespaces the current authority Endpoint's
+	// signature over one single-step room-authority transition.
+	DomainRoomAuthorityTransfer = "tos.messaging.room-authority-transfer.v1\x00"
+	// DomainRoomMembershipAuthorization namespaces the current authority's
+	// signature over one founding or successor membership.
+	DomainRoomMembershipAuthorization = "tos.messaging.room-membership-authorization.v1\x00"
 	// DomainStoredAck namespaces a Relay's durable-storage acknowledgement.
 	// It is deliberately distinct from delivery and application ACK payloads:
 	// a Relay storing ciphertext proves neither recipient nor runtime action.
@@ -131,8 +137,14 @@ const (
 	// it consumed the committed positive and adversarial vector artifacts.
 	DomainConformanceReport = "tos.messaging.conformance-report.v1\x00"
 	// DomainMLSDeviceCredential namespaces the endpoint signature authorising
-	// one device's distinct MLS leaf key and exact KeyPackage.
-	DomainMLSDeviceCredential = "tos.messaging.mls-device-credential.v1\x00"
+	// one device's distinct MLS leaf key and exact KeyPackage. v2 encodes both
+	// genesis hashes as raw 32-byte values rather than display hex.
+	DomainMLSDeviceCredential = "tos.messaging.mls-device-credential.v2\x00"
+	// DomainMLSBasicCredential namespaces the opaque identity bytes carried by
+	// the standard MLS BasicCredential.
+	DomainMLSBasicCredential = "tos.messaging.mls-basic-credential.v1\x00"
+	// DomainMLSGroupID namespaces the network-bound MLS group identifier.
+	DomainMLSGroupID = "tos.messaging.mls-group-id.v1\x00"
 	// DomainAttachmentMetadata commits plaintext metadata kept inside E2EE.
 	DomainAttachmentMetadata = "tos.messaging.attachment-metadata.v1\x00"
 	// DomainAttachmentChunk binds every AEAD chunk to its position and shape.
@@ -184,9 +196,13 @@ var Domains = []string{
 	DomainReachabilityObservation,
 	DomainEconomicExecution,
 	DomainRoomMembership,
+	DomainRoomAuthorityTransfer,
+	DomainRoomMembershipAuthorization,
 	DomainStoredAck,
 	DomainConformanceReport,
 	DomainMLSDeviceCredential,
+	DomainMLSBasicCredential,
+	DomainMLSGroupID,
 	DomainAttachmentMetadata,
 	DomainAttachmentChunk,
 	DomainAttachmentManifest,

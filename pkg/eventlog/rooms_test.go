@@ -1,17 +1,41 @@
 package eventlog
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/room"
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
 var ledgerRoom = "room_" + strings.Repeat("e", 64)
 
 func roomAgent(seed byte) string {
 	return "agent_" + strings.Repeat(string("0123456789abcdef"[seed%16]), 64)
+}
+
+func membershipAuthorization(t *testing.T, membership room.Membership, delegation identity.Delegation, key ed25519.PrivateKey, now time.Time) room.MembershipAuthorization {
+	t.Helper()
+	value, err := room.SignMembershipAuthorization(room.MembershipAuthorization{
+		Network: delegation.Network, RoomID: membership.RoomID, Epoch: membership.Epoch,
+		MembershipDigest: membership.Digest,
+		Authority:        room.Authority{AgentID: delegation.AgentID, EndpointID: delegation.EndpointID},
+		IssuedAtUnix:     uint64(now.Unix() - 1), ExpiresAtUnix: uint64(now.Unix() + 60),
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func advanceRoom(t *testing.T, ledger *RoomLedger, membership room.Membership, authoritySeed byte, now time.Time) (RoomTransition, error) {
+	t.Helper()
+	delegation, key := roomDelegation(t, roomAgent(authoritySeed), 0x50+authoritySeed)
+	return ledger.Advance(membership, membershipAuthorization(t, membership, delegation, key, now), delegation, now)
 }
 
 func openRoomLedger(t *testing.T) (*RoomLedger, *Journal, string) {
@@ -45,7 +69,7 @@ func TestRoomLedgerAdvancesAndJudges(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 
 	founded := mustFound(t, roomAgent(1), roomAgent(2))
-	transition, err := ledger.Advance(founded, now)
+	transition, err := advanceRoom(t, ledger, founded, 1, now)
 	if err != nil {
 		t.Fatalf("found: %v", err)
 	}
@@ -57,7 +81,7 @@ func TestRoomLedgerAdvancesAndJudges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	transition, err = ledger.Advance(added, now)
+	transition, err = advanceRoom(t, ledger, added, 1, now)
 	if err != nil {
 		t.Fatalf("advance add: %v", err)
 	}
@@ -88,14 +112,14 @@ func TestRoomLedgerRefusesRollbackAcrossRestart(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 
 	founded := mustFound(t, roomAgent(1), roomAgent(2), roomAgent(3))
-	if _, err := ledger.Advance(founded, now); err != nil {
+	if _, err := advanceRoom(t, ledger, founded, 1, now); err != nil {
 		t.Fatalf("found: %v", err)
 	}
 	removed, err := founded.Remove([]string{roomAgent(2)})
 	if err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	transition, err := ledger.Advance(removed, now)
+	transition, err := advanceRoom(t, ledger, removed, 1, now)
 	if err != nil {
 		t.Fatalf("advance remove: %v", err)
 	}
@@ -118,7 +142,7 @@ func TestRoomLedgerRefusesRollbackAcrossRestart(t *testing.T) {
 
 	// Replaying the founding epoch would bring roomAgent(2) back. It is refused
 	// as a rollback because its epoch is at or below the record.
-	if _, err := ledger2.Advance(founded, now); err != ErrRoomRollback {
+	if _, err := advanceRoom(t, ledger2, founded, 1, now); err != ErrRoomRollback {
 		t.Fatalf("rollback returned %v, want ErrRoomRollback", err)
 	}
 	// The removed member is still gone at the recorded epoch.
@@ -140,7 +164,7 @@ func TestRoomLedgerRefusesGap(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 
 	founded := mustFound(t, roomAgent(1), roomAgent(2))
-	if _, err := ledger.Advance(founded, now); err != nil {
+	if _, err := advanceRoom(t, ledger, founded, 1, now); err != nil {
 		t.Fatalf("found: %v", err)
 	}
 	added, err := founded.Add([]string{roomAgent(3)})
@@ -151,7 +175,7 @@ func TestRoomLedgerRefusesGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second add: %v", err)
 	}
-	if _, err := ledger.Advance(jumped, now); err != ErrRoomGap {
+	if _, err := advanceRoom(t, ledger, jumped, 1, now); err != ErrRoomGap {
 		t.Fatalf("gap returned %v, want ErrRoomGap", err)
 	}
 }
@@ -167,7 +191,7 @@ func TestRoomLedgerFirstEpochMustBeOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if _, err := ledger.Advance(added, now); err == nil {
+	if _, err := advanceRoom(t, ledger, added, 1, now); err == nil {
 		t.Fatal("a first sight at epoch 2 was accepted")
 	}
 }
@@ -180,14 +204,14 @@ func TestRoomLedgerJudgeStaleAndAhead(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 
 	founded := mustFound(t, roomAgent(1), roomAgent(2))
-	if _, err := ledger.Advance(founded, now); err != nil {
+	if _, err := advanceRoom(t, ledger, founded, 1, now); err != nil {
 		t.Fatalf("found: %v", err)
 	}
 	added, err := founded.Add([]string{roomAgent(3)})
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if _, err := ledger.Advance(added, now); err != nil {
+	if _, err := advanceRoom(t, ledger, added, 1, now); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
 	// Record is at epoch 2.
@@ -221,7 +245,7 @@ func TestRoomLedgerCurrentDrivesNextEpoch(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 
 	founded := mustFound(t, roomAgent(1), roomAgent(2))
-	if _, err := ledger.Advance(founded, now); err != nil {
+	if _, err := advanceRoom(t, ledger, founded, 1, now); err != nil {
 		t.Fatalf("found: %v", err)
 	}
 	current, found, err := ledger.Current(ledgerRoom)
@@ -232,7 +256,90 @@ func TestRoomLedgerCurrentDrivesNextEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add from current: %v", err)
 	}
-	if _, err := ledger.Advance(next, now); err != nil {
+	if _, err := advanceRoom(t, ledger, next, 1, now); err != nil {
 		t.Fatalf("advance derived successor: %v", err)
+	}
+}
+
+func roomDelegation(t *testing.T, agentID string, seed byte) (identity.Delegation, ed25519.PrivateKey) {
+	t.Helper()
+	network := &nativev1.NetworkDomain{NetworkId: "tos-local", GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)}
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
+	endpointID, err := identity.DeriveEndpointID(network, agentID, key.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return identity.Delegation{Network: network, AgentID: agentID, EndpointID: endpointID, IdentityPublicKey: key.Public().(ed25519.PublicKey), NotBeforeUnix: 1, ExpiresAtUnix: 2_000_000_000}, key
+}
+
+func TestRoomLedgerEnforcesAndPersistsSignedAuthorityTransfer(t *testing.T) {
+	ledger, journal, root := openRoomLedger(t)
+	now := time.Unix(250, 0)
+	fromDelegation, fromKey := roomDelegation(t, roomAgent(1), 0x51)
+	toDelegation, _ := roomDelegation(t, roomAgent(2), 0x52)
+	from := room.Authority{AgentID: fromDelegation.AgentID, EndpointID: fromDelegation.EndpointID}
+	to := room.Authority{AgentID: toDelegation.AgentID, EndpointID: toDelegation.EndpointID}
+	founded := mustFound(t, from.AgentID, to.AgentID)
+	if _, err := ledger.Advance(founded, membershipAuthorization(t, founded, fromDelegation, fromKey, now), fromDelegation, now); err != nil {
+		t.Fatal(err)
+	}
+	added, err := founded.Add([]string{roomAgent(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Advance(added, membershipAuthorization(t, added, toDelegation, ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x52}, ed25519.SeedSize)), now), toDelegation, now); err == nil {
+		t.Fatal("non-authority advanced membership")
+	}
+	removedAuthority, err := founded.Remove([]string{from.AgentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Advance(removedAuthority, membershipAuthorization(t, removedAuthority, fromDelegation, fromKey, now), fromDelegation, now); err == nil {
+		t.Fatal("authority removed itself without transferring authority")
+	}
+
+	next, err := founded.AdvanceForAuthorityTransfer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfer, err := room.SignAuthorityTransfer(room.AuthorityTransfer{
+		Network: fromDelegation.Network, RoomID: founded.RoomID,
+		PriorEpoch: founded.Epoch, NextEpoch: next.Epoch,
+		PriorMembershipDigest: founded.Digest, NextMembershipDigest: next.Digest,
+		From: from, To: to, IssuedAtUnix: 200, ExpiresAtUnix: 300,
+	}, fromKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ledger.TransferAuthority(next, transfer, fromDelegation, toDelegation, now)
+	if err != nil || result.Authority != to || len(result.Joined) != 0 || len(result.Departed) != 0 {
+		t.Fatalf("transfer=%+v err=%v", result, err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	ledger, err = reopened.OpenRooms()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, found, err := ledger.CurrentAuthority(ledgerRoom)
+	if err != nil || !found || current != to {
+		t.Fatalf("current authority=%+v found=%v err=%v", current, found, err)
+	}
+	after, err := next.Add([]string{roomAgent(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Advance(after, membershipAuthorization(t, after, fromDelegation, fromKey, now), fromDelegation, now); err == nil {
+		t.Fatal("old authority advanced after restart")
+	}
+	toKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x52}, ed25519.SeedSize))
+	if _, err := ledger.Advance(after, membershipAuthorization(t, after, toDelegation, toKey, now), toDelegation, now); err != nil {
+		t.Fatalf("new authority could not advance: %v", err)
 	}
 }

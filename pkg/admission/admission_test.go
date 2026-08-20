@@ -265,7 +265,22 @@ func seedRoom(members ...string) func(*testing.T, *eventlog.RoomLedger) {
 		if err != nil {
 			t.Fatalf("found room: %v", err)
 		}
-		if _, err := rooms.Advance(membership, time.Unix(int64(baseUnix)+5, 0)); err != nil {
+		key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x68}, ed25519.SeedSize))
+		endpointID, err := identity.DeriveEndpointID(testNetwork(), membership.Members[0], key.Public().(ed25519.PublicKey))
+		if err != nil {
+			t.Fatalf("derive room authority: %v", err)
+		}
+		delegation := identity.Delegation{Network: testNetwork(), AgentID: membership.Members[0], EndpointID: endpointID,
+			IdentityPublicKey: key.Public().(ed25519.PublicKey), NotBeforeUnix: baseUnix, ExpiresAtUnix: baseUnix + 100}
+		authorization, err := room.SignMembershipAuthorization(room.MembershipAuthorization{
+			Network: testNetwork(), RoomID: membership.RoomID, Epoch: membership.Epoch, MembershipDigest: membership.Digest,
+			Authority:    room.Authority{AgentID: delegation.AgentID, EndpointID: delegation.EndpointID},
+			IssuedAtUnix: baseUnix + 1, ExpiresAtUnix: baseUnix + 90,
+		}, key)
+		if err != nil {
+			t.Fatalf("authorize room founding: %v", err)
+		}
+		if _, err := rooms.Advance(membership, authorization, delegation, time.Unix(int64(baseUnix)+5, 0)); err != nil {
 			t.Fatalf("advance room: %v", err)
 		}
 	}

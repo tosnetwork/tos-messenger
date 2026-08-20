@@ -9,12 +9,14 @@ does not make a Driver cryptographically sound.
 The implemented boundary consists of:
 
 - suite `0x0001` only, and a Driver hook that must parse the KeyPackage and
-  match its LeafNode signing key;
+match its BasicCredential identity and LeafNode signing key;
 - an endpoint-signed per-device credential binding the exact network tuple,
   Agent, Endpoint, Device, current device-set digest, distinct Ed25519 leaf
   signing public key, exact KeyPackage bytes, and validity window;
 - strict JSON publication plus a domain-separated canonical signature preimage
   and committed positive/adversarial vectors;
+- exact BasicCredential identity bytes and a 32-byte network-bound MLS
+  `group_id`, both with candidate change-detection vectors;
 - explicit `room_epoch` and `mls_epoch` clocks. Agent membership advances both;
   device churn and PCS refresh may advance only `mls_epoch`;
 - deterministic conversion of an accepted device-set succession to MLS leaf
@@ -25,6 +27,68 @@ The implemented boundary consists of:
   and processed Welcomes. Exact replay is idempotent; rollback, gaps, state
   substitution, duplicate Welcomes, KeyPackage reuse, and competing children
   fail closed.
+- a durable single-authority room ledger. Every founding/successor membership
+  carries the recorded Endpoint's bounded signature over the exact digest;
+  transfer is one adjacent room epoch signed by the old delegated Endpoint and
+  names a finalized live successor Endpoint.
+
+## Canonical MLS identity bytes
+
+All integer lengths and values below use the repository canonical framing:
+unsigned big-endian `uint32`/`uint64`; every text or byte string is prefixed by
+its `uint32` byte length. Genesis hashes are lowercase bare hex at the JSON
+boundary and are decoded to exactly 32 raw bytes before entering a preimage.
+
+The RFC 9420 BasicCredential `identity` is the complete canonical byte string:
+
+```text
+"tos.messaging.mls-basic-credential.v1\0"
+text("tos.messaging.mls-basic-credential.v1")
+text(network_id) || bytes(genesis_root) || bytes(genesis_file)
+text(agent_id) || text(endpoint_id) || text(device_id)
+text(device_set_digest) || bytes(leaf_signature_public_key)
+uint32(0x0001)
+```
+
+It is identity data, not standalone authority. The application still verifies
+the surrounding endpoint-signed `mls-device-credential.v2`, finalized
+delegation, current device set, distinct leaf key, and exact KeyPackage before
+passing it to an MLS Driver.
+
+The MLS `group_id` is the raw 32-byte SHA-256 output over:
+
+```text
+"tos.messaging.mls-group-id.v1\0"
+text("tos.messaging.mls-group-id.v1")
+text(network_id) || bytes(genesis_root) || bytes(genesis_file)
+text(room_id)
+```
+
+`pkg/group` commits positive values and rejects another network, a prefixed
+genesis representation, a foreign room, and identity-field substitutions.
+These are candidate vectors; independent consumption is still required before
+wire freeze.
+
+The device-credential signature preimage is now v2 for the same raw-genesis
+reason. Reusing the v1 domain while changing representation would have made a
+silent wire fork, so both its schema and domain were advanced.
+
+## Room authority transfer
+
+The room ledger v2 records one authority Agent and Messaging Endpoint. Founding
+binds it to a member. Each founding or ordinary successor membership carries a
+separate `room-membership-authorization.v1` signature over the network, exact
+room epoch/digest, authority identity and bounded window. Merely repeating the
+authority's identifier is never enough. The Endpoint key must independently
+derive the recorded Endpoint ID. The authority cannot remove itself without
+transferring first.
+An authority transfer commits the network, room, prior and next epoch and
+membership digests, both Agent/Endpoint identities, and a bounded validity
+window under `tos.messaging.room-authority-transfer.v1`. The old Endpoint signs
+the canonical bytes; both old and new delegations must be live, finalized by
+the caller, network-matched, and name members of their respective epochs. The
+ledger applies transfer plus successor epoch atomically and persists the new
+authority before returning.
 
 ## Required call order
 
@@ -45,11 +109,6 @@ Relays may deliver these bytes, but Relay order never chooses a commit.
 
 - integrate and review OpenMLS behind a concrete `group.Driver`; suite `0x0001`
   is selected, but the cryptographic Driver is not yet integrated;
-- specify the BasicCredential identity bytes and network-bound MLS group
-  identifier using the decided raw-32-byte canonical genesis hashes and commit
-  new domains, schemas, and positive/adversarial vectors;
-- enforce the selected single current-authority Agent rule and its explicit,
-  current-authority-signed, single-step transfer;
 - real MLS founding, join/no-past, remove/no-future, exporter separation and
   PCS vectors executed through the selected Driver;
 - offline multi-Relay catch-up using the eventual post-M0-R transport;

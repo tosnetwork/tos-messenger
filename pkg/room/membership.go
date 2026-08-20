@@ -167,6 +167,21 @@ func (m Membership) Remove(leaving []string) (Membership, error) {
 	return commit(m.RoomID, epoch, next)
 }
 
+// AdvanceForAuthorityTransfer returns the next room epoch with the same Agent
+// set. It is deliberately separate from Add and Remove: the room ledger only
+// accepts this otherwise-no-op epoch together with a valid current-authority
+// signature that changes authority.
+func (m Membership) AdvanceForAuthorityTransfer() (Membership, error) {
+	if err := m.usable(); err != nil {
+		return Membership{}, err
+	}
+	epoch, err := nextEpoch(m.Epoch)
+	if err != nil {
+		return Membership{}, err
+	}
+	return commit(m.RoomID, epoch, append([]string(nil), m.Members...))
+}
+
 // Contains reports whether an Agent is a member at this epoch.
 func (m Membership) Contains(agentID string) bool {
 	for _, member := range m.Members {
