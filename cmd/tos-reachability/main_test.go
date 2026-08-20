@@ -105,7 +105,7 @@ func TestIdentityIsStable(t *testing.T) {
 // same rendezvous, same attestation, different measured protocol.
 func TestADNLTrialEndToEnd(t *testing.T) {
 	if probe.RaceEnabled {
-		t.Skip("tonutils-go's TL serializer trips checkptr; the ADNL gateway cannot run under -race")
+		t.Skip("tosutils-go's TL serializer trips checkptr; the ADNL gateway cannot run under -race")
 	}
 	coordinatorAddress, coordinatorID := startCoordinator(t)
 	session := "ses_0123456789abcdef0123456789abcdef"
@@ -190,7 +190,7 @@ func TestADNLTrialEndToEnd(t *testing.T) {
 // gateway, so the trial also proves the two manifests cross correctly.
 func TestADNLSidecarTrialEndToEnd(t *testing.T) {
 	if probe.RaceEnabled {
-		t.Skip("tonutils-go's TL serializer trips checkptr; the ADNL gateway cannot run under -race")
+		t.Skip("tosutils-go's TL serializer trips checkptr; the ADNL gateway cannot run under -race")
 	}
 	binary := os.Getenv("TOS_ADNL_PROBE_BIN")
 	if binary == "" {
@@ -257,7 +257,7 @@ func TestADNLSidecarTrialEndToEnd(t *testing.T) {
 		t.Fatalf("the manifest's binary hash %q is not the sidecar binary's %q",
 			sidecarManifest.BinarySHA256, wantHash)
 	}
-	if manifests[reachability.RoleB].ADNLImplementation != "tonutils-go" {
+	if manifests[reachability.RoleB].ADNLImplementation != "tosutils-go" {
 		t.Fatalf("the gateway half's manifest names %q", manifests[reachability.RoleB].ADNLImplementation)
 	}
 	// The digests cross: what the gateway half learned as its peer's build is

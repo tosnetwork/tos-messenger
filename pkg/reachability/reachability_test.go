@@ -38,7 +38,7 @@ func testManifest(seed string) CollectorManifest {
 	return CollectorManifest{
 		OrchestratorRepository:   "github.com/tosnetwork/tos-messenger",
 		OrchestratorCommit:       commitA,
-		ADNLImplementation:       "tonutils-go",
+		ADNLImplementation:       "tosutils-go",
 		ADNLImplementationCommit: "v1.0.0-" + seed,
 		DependencyVersion:        "v1.0.0-" + seed,
 		BinarySHA256:             strings.Repeat("ab", 32),

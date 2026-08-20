@@ -37,7 +37,7 @@ func manifestDigestFor(t *testing.T, seed string) string {
 	digest, err := reachability.CollectorManifest{
 		OrchestratorRepository:   "github.com/tosnetwork/tos-messenger",
 		OrchestratorCommit:       strings.Repeat("a", 40),
-		ADNLImplementation:       "tonutils-go",
+		ADNLImplementation:       "tosutils-go",
 		ADNLImplementationCommit: "v1.0.0-" + seed,
 		DependencyVersion:        "v1.0.0-" + seed,
 		BinarySHA256:             strings.Repeat("ab", 32),

@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/xssnick/tonutils-go/adnl"
-	"github.com/xssnick/tonutils-go/adnl/address"
+	"github.com/tosnetwork/tosutils-go/adnl"
+	"github.com/tosnetwork/tosutils-go/adnl/address"
 
 	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 )
@@ -223,7 +223,7 @@ func (r *runner) tunnelEstablish(ctx context.Context, transportKey ed25519.Priva
 	// establishment turns on the explicit dial and the answered packet source,
 	// not on the list.
 	if ip := relayAddr.Addr().Unmap(); ip.Is4() {
-		gateway.SetAddressList([]*address.UDP{{IP: ip.AsSlice(), Port: int32(relayAddr.Port())}})
+		gateway.SetAddressList([]address.Address{&address.UDP{IP: ip.AsSlice(), Port: int32(relayAddr.Port())}})
 	}
 	established := make(chan arrival, 4)
 	gateway.SetConnectionHandler(confirmInbound(ctx, deadline, established))
@@ -324,7 +324,7 @@ func (r *runner) punchBurst(peers []netip.AddrPort) {
 //
 // The bound socket is where the peer's mapping points, so its family is the one
 // in use, and the wildcard has to match it -- a hardcoded IPv4 wildcard could
-// never receive the IPv6 half of the reachability policy. tonutils' StartServer
+// never receive the IPv6 half of the reachability policy. tosutils' StartServer
 // splits the listen address on ":" and rejects anything that is not host:port,
 // so the IPv6 wildcard is given as ":port" (which net.ListenPacket binds
 // dual-family) rather than "[::]:port", a form that parser cannot accept. The
@@ -382,7 +382,7 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 	// on the initiator dialling an explicit candidate and the responder answering
 	// the packet's source, not on the advertised list, which stays empty for an
 	// IPv6 session. Listening still happens on the wildcard of the family in use.
-	advertised := make([]*address.UDP, 0, len(r.result.Observed))
+	advertised := make([]address.Address, 0, len(r.result.Observed))
 	for _, observed := range r.result.Observed {
 		ip := observed.Addr().Unmap()
 		if !ip.Is4() {

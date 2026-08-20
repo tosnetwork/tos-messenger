@@ -30,7 +30,7 @@ func sidecarBinary(t *testing.T) string {
 
 // runADNLMatrixPair runs one measured pair on loopback with each role's
 // runner chosen independently, which is what the cross matrix needs: both
-// native, or one native against the tonutils gateway in either initiating
+// native, or one native against the tosutils gateway in either initiating
 // direction.
 func runADNLMatrixPair(t *testing.T, sidecarRole map[Role]bool, adjust func(Role, *Config)) map[Role]Result {
 	t.Helper()

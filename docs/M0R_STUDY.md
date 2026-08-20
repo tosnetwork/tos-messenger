@@ -119,7 +119,7 @@ route decision, because the route is about sessions, not datagrams: a
 handshake is several packets in both directions with sizes and timing a
 middlebox may treat differently from a probe datagram. The ADNL collector
 reuses the coordinator rendezvous, then hands the rendezvous port to a real
-ADNL gateway (the `tonutils-go` implementation of the protocol TOS inherits).
+ADNL gateway (the `tosutils-go` implementation of the protocol TOS inherits).
 
 Three design decisions carry the correctness:
 
@@ -167,7 +167,7 @@ Two honest caveats. Establishment latency includes the rendezvous hand-off
 (the responder's punch burst and gateway rebind), so absolute latencies carry
 a small tooling offset that is identical across scenarios; comparisons between
 cells are unaffected. And the collector speaks the TON lineage of ADNL through
-`tonutils-go`; before a route decision frozen on this evidence is acted on,
+`tosutils-go`; before a route decision frozen on this evidence is acted on,
 the trials should be cross-checked against the TOS node's own adnl stack —
 every trial records the commit and the content-addressed collector manifest
 (orchestrator repository and commit, ADNL implementation and version, binary

@@ -19,7 +19,7 @@ const sidecarEchoAttempts = 3
 
 // RunADNLSidecar measures one endpoint of one ADNL establishment attempt with
 // the native ADNL stack, driven as a subprocess, instead of the in-process
-// tonutils-go gateway.
+// tosutils-go gateway.
 //
 // The study's honest caveat about the gateway runner is that it speaks the
 // TON lineage of ADNL through a reimplementation; a route decision frozen on

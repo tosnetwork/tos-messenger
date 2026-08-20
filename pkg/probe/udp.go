@@ -66,7 +66,7 @@ type Config struct {
 	// which is being collected.
 	TunnelAddr string
 	// SidecarPath selects the native ADNL sidecar runner and names its binary.
-	// Empty selects the in-process tonutils-go gateway, which is the default
+	// Empty selects the in-process tosutils-go gateway, which is the default
 	// and the historical behavior. The sidecar runner refuses the tunnel
 	// fallback and IPv6 sockets, because the native transport supports
 	// neither and a silent no-op would record "not measured" for something

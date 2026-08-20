@@ -40,7 +40,7 @@ const (
 	// this collector. The manifest pins its resolved version, because two
 	// binaries at one orchestrator commit can still have compiled different
 	// implementation code.
-	adnlModulePath = "github.com/xssnick/tonutils-go"
+	adnlModulePath = "github.com/tosnetwork/tosutils-go"
 	// wireProfile names the ADNL lineage this collector speaks, so its
 	// evidence cannot be silently pooled with a dialect it never exercised.
 	wireProfile = "ton-adnl"
@@ -396,7 +396,7 @@ func collectorManifest(commit string) (reachability.CollectorManifest, error) {
 	return reachability.CollectorManifest{
 		OrchestratorRepository: orchestratorRepository,
 		OrchestratorCommit:     commit,
-		ADNLImplementation:     "tonutils-go",
+		ADNLImplementation:     "tosutils-go",
 		// The module version is both the implementation pin and the dependency
 		// version for a collector whose ADNL code arrives as a Go module: the
 		// version is the identity the build actually resolved.

@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xssnick/tonutils-go/adnl"
-	"github.com/xssnick/tonutils-go/tl"
+	"github.com/tosnetwork/tosutils-go/adnl"
+	"github.com/tosnetwork/tosutils-go/tl"
 )
 
 // The probe's cross-implementation round trip is an ADNL query whose payload
@@ -39,7 +39,7 @@ const (
 
 // echoQueryPayload is how the raw echo query becomes visible to this
 // collector's TL parser. The wire payload is raw bytes, not a TL object, but
-// tonutils-go parses every inbound query payload as a boxed TL structure and
+// tosutils-go parses every inbound query payload as a boxed TL structure and
 // drops the whole packet when the leading four bytes are no registered
 // constructor. Registering a manual-codec type under exactly the constructor
 // id the prefix begins with ("tosp", read little-endian) turns the raw
@@ -77,7 +77,7 @@ func (p *echoQueryPayload) fullPayload() []byte {
 }
 
 // answerWatch is how this collector receives the raw 32-byte echo answer. The
-// answer is a hash, not a TL object, so tonutils-go's packet parser rejects it
+// answer is a hash, not a TL object, so tosutils-go's packet parser rejects it
 // as an unregistered constructor and drops the packet -- after decrypting and
 // authenticating it -- with a log line that carries the undecodable bytes in
 // hex. The querier knows the exact hash it expects, so finding that hex in the

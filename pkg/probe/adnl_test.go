@@ -512,6 +512,6 @@ func TestConfigRefusesWhatTheRunnersCannotMeasure(t *testing.T) {
 func skipUnderRace(t *testing.T) {
 	t.Helper()
 	if RaceEnabled {
-		t.Skip("tonutils-go's TL serializer trips checkptr; the ADNL gateway cannot run under -race")
+		t.Skip("tosutils-go's TL serializer trips checkptr; the ADNL gateway cannot run under -race")
 	}
 }
