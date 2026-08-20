@@ -9,15 +9,18 @@ import (
 func testMandate() StoredMandate {
 	return StoredMandate{
 		Objective: "buy transcription", Authority: "commit",
-		CapabilityClass:     "transcription.audio",
-		Workchain:           0,
-		AssetAccountID:      strings.Repeat("a", 64),
-		AssetMasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
-		AssetWalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
-		AssetDecimals:       2,
-		MaxTotalAtomic:      "1000",
-		ApprovalAboveAtomic: "500",
-		MaxCounteroffers:    4, ExpiresAtUnix: 1_800_086_400,
+		CapabilityClass:      "transcription.audio",
+		AssetNetworkID:       "tos-local",
+		AssetGenesisRootHash: strings.Repeat("1", 64),
+		AssetGenesisFileHash: strings.Repeat("2", 64),
+		Workchain:            0,
+		AssetAccountID:       strings.Repeat("a", 64),
+		AssetMasterCodeHash:  "tvm-cell-sha256:" + strings.Repeat("b", 64),
+		AssetWalletCodeHash:  "tvm-cell-sha256:" + strings.Repeat("c", 64),
+		AssetDecimals:        2,
+		MaxTotalAtomic:       "1000",
+		ApprovalAboveAtomic:  "500",
+		MaxCounteroffers:     4, ExpiresAtUnix: 1_800_086_400,
 	}
 }
 
@@ -36,6 +39,17 @@ func TestMandateIdentifierCommitsItsTerms(t *testing.T) {
 	}
 	if first == second {
 		t.Fatal("two different ceilings shared one mandate identifier")
+	}
+	// The asset's network is part of the identity: the same authorisation on
+	// another network is another authorisation.
+	elsewhere := testMandate()
+	elsewhere.AssetNetworkID = "tos-somewhere-else"
+	third, err := MandateID(elsewhere)
+	if err != nil {
+		t.Fatalf("identify: %v", err)
+	}
+	if third == first {
+		t.Fatal("the same mandate on two networks shared one identifier")
 	}
 	if _, err := MandateID(StoredMandate{}); err == nil {
 		t.Fatal("an empty mandate was given an identifier")
@@ -108,6 +122,8 @@ func TestMandateInputsAreValidated(t *testing.T) {
 		"no class":       func(m *StoredMandate) { m.CapabilityClass = "" },
 		"no asset":       func(m *StoredMandate) { m.AssetAccountID = "" },
 		"no wallet code": func(m *StoredMandate) { m.AssetWalletCodeHash = "" },
+		"no network":     func(m *StoredMandate) { m.AssetNetworkID = "" },
+		"bad genesis":    func(m *StoredMandate) { m.AssetGenesisRootHash = "abc" },
 		"no ceiling":     func(m *StoredMandate) { m.MaxTotalAtomic = "" },
 		"no expiry":      func(m *StoredMandate) { m.ExpiresAtUnix = 0 },
 		"long objective": func(m *StoredMandate) {

@@ -582,6 +582,11 @@ func (j *Journal) mandateBudgetFor(approval Approval) (*negotiation.Budget, stri
 		return nil, "", ErrMandateUnknown
 	}
 	asset := negotiation.Asset{
+		Network: negotiation.Network{
+			ID:              stored.AssetNetworkID,
+			GenesisRootHash: stored.AssetGenesisRootHash,
+			GenesisFileHash: stored.AssetGenesisFileHash,
+		},
 		Workchain: stored.Workchain, AccountID: stored.AssetAccountID,
 		MasterCodeHash: stored.AssetMasterCodeHash, WalletCodeHash: stored.AssetWalletCodeHash,
 		Decimals: stored.AssetDecimals,

@@ -32,9 +32,17 @@ var (
 // and on two networks that is the normal case rather than an attack; an
 // agreement that named its asset by ticker would let a counterparty deliver a
 // different token that renders the same way. What identifies an asset is the
-// master contract it lives under, the wallet code that moves it, and its
-// precision, which is exactly what the chain uses.
+// network it lives on, the master contract it lives under, the wallet code
+// that moves it, and its precision. The network is part of the identity for
+// the same reason the code hashes are: the same workchain, account and code
+// hashes can exist on another TOS network, and an asset identity that omitted
+// it would give two different assets one digest -- and, through the price,
+// give identical terms on two networks one digest, so a cross-network replay
+// would hash to the commitment it replays.
 type Asset struct {
+	// Network is the TOS network the asset lives on, committed into every
+	// digest the asset is folded into.
+	Network   Network
 	Workchain int32
 	// AccountID is the master contract account, in lowercase hex.
 	AccountID string
@@ -47,6 +55,9 @@ type Asset struct {
 
 // Validate enforces a usable asset identity.
 func (a Asset) Validate() error {
+	if err := a.Network.Validate(); err != nil {
+		return errors.New("asset names no network")
+	}
 	if a.Workchain < -128 || a.Workchain > 127 {
 		return errors.New("asset workchain is outside the addressable range")
 	}
@@ -65,14 +76,18 @@ func (a Asset) Validate() error {
 	return nil
 }
 
-// Same reports whether two identities are the same asset.
+// Same reports whether two identities are the same asset. The network is part
+// of the comparison: the same contract tuple on another network is a different
+// asset.
 func (a Asset) Same(other Asset) bool {
-	return a.Workchain == other.Workchain && a.AccountID == other.AccountID &&
+	return a.Network.Same(other.Network) &&
+		a.Workchain == other.Workchain && a.AccountID == other.AccountID &&
 		a.MasterCodeHash == other.MasterCodeHash && a.WalletCodeHash == other.WalletCodeHash &&
 		a.Decimals == other.Decimals
 }
 
 func (a Asset) canonical(buffer *bytes.Buffer) {
+	a.Network.canonical(buffer)
 	canon.Uint32(buffer, uint32(a.Workchain))
 	canon.Text(buffer, a.AccountID)
 	canon.Text(buffer, a.MasterCodeHash)
@@ -81,7 +96,10 @@ func (a Asset) canonical(buffer *bytes.Buffer) {
 }
 
 // Proto returns the protocol form of an asset identity, so the same identity
-// travels to the chain side without being re-expressed.
+// travels to the chain side without being re-expressed. The protocol form
+// carries no network field: on the chain side the network is established by
+// which network the state was resolved from, and it is compared there against
+// the negotiation's binding rather than restated inside the asset.
 func (a Asset) Proto() (*nativev1.TOSAssetIdentityV1, error) {
 	if err := a.Validate(); err != nil {
 		return nil, err

@@ -1,6 +1,7 @@
 package vectors
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -146,6 +147,67 @@ func validSnapshotJSON(t *testing.T) []byte {
 		t.Fatalf("snapshot: %v", err)
 	}
 	return encoded
+}
+
+// snapshotTerms is a complete set of negotiation terms priced on the given
+// network. The network rides inside the asset, and through the asset inside
+// the terms digest: the same numbers on two networks are two digests.
+func snapshotTerms(network negotiation.Network) *negotiation.Terms {
+	return &negotiation.Terms{
+		CapabilityID:           "cap_" + strings.Repeat("9", 64),
+		CapabilityVersion:      "1.0.0",
+		CapabilityClass:        "software.audit",
+		ProviderAgentID:        "agent_" + strings.Repeat("5", 64),
+		ManifestDigest:         "sha256:" + strings.Repeat("d", 64),
+		TransportBindingDigest: "sha256:" + strings.Repeat("e", 64),
+		Price: negotiation.Money{Asset: negotiation.Asset{
+			Network:        network,
+			Workchain:      0,
+			AccountID:      strings.Repeat("a", 64),
+			MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
+			WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
+			Decimals:       6,
+		}, Atomic: "100"},
+		EscrowTermsDigest:   "sha256:" + strings.Repeat("f", 64),
+		DisputePolicyDigest: "sha256:" + strings.Repeat("1", 64),
+		NotAfterUnix:        baseUnix + 3600,
+	}
+}
+
+// snapshotNetworkIdentity is the value form of the snapshot's bound network.
+func snapshotNetworkIdentity(t *testing.T) negotiation.Network {
+	t.Helper()
+	network, err := negotiation.NetworkFromDomain(testNetwork())
+	if err != nil {
+		t.Fatalf("network: %v", err)
+	}
+	return network
+}
+
+// crossNetworkTermsSnapshotJSON is a snapshot whose on-table terms are priced
+// on a network other than the one the exchange is bound to. The terms digest
+// commits the asset's network, so this is a foreign purchase's digest riding a
+// local conversation, and the decoder must refuse it. The same document with
+// the terms priced on the bound network encodes and decodes cleanly, which is
+// what proves the refusal is owed to the network and to nothing else.
+func crossNetworkTermsSnapshotJSON(t *testing.T) string {
+	t.Helper()
+	snapshot := validSnapshot()
+	snapshot.State = string(negotiation.StateProposalPending)
+	snapshot.OnTable = snapshotTerms(snapshotNetworkIdentity(t))
+	if _, err := negotiation.EncodeSnapshotJSON(snapshot); err != nil {
+		t.Fatalf("the same-network baseline does not encode: %v", err)
+	}
+	foreign := snapshotNetworkIdentity(t)
+	foreign.ID = "tos-somewhere-else"
+	snapshot.OnTable = snapshotTerms(foreign)
+	// The valid encoder refuses this document, so the hostile form a store on
+	// disk could suffer is marshalled directly.
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	return string(encoded)
 }
 
 // futureApprovalSnapshotJSON is a snapshot carrying an approval from a

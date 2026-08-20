@@ -22,11 +22,22 @@ const (
 // would be testing an identity the code no longer accepts.
 func testAsset() Asset {
 	return Asset{
+		Network:        testNetworkIdentity(),
 		Workchain:      0,
 		AccountID:      strings.Repeat("a", 64),
 		MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
 		WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
 		Decimals:       6,
+	}
+}
+
+// testNetworkIdentity is the committed value form of testNetwork, so an asset
+// fixture lives on the same network the negotiations bind to.
+func testNetworkIdentity() Network {
+	return Network{
+		ID:              "tos-local",
+		GenesisRootHash: strings.Repeat("a", 64),
+		GenesisFileHash: strings.Repeat("b", 64),
 	}
 }
 
@@ -415,10 +426,12 @@ func TestFinalizeRejectsAForeignAsset(t *testing.T) {
 }
 
 // A finalized quote read from a different TOS network is not the agreement,
-// even when every term matches. The same workchain, account and code hashes can
-// exist on another network, so terms that match are not enough; a network id
+// even when every other term matches. The network is committed inside the
+// digests now -- the priced asset carries it -- so an honestly resolved
+// foreign quote no longer even matches the agreed terms: identical numbers on
+// two networks are two digests, and the exchange settles rejected. A network id
 // alone is not identity either, so a shared id over different genesis state is
-// also another network. Value must not move under a commitment from elsewhere.
+// also another network.
 func TestFinalizeRejectsAForeignNetwork(t *testing.T) {
 	otherID := testNetwork()
 	otherID.NetworkId = "tos-somewhere-else"
@@ -442,7 +455,15 @@ func TestFinalizeRejectsAForeignNetwork(t *testing.T) {
 				t.Fatalf("canonicalise: %v", err)
 			}
 
-			foreign := finalizedQuote(terms("50000000"))
+			// An honestly resolved foreign quote is internally consistent: its
+			// terms are priced on the network it was read from.
+			foreignNetwork, err := NetworkFromDomain(network)
+			if err != nil {
+				t.Fatalf("network: %v", err)
+			}
+			foreignTerms := terms("50000000")
+			foreignTerms.Price.Asset.Network = foreignNetwork
+			foreign := finalizedQuote(foreignTerms)
 			foreign.Network = network
 			if err := instance.Finalize(stubResolver{quote: foreign, found: true}, commitment, at(4)); err == nil {
 				t.Fatal("a quote from another network was accepted")
@@ -456,7 +477,48 @@ func TestFinalizeRejectsAForeignNetwork(t *testing.T) {
 			if _, committed := instance.Committed(); committed {
 				t.Fatal("a quote from another network was reported as committed")
 			}
+
+			// The two networks' terms digest differently: that is the
+			// cryptographic half of the rejection above.
+			home, err := terms("50000000").Digest()
+			if err != nil {
+				t.Fatalf("home digest: %v", err)
+			}
+			away, err := foreignTerms.Digest()
+			if err != nil {
+				t.Fatalf("foreign digest: %v", err)
+			}
+			if home == away {
+				t.Fatal("identical terms on two networks share a digest")
+			}
 		})
+	}
+}
+
+// A resolver whose answer contradicts itself -- a quote wrapped in one network
+// while its terms are priced on another -- is refused as malformed rather than
+// settled: it said nothing coherent about the chain, so the negotiation stays
+// where it was, to be retried against a resolver that does.
+func TestFinalizeRefusesAnInternallyContradictoryQuote(t *testing.T) {
+	instance := start(t, testBudget(t, "1000000000"))
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if err := instance.AcceptIntent(at(2)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := instance.BeginCanonicalization(at(3)); err != nil {
+		t.Fatalf("canonicalise: %v", err)
+	}
+	contradictory := finalizedQuote(terms("50000000"))
+	foreign := testNetwork()
+	foreign.NetworkId = "tos-somewhere-else"
+	contradictory.Network = foreign
+	if err := instance.Finalize(stubResolver{quote: contradictory, found: true}, commitment, at(4)); err == nil {
+		t.Fatal("an internally contradictory quote was accepted")
+	}
+	if instance.State() != StateCanonicalizationPending {
+		t.Fatalf("a malformed resolver answer settled the exchange to %q", instance.State())
 	}
 }
 
@@ -1442,3 +1504,68 @@ func TestAFailedWriteIsAFailedTransition(t *testing.T) {
 type failingStore struct{}
 
 func (failingStore) Save(Snapshot) error { return errors.New("disk says no") }
+
+// The network identity is committed inside every commerce digest through the
+// asset, so the same object on two networks is two digests, and an asset
+// stripped of its network is not an asset at all.
+func TestNetworkIsCommittedInTheDigests(t *testing.T) {
+	foreignAsset := testAsset()
+	foreignAsset.Network.ID = "tos-somewhere-else"
+	if testAsset().Same(foreignAsset) {
+		t.Fatal("the same contract tuple on two networks was one asset")
+	}
+
+	foreignMandate := testMandate()
+	foreignMandate.MaxTotal.Asset = foreignAsset
+	foreignMandate.ApprovalAbove.Asset = foreignAsset
+	home, err := testMandate().Digest()
+	if err != nil {
+		t.Fatalf("home mandate digest: %v", err)
+	}
+	away, err := foreignMandate.Digest()
+	if err != nil {
+		t.Fatalf("foreign mandate digest: %v", err)
+	}
+	if home == away {
+		t.Fatal("identical mandates on two networks shared a digest")
+	}
+
+	stripped := testAsset()
+	stripped.Network = Network{}
+	if err := stripped.Validate(); err == nil {
+		t.Fatal("an asset without a network validated")
+	}
+	for name, invalid := range map[string]Network{
+		"no id":        {GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)},
+		"no root hash": {ID: "tos-local", GenesisFileHash: strings.Repeat("b", 64)},
+		"short hash":   {ID: "tos-local", GenesisRootHash: "abc", GenesisFileHash: strings.Repeat("b", 64)},
+	} {
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("expected %q to be refused", name)
+		}
+	}
+}
+
+// Terms priced on a foreign network are refused at the moment they would enter
+// the exchange, not discovered at finalisation: recording them would put a
+// digest on the table that no commitment this negotiation accepts could ever
+// answer to.
+func TestForeignNetworkTermsAreRefusedAtTheTable(t *testing.T) {
+	instance := start(t, testBudget(t, "1000000000"))
+	foreign := terms("50000000")
+	foreign.Price.Asset.Network.ID = "tos-somewhere-else"
+	if err := instance.ReceiveProposal(foreign, at(1)); err == nil {
+		t.Fatal("a proposal priced on another network was recorded")
+	}
+	if err := instance.Counter(foreign, at(1)); err == nil {
+		t.Fatal("a counter priced on another network was sent")
+	}
+	// A mandate priced on another network cannot open an exchange bound here.
+	foreignMandate := testMandate()
+	foreignMandate.MaxTotal.Asset.Network.ID = "tos-somewhere-else"
+	foreignMandate.ApprovalAbove.Asset.Network.ID = "tos-somewhere-else"
+	if _, err := New("neg-foreign", conversation, counterparty, foreignMandate,
+		testNetwork(), testBudget(t, "1000000000"), &memoryStore{}, at(0)); err == nil {
+		t.Fatal("a mandate priced on another network opened a negotiation bound here")
+	}
+}

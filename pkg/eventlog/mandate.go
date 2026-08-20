@@ -49,18 +49,23 @@ type StoredMandate struct {
 	CapabilityClass string `json:"capability_class"`
 	// Asset names the asset the way the chain does. A ticker is a label; two
 	// contracts may both answer to one, and an authorisation that named its
-	// asset by ticker could be satisfied with a different token.
-	Workchain           int32  `json:"asset_workchain"`
-	AssetAccountID      string `json:"asset_master_account_id"`
-	AssetMasterCodeHash string `json:"asset_master_code_hash"`
-	AssetWalletCodeHash string `json:"asset_wallet_code_hash"`
-	AssetDecimals       uint32 `json:"asset_decimals"`
-	MaxTotalAtomic      string `json:"max_total_atomic"`
-	ApprovalAboveAtomic string `json:"approval_above_atomic"`
-	MaxCounteroffers    uint32 `json:"max_counteroffers"`
-	ExpiresAtUnix       uint64 `json:"expires_at_unix"`
-	PlacedAtUnix        uint64 `json:"placed_at_unix"`
-	RevokedAtUnix       uint64 `json:"revoked_at_unix,omitempty"`
+	// asset by ticker could be satisfied with a different token. The network is
+	// part of the identity: the same contract tuple exists on other TOS
+	// networks, and an authorisation that omitted it could be spent elsewhere.
+	AssetNetworkID       string `json:"asset_network_id"`
+	AssetGenesisRootHash string `json:"asset_genesis_root_hash"`
+	AssetGenesisFileHash string `json:"asset_genesis_file_hash"`
+	Workchain            int32  `json:"asset_workchain"`
+	AssetAccountID       string `json:"asset_master_account_id"`
+	AssetMasterCodeHash  string `json:"asset_master_code_hash"`
+	AssetWalletCodeHash  string `json:"asset_wallet_code_hash"`
+	AssetDecimals        uint32 `json:"asset_decimals"`
+	MaxTotalAtomic       string `json:"max_total_atomic"`
+	ApprovalAboveAtomic  string `json:"approval_above_atomic"`
+	MaxCounteroffers     uint32 `json:"max_counteroffers"`
+	ExpiresAtUnix        uint64 `json:"expires_at_unix"`
+	PlacedAtUnix         uint64 `json:"placed_at_unix"`
+	RevokedAtUnix        uint64 `json:"revoked_at_unix,omitempty"`
 }
 
 // Live reports whether a mandate may still authorise anything.
@@ -83,6 +88,9 @@ func MandateID(mandate StoredMandate) (string, error) {
 	canon.Text(buffer, mandate.Objective)
 	canon.Text(buffer, mandate.Authority)
 	canon.Text(buffer, mandate.CapabilityClass)
+	canon.Text(buffer, mandate.AssetNetworkID)
+	canon.Text(buffer, mandate.AssetGenesisRootHash)
+	canon.Text(buffer, mandate.AssetGenesisFileHash)
 	canon.Uint32(buffer, uint32(mandate.Workchain))
 	canon.Text(buffer, mandate.AssetAccountID)
 	canon.Text(buffer, mandate.AssetMasterCodeHash)
@@ -288,6 +296,11 @@ func validateStoredMandate(mandate StoredMandate) error {
 	if mandate.AssetAccountID == "" || mandate.AssetMasterCodeHash == "" ||
 		mandate.AssetWalletCodeHash == "" {
 		return errors.New("a mandate must name its asset the way the chain does")
+	}
+	if mandate.AssetNetworkID == "" || len(mandate.AssetNetworkID) > 128 ||
+		!canon.HashPattern.MatchString(mandate.AssetGenesisRootHash) ||
+		!canon.HashPattern.MatchString(mandate.AssetGenesisFileHash) {
+		return errors.New("a mandate must name the network its asset lives on")
 	}
 	if mandate.MaxTotalAtomic == "" || mandate.ApprovalAboveAtomic == "" {
 		return errors.New("a mandate must name its ceiling and its approval point")

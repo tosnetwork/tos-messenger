@@ -221,6 +221,14 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 		futureApprovalSnapshotJSON(t),
 		"an approval from a later version of the negotiation than the snapshot is an approval for terms that do not exist")
 
+	// Snapshot: terms priced on a network other than the exchange's binding.
+	// The terms digest commits the asset's network, so identical terms on two
+	// networks are two digests, and a snapshot carrying the foreign one is
+	// carrying a purchase no commitment this exchange accepts could answer to.
+	add("negotiation-snapshot/terms-on-another-network", "negotiation-snapshot",
+		crossNetworkTermsSnapshotJSON(t),
+		"terms priced on another network digest to a different commitment, so they cannot ride a negotiation bound to this one")
+
 	// Verify layer. Each baseline must itself pass its verifier, or the
 	// mutations prove nothing -- the same discipline the decode baselines get.
 	verifyBaselines := map[string][]byte{

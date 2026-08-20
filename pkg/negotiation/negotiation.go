@@ -116,6 +116,17 @@ func New(id, conversationID, counterpartyAgentID string, mandate Mandate,
 	if err := mandate.Live(now); err != nil {
 		return nil, err
 	}
+	// The mandate's asset commits a network of its own, and it has to be this
+	// one. A negotiation bound to one network under an authorisation priced on
+	// another could never finalize honestly, and every terms digest it produced
+	// would commit a network the exchange is not on.
+	bound, err := NetworkFromDomain(network)
+	if err != nil {
+		return nil, err
+	}
+	if !mandate.MaxTotal.Asset.Network.Same(bound) {
+		return nil, errors.New("the mandate is priced on a network this negotiation is not bound to")
+	}
 	if mandate.Authority == AuthorityCommit && budget == nil {
 		return nil, errors.New("a mandate that may commit needs a budget to commit against")
 	}
@@ -202,6 +213,23 @@ func (n *Negotiation) bindsCounterparty(terms Terms) error {
 	return nil
 }
 
+// bindsNetwork refuses terms whose asset lives on a network other than the one
+// this negotiation is bound to. The asset's network is committed into the terms
+// digest, so terms priced elsewhere are not merely outside the mandate -- they
+// are a purchase on a network no commitment this exchange accepts could ever
+// come from, and recording them would put a foreign digest on this
+// conversation's table.
+func (n *Negotiation) bindsNetwork(terms Terms) error {
+	bound, err := NetworkFromDomain(n.network)
+	if err != nil {
+		return err
+	}
+	if !terms.Price.Asset.Network.Same(bound) {
+		return errors.New("these terms are priced on a network this negotiation is not bound to")
+	}
+	return nil
+}
+
 // ReceiveProposal records an offer from the counterparty.
 //
 // The offer is recorded whether or not it is inside the mandate. A proposal
@@ -215,6 +243,9 @@ func (n *Negotiation) ReceiveProposal(terms Terms, now time.Time) error {
 		return err
 	}
 	if err := n.bindsCounterparty(terms); err != nil {
+		return err
+	}
+	if err := n.bindsNetwork(terms); err != nil {
 		return err
 	}
 	proposal := terms
@@ -242,6 +273,9 @@ func (n *Negotiation) Counter(terms Terms, now time.Time) error {
 		return err
 	}
 	if err := n.bindsCounterparty(terms); err != nil {
+		return err
+	}
+	if err := n.bindsNetwork(terms); err != nil {
 		return err
 	}
 	offer := terms

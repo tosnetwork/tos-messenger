@@ -158,6 +158,11 @@ func TestNegotiationIdentifiersCannotNameAPath(t *testing.T) {
 // journal, which is where the repair runs.
 func TestCommerceCrashWindowsReconcile(t *testing.T) {
 	asset := negotiation.Asset{
+		Network: negotiation.Network{
+			ID:              "tos-local",
+			GenesisRootHash: strings.Repeat("1", 64),
+			GenesisFileHash: strings.Repeat("2", 64),
+		},
 		Workchain:      0,
 		AccountID:      strings.Repeat("a", 64),
 		MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),

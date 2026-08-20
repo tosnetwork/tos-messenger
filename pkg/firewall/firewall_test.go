@@ -190,6 +190,11 @@ func testTerms(units uint64) negotiation.Terms {
 // ticker.
 func testAsset() negotiation.Asset {
 	return negotiation.Asset{
+		Network: negotiation.Network{
+			ID:              "tos-local",
+			GenesisRootHash: strings.Repeat("1", 64),
+			GenesisFileHash: strings.Repeat("2", 64),
+		},
 		Workchain:      0,
 		AccountID:      strings.Repeat("a", 64),
 		MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),

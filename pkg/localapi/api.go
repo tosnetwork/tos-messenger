@@ -209,13 +209,19 @@ type Request struct {
 //
 // A ticker is not carried, because a ticker is not an identity: two contracts
 // may both call themselves USDT, and an authorisation that named one by ticker
-// could be satisfied with the other.
+// could be satisfied with the other. The network -- id and both genesis
+// hashes, bare hex -- is part of the identity for the same reason: the same
+// contract tuple exists on other TOS networks, and an authorisation or a
+// purchase that omitted it could be satisfied elsewhere.
 type AssetIdentity struct {
-	Workchain      int32  `json:"workchain"`
-	AccountID      string `json:"master_account_id"`
-	MasterCodeHash string `json:"master_code_hash"`
-	WalletCodeHash string `json:"wallet_code_hash"`
-	Decimals       uint32 `json:"decimals"`
+	NetworkID       string `json:"network_id"`
+	GenesisRootHash string `json:"genesis_root_hash"`
+	GenesisFileHash string `json:"genesis_file_hash"`
+	Workchain       int32  `json:"workchain"`
+	AccountID       string `json:"master_account_id"`
+	MasterCodeHash  string `json:"master_code_hash"`
+	WalletCodeHash  string `json:"wallet_code_hash"`
+	Decimals        uint32 `json:"decimals"`
 }
 
 // MandateTerms is what an owner authorises in advance.

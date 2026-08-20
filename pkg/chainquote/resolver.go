@@ -70,8 +70,11 @@ func New(reader EscrowReader, locator EscrowLocator, network *nativev1.NetworkDo
 	if locator == nil {
 		return nil, errors.New("a quote resolver needs an escrow locator")
 	}
-	if network == nil || network.NetworkId == "" {
-		return nil, errors.New("a quote resolver needs a network domain")
+	// The full triple is required, not just the id: the network the resolver
+	// reads is stamped into every asset it maps, and an asset's committed
+	// network with missing genesis hashes would fail every digest downstream.
+	if _, err := negotiation.NetworkFromDomain(network); err != nil {
+		return nil, errors.New("a quote resolver needs a fully identified network domain")
 	}
 	return &Resolver{reader: reader, locator: locator, network: network, decode: nativecore.DecodeAcceptedQuoteV1}, nil
 }
@@ -141,7 +144,7 @@ func (r *Resolver) ResolveAcceptedQuote(commitment string) (negotiation.Verified
 	if err != nil {
 		return negotiation.VerifiedAcceptedQuote{}, false, err
 	}
-	terms, err := mapTerms(decoded, capabilityClass)
+	terms, err := mapTerms(decoded, capabilityClass, r.network)
 	if err != nil {
 		return negotiation.VerifiedAcceptedQuote{}, false, err
 	}
@@ -172,13 +175,16 @@ func finalizedUnix(escrow *toschain.FinalizedEscrowV1) uint64 {
 
 // mapTerms projects the decoded canonical quote onto the Messenger's Terms. The
 // capability class is supplied by the locator, because the canonical quote does
-// not carry it.
-func mapTerms(decoded *nativecore.AcceptedQuoteTermsV1, capabilityClass string) (negotiation.Terms, error) {
+// not carry it, and the network is the one the state was read from: the asset's
+// committed network is a fact about where the quote lives, so it comes from the
+// resolver's own binding rather than from anything the chain object restates.
+func mapTerms(decoded *nativecore.AcceptedQuoteTermsV1, capabilityClass string,
+	network *nativev1.NetworkDomain) (negotiation.Terms, error) {
 	if decoded == nil || decoded.Proposal == nil {
 		return negotiation.Terms{}, errors.New("the decoded quote carries no proposal")
 	}
 	proposal := decoded.Proposal
-	price, err := mapMoney(proposal.MaximumPrice)
+	price, err := mapMoney(proposal.MaximumPrice, network)
 	if err != nil {
 		return negotiation.Terms{}, err
 	}
@@ -199,12 +205,17 @@ func mapTerms(decoded *nativecore.AcceptedQuoteTermsV1, capabilityClass string) 
 // mapMoney projects the on-chain money onto the Messenger's Money. Field
 // validity is left to the Messenger's own Validate, so a malformed asset is
 // refused by the same rules every other quote is.
-func mapMoney(money *nativev1.MoneyV1) (negotiation.Money, error) {
+func mapMoney(money *nativev1.MoneyV1, network *nativev1.NetworkDomain) (negotiation.Money, error) {
 	if money == nil || money.Asset == nil || money.Asset.Master == nil {
 		return negotiation.Money{}, errors.New("the quote carries no priced asset")
 	}
+	assetNetwork, err := negotiation.NetworkFromDomain(network)
+	if err != nil {
+		return negotiation.Money{}, err
+	}
 	return negotiation.Money{
 		Asset: negotiation.Asset{
+			Network:        assetNetwork,
 			Workchain:      money.Asset.Master.Workchain,
 			AccountID:      hex.EncodeToString(money.Asset.Master.AccountId),
 			MasterCodeHash: money.Asset.Master.CodeHash,

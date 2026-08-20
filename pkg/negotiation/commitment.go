@@ -48,6 +48,17 @@ func (q VerifiedAcceptedQuote) Validate() error {
 	if err := validateNetworkDomain(q.Network); err != nil {
 		return errors.New("verified quote names no network")
 	}
+	// The terms' priced asset commits a network of its own, and it has to be
+	// the network the state was read from. A resolver that decoded state on one
+	// network into terms naming another would be internally contradictory, and
+	// the terms digest it produced would commit the wrong network.
+	read, err := NetworkFromDomain(q.Network)
+	if err != nil {
+		return errors.New("verified quote names no network")
+	}
+	if !q.Terms.Price.Asset.Network.Same(read) {
+		return errors.New("verified quote's terms are priced on a network other than the one it was read from")
+	}
 	if q.FinalizedAtUnix == 0 {
 		return errors.New("verified quote has no finalization time")
 	}
@@ -128,18 +139,18 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 		return errors.New("the finalized quote does not match what was agreed")
 	}
 	// The finalized quote must have come from the network this negotiation was
-	// bound to. Terms carry a workchain, an account id and code hashes, but the
-	// same tuple can exist on a different TOS network, so matching terms are not
-	// enough; a network id alone is not identity either, so both genesis hashes
-	// must agree too. A quote read from another network is a different commitment
-	// wearing the same terms, and accepting it would move value under a purchase
-	// nobody here made.
+	// bound to. A network id alone is not identity, so both genesis hashes must
+	// agree too: a quote read from another network is a different commitment
+	// wearing familiar terms, and accepting it would move value under a
+	// purchase nobody here made.
 	//
-	// This equality check is the bounded closure. The deeper fix -- folding the
-	// network domain into the canonical digests of the terms, mandate and asset,
-	// so a cross-network replay of identical terms hashes to a different
-	// commitment -- is a wire/digest change left out of scope here; see
-	// docs/OPEN_DECISIONS.md.
+	// The network is now also committed inside the digests themselves -- the
+	// asset carries it, so the terms and mandate preimages inherit it, and
+	// identical terms on two networks no longer share a digest. The equality
+	// comparison below is kept as the second, runtime layer: the digest
+	// commitment makes a cross-network replay fail cryptographically, and this
+	// check makes a resolver that answered from the wrong network fail loudly
+	// even when nothing else differs.
 	if !sameNetwork(n.network, quote.Network) {
 		if err := n.settle(StateRejected, "the finalized quote came from another network"); err != nil {
 			return err

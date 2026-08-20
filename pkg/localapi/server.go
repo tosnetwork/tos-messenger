@@ -691,16 +691,19 @@ func approvalReproducesID(approval eventlog.Approval) bool {
 func (s *Server) placeMandate(request Request, now time.Time) Response {
 	stored, err := s.config.Journal.PlaceMandate(eventlog.StoredMandate{
 		Objective: request.Mandate.Objective, Authority: request.Mandate.Authority,
-		CapabilityClass:     request.Mandate.CapabilityClass,
-		Workchain:           request.Mandate.Asset.Workchain,
-		AssetAccountID:      request.Mandate.Asset.AccountID,
-		AssetMasterCodeHash: request.Mandate.Asset.MasterCodeHash,
-		AssetWalletCodeHash: request.Mandate.Asset.WalletCodeHash,
-		AssetDecimals:       request.Mandate.Asset.Decimals,
-		MaxTotalAtomic:      request.Mandate.MaxTotalAtomic,
-		ApprovalAboveAtomic: request.Mandate.ApprovalAboveAtomic,
-		MaxCounteroffers:    request.Mandate.MaxCounteroffers,
-		ExpiresAtUnix:       request.Mandate.ExpiresAtUnix,
+		CapabilityClass:      request.Mandate.CapabilityClass,
+		AssetNetworkID:       request.Mandate.Asset.NetworkID,
+		AssetGenesisRootHash: request.Mandate.Asset.GenesisRootHash,
+		AssetGenesisFileHash: request.Mandate.Asset.GenesisFileHash,
+		Workchain:            request.Mandate.Asset.Workchain,
+		AssetAccountID:       request.Mandate.Asset.AccountID,
+		AssetMasterCodeHash:  request.Mandate.Asset.MasterCodeHash,
+		AssetWalletCodeHash:  request.Mandate.Asset.WalletCodeHash,
+		AssetDecimals:        request.Mandate.Asset.Decimals,
+		MaxTotalAtomic:       request.Mandate.MaxTotalAtomic,
+		ApprovalAboveAtomic:  request.Mandate.ApprovalAboveAtomic,
+		MaxCounteroffers:     request.Mandate.MaxCounteroffers,
+		ExpiresAtUnix:        request.Mandate.ExpiresAtUnix,
 	}, now)
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
@@ -764,7 +767,10 @@ func (s *Server) spendMandate(request Request, now time.Time) (negotiation.Manda
 
 func assetIdentityOf(stored eventlog.StoredMandate) AssetIdentity {
 	return AssetIdentity{
-		Workchain: stored.Workchain, AccountID: stored.AssetAccountID,
+		NetworkID:       stored.AssetNetworkID,
+		GenesisRootHash: stored.AssetGenesisRootHash,
+		GenesisFileHash: stored.AssetGenesisFileHash,
+		Workchain:       stored.Workchain, AccountID: stored.AssetAccountID,
 		MasterCodeHash: stored.AssetMasterCodeHash,
 		WalletCodeHash: stored.AssetWalletCodeHash,
 		Decimals:       stored.AssetDecimals,
@@ -773,6 +779,11 @@ func assetIdentityOf(stored eventlog.StoredMandate) AssetIdentity {
 
 func toAsset(identity AssetIdentity) negotiation.Asset {
 	return negotiation.Asset{
+		Network: negotiation.Network{
+			ID:              identity.NetworkID,
+			GenesisRootHash: identity.GenesisRootHash,
+			GenesisFileHash: identity.GenesisFileHash,
+		},
 		Workchain: identity.Workchain, AccountID: identity.AccountID,
 		MasterCodeHash: identity.MasterCodeHash, WalletCodeHash: identity.WalletCodeHash,
 		Decimals: identity.Decimals,

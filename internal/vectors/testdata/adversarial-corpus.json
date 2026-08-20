@@ -127,6 +127,13 @@
     "reason": "an approval from a later version of the negotiation than the snapshot is an approval for terms that do not exist"
   },
   {
+    "name": "negotiation-snapshot/terms-on-another-network",
+    "layer": "decode",
+    "target": "negotiation-snapshot",
+    "wire": "{\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"network\":{\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"state\":\"proposal-pending\",\"generation\":0,\"counteroffers\":0,\"needs_owner_approval\":false,\"on_table\":{\"CapabilityID\":\"cap_9999999999999999999999999999999999999999999999999999999999999999\",\"CapabilityVersion\":\"1.0.0\",\"CapabilityClass\":\"software.audit\",\"ProviderAgentID\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"ManifestDigest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"TransportBindingDigest\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"Price\":{\"Asset\":{\"Network\":{\"network_id\":\"tos-somewhere-else\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"Workchain\":0,\"AccountID\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"MasterCodeHash\":\"tvm-cell-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"WalletCodeHash\":\"tvm-cell-sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"Decimals\":6},\"Atomic\":\"100\"},\"EscrowTermsDigest\":\"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"DisputePolicyDigest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"NotAfterUnix\":1800003600}}",
+    "reason": "terms priced on another network digest to a different commitment, so they cannot ride a negotiation bound to this one"
+  },
+  {
     "name": "negotiation-snapshot/trailing-json",
     "layer": "decode",
     "target": "negotiation-snapshot",

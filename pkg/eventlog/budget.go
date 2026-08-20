@@ -43,13 +43,18 @@ type BudgetRecord struct {
 	Reserved map[string]string `json:"reserved_atomic,omitempty"`
 }
 
-// StoredAsset is an asset identity as it is written down.
+// StoredAsset is an asset identity as it is written down. The network is part
+// of it: the same contract tuple on another network is a different asset, and a
+// ledger that omitted the network would let two networks share one budget.
 type StoredAsset struct {
-	Workchain      int32  `json:"workchain"`
-	AccountID      string `json:"master_account_id"`
-	MasterCodeHash string `json:"master_code_hash"`
-	WalletCodeHash string `json:"wallet_code_hash"`
-	Decimals       uint32 `json:"decimals"`
+	NetworkID       string `json:"network_id"`
+	GenesisRootHash string `json:"genesis_root_hash"`
+	GenesisFileHash string `json:"genesis_file_hash"`
+	Workchain       int32  `json:"workchain"`
+	AccountID       string `json:"master_account_id"`
+	MasterCodeHash  string `json:"master_code_hash"`
+	WalletCodeHash  string `json:"wallet_code_hash"`
+	Decimals        uint32 `json:"decimals"`
 }
 
 // BudgetID derives the identifier of the optional global budget for one asset.
@@ -66,6 +71,9 @@ func BudgetID(asset negotiation.Asset) (string, error) {
 		return "", err
 	}
 	buffer := bytes.NewBufferString(canon.DomainBudget)
+	canon.Text(buffer, asset.Network.ID)
+	canon.Text(buffer, asset.Network.GenesisRootHash)
+	canon.Text(buffer, asset.Network.GenesisFileHash)
 	canon.Uint32(buffer, uint32(asset.Workchain))
 	canon.Text(buffer, asset.AccountID)
 	canon.Text(buffer, asset.MasterCodeHash)
@@ -91,6 +99,9 @@ func MandateBudgetID(mandateID string, asset negotiation.Asset) (string, error) 
 	}
 	buffer := bytes.NewBufferString(canon.DomainMandateBudget)
 	canon.Text(buffer, mandateID)
+	canon.Text(buffer, asset.Network.ID)
+	canon.Text(buffer, asset.Network.GenesisRootHash)
+	canon.Text(buffer, asset.Network.GenesisFileHash)
 	canon.Uint32(buffer, uint32(asset.Workchain))
 	canon.Text(buffer, asset.AccountID)
 	canon.Text(buffer, asset.MasterCodeHash)
@@ -179,6 +190,11 @@ func (l *BudgetLedger) Load() (negotiation.BudgetState, bool, error) {
 		return negotiation.BudgetState{}, false, errors.New("budget ledger describes another budget")
 	}
 	asset := negotiation.Asset{
+		Network: negotiation.Network{
+			ID:              record.Asset.NetworkID,
+			GenesisRootHash: record.Asset.GenesisRootHash,
+			GenesisFileHash: record.Asset.GenesisFileHash,
+		},
 		Workchain: record.Asset.Workchain, AccountID: record.Asset.AccountID,
 		MasterCodeHash: record.Asset.MasterCodeHash, WalletCodeHash: record.Asset.WalletCodeHash,
 		Decimals: record.Asset.Decimals,
@@ -224,7 +240,10 @@ func (l *BudgetLedger) Record(state negotiation.BudgetState) error {
 	record := BudgetRecord{
 		Schema: BudgetSchema, BudgetID: l.budgetID,
 		Asset: StoredAsset{
-			Workchain: l.asset.Workchain, AccountID: l.asset.AccountID,
+			NetworkID:       l.asset.Network.ID,
+			GenesisRootHash: l.asset.Network.GenesisRootHash,
+			GenesisFileHash: l.asset.Network.GenesisFileHash,
+			Workchain:       l.asset.Workchain, AccountID: l.asset.AccountID,
 			MasterCodeHash: l.asset.MasterCodeHash, WalletCodeHash: l.asset.WalletCodeHash,
 			Decimals: l.asset.Decimals,
 		},

@@ -803,11 +803,14 @@ func sendAttempt(t *testing.T, h *harness, eventID string, seed byte) string {
 
 func testAssetIdentity() AssetIdentity {
 	return AssetIdentity{
-		Workchain:      0,
-		AccountID:      strings.Repeat("a", 64),
-		MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
-		WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64),
-		Decimals:       2,
+		NetworkID:       "tos-local",
+		GenesisRootHash: strings.Repeat("1", 64),
+		GenesisFileHash: strings.Repeat("2", 64),
+		Workchain:       0,
+		AccountID:       strings.Repeat("a", 64),
+		MasterCodeHash:  "tvm-cell-sha256:" + strings.Repeat("b", 64),
+		WalletCodeHash:  "tvm-cell-sha256:" + strings.Repeat("c", 64),
+		Decimals:        2,
 	}
 }
 

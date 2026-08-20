@@ -20,20 +20,29 @@ const (
 	DomainNegotiationRecord = "tos.messaging.negotiation-record.v1\x00"
 	// DomainBudget namespaces the identifier of one asset's budget. This is the
 	// optional global asset-risk ceiling; the per-mandate budget that carries a
-	// mandate's MaxTotal has its own separator below.
-	DomainBudget = "tos.messaging.budget.v1\x00"
+	// mandate's MaxTotal has its own separator below. v2 folds the asset's
+	// network into the preimage, so the same contract tuple on two networks is
+	// two budgets rather than one shared ceiling.
+	DomainBudget = "tos.messaging.budget.v2\x00"
 	// DomainMandateBudget namespaces the identifier of one mandate's budget. It
 	// is separate from DomainBudget because a mandate budget's preimage folds in
 	// the mandate the ceiling belongs to, so two mandates over the same asset
-	// derive different budgets and cannot draw on each other's total.
-	DomainMandateBudget = "tos.messaging.mandate-budget.v1\x00"
-	// DomainNegotiationTerms namespaces one set of agreed terms.
-	DomainNegotiationTerms = "tos.messaging.negotiation-terms.v1\x00"
+	// derive different budgets and cannot draw on each other's total. v2 folds
+	// the asset's network into the preimage, as DomainBudget does.
+	DomainMandateBudget = "tos.messaging.mandate-budget.v2\x00"
+	// DomainNegotiationTerms namespaces one set of agreed terms. v2 commits the
+	// network identity -- the id and both genesis hashes, through the priced
+	// asset -- so identical terms on two networks are two digests, and a
+	// cross-network replay fails cryptographically rather than only at the
+	// runtime binding check.
+	DomainNegotiationTerms = "tos.messaging.negotiation-terms.v2\x00"
 	// DomainOwnerDecision namespaces what an owner signs to authorise one
 	// decision on their own interface.
 	DomainOwnerDecision = "tos.messaging.owner-decision.v1\x00"
-	// DomainMandate namespaces a standing authorisation the owner placed.
-	DomainMandate = "tos.messaging.mandate.v1\x00"
+	// DomainMandate namespaces a standing authorisation the owner placed. v2
+	// commits the network identity through the mandate's asset, so an
+	// authorisation given for one network cannot be worn by another.
+	DomainMandate = "tos.messaging.mandate.v2\x00"
 	// DomainAgentAction namespaces the content-addressed identifier of an
 	// action an Agent proposes to take.
 	DomainAgentAction = "tos.messaging.agent-action.v1\x00"

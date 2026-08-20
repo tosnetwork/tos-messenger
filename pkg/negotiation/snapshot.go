@@ -111,6 +111,16 @@ func Restore(snapshot Snapshot, mandate Mandate, budget *Budget, store Store) (*
 	if digest != snapshot.MandateDigest {
 		return nil, errors.New("this negotiation was authorised by a mandate that no longer stands")
 	}
+	// The digest above already commits the mandate's asset network, but the
+	// binding is restated against the snapshot's own network so a snapshot whose
+	// two halves disagree is refused rather than resumed.
+	bound, err := NetworkFromDomain(snapshot.Network)
+	if err != nil {
+		return nil, err
+	}
+	if !mandate.MaxTotal.Asset.Network.Same(bound) {
+		return nil, errors.New("the mandate is priced on a network this negotiation is not bound to")
+	}
 	if mandate.Authority == AuthorityCommit && budget == nil {
 		return nil, errors.New("a mandate that may commit needs a budget to commit against")
 	}
@@ -171,14 +181,25 @@ func (s Snapshot) Validate() error {
 	if err := validateNetworkDomain(s.Network); err != nil {
 		return errors.New("snapshot names no network")
 	}
-	if s.OnTable != nil {
-		if err := s.OnTable.Validate(); err != nil {
+	// Every set of terms a snapshot carries must be priced on the network the
+	// exchange is bound to. The terms digest commits the asset's network, so a
+	// snapshot whose terms name another network is carrying a digest no
+	// commitment this exchange accepts could ever answer to; refusing it here
+	// means a store edit cannot smuggle a foreign purchase into a resumed
+	// negotiation.
+	bound, err := NetworkFromDomain(s.Network)
+	if err != nil {
+		return errors.New("snapshot names no network")
+	}
+	for _, terms := range []*Terms{s.OnTable, s.Agreed} {
+		if terms == nil {
+			continue
+		}
+		if err := terms.Validate(); err != nil {
 			return err
 		}
-	}
-	if s.Agreed != nil {
-		if err := s.Agreed.Validate(); err != nil {
-			return err
+		if !terms.Price.Asset.Network.Same(bound) {
+			return errors.New("snapshot carries terms priced on a network the negotiation is not bound to")
 		}
 	}
 	// An approval that outran the generation it was given at would be an
@@ -201,6 +222,9 @@ func (s Snapshot) Validate() error {
 		}
 		if s.Quote.Commitment != s.Commitment {
 			return errors.New("the finalized quote does not match the commitment")
+		}
+		if !s.Quote.Terms.Price.Asset.Network.Same(bound) {
+			return errors.New("the finalized quote is priced on a network the negotiation is not bound to")
 		}
 	}
 	return nil

@@ -18,6 +18,11 @@ func selfCheckTerms() *negotiation.Terms {
 		ManifestDigest:         "sha256:" + strings.Repeat("d", 64),
 		TransportBindingDigest: "sha256:" + strings.Repeat("e", 64),
 		Price: negotiation.Money{Asset: negotiation.Asset{
+			Network: negotiation.Network{
+				ID:              "tos-local",
+				GenesisRootHash: strings.Repeat("1", 64),
+				GenesisFileHash: strings.Repeat("2", 64),
+			},
 			Workchain: 0, AccountID: strings.Repeat("a", 64),
 			MasterCodeHash: "tvm-cell-sha256:" + strings.Repeat("b", 64),
 			WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("c", 64), Decimals: 6,
