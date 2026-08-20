@@ -902,6 +902,34 @@ func TestActionDerivedFromReceivedContentWaitsForTheOwner(t *testing.T) {
 	}
 }
 
+// One purchase is authorised once even when it is re-described. The economic
+// one-shot is keyed on the mandate and the terms, not on the action identifier
+// that a changed summary would move, so a second, gentler-worded attempt at the
+// same purchase is refused rather than granted a second auto-authorisation.
+func TestReDescribedPurchaseIsNotAuthorisedTwice(t *testing.T) {
+	h := newHarnessWithPolicy(t, firewall.Policy{
+		UnattendedCeiling: firewall.EffectSpend, OwnInitiativeCeiling: firewall.EffectSpend,
+	})
+	mandateID := h.placeMandate(t)
+
+	first := &ProposedAction{Effect: "spend", Summary: "pay 100 for transcription", Terms: testPurchase(100)}
+	a := h.call(t, Request{Op: OpRequestAction, Action: first, MandateID: mandateID})
+	if a.Decision != string(firewall.Allow) {
+		t.Fatalf("the first spend was not auto-authorised: %+v", a)
+	}
+
+	// The same purchase -- same mandate, same terms -- described more gently.
+	// A different action identifier, the same economic execution.
+	second := &ProposedAction{Effect: "spend", Summary: "start the transcription", Terms: testPurchase(100)}
+	b := h.call(t, Request{Op: OpRequestAction, Action: second, MandateID: mandateID})
+	if b.ActionID == a.ActionID {
+		t.Fatal("two descriptions of one purchase shared an action identifier")
+	}
+	if b.Decision != string(firewall.Refuse) {
+		t.Fatalf("a re-described purchase was authorised a second time: %+v", b)
+	}
+}
+
 // The identifier is derived from the action, so an approval cannot be spent on
 // a different one.
 func TestApprovalCannotBeSpentOnAnotherAction(t *testing.T) {

@@ -77,6 +77,12 @@ const (
 	DomainReachabilityCoordinator = "tos.messaging.reachability-coordinator.v1\x00"
 	// DomainReachabilityObservation namespaces a coordinator attestation.
 	DomainReachabilityObservation = "tos.messaging.reachability-observation.v1\x00"
+	// DomainEconomicExecution namespaces the identity of one economic purchase,
+	// independent of how any single action that would perform it is described.
+	// Two actions that would buy the same thing under the same mandate share
+	// this identity even when their summaries or provenance differ, which is
+	// what makes a re-described purchase a repeat rather than a second spend.
+	DomainEconomicExecution = "tos.messaging.economic-execution.v1\x00"
 	// DomainRoomMembership namespaces the digest a room commits over the members
 	// of one epoch. The epoch is inside the preimage, so two epochs with the
 	// same member set commit different digests and cannot be mistaken for each
@@ -106,6 +112,7 @@ var Domains = []string{
 	DomainReachabilityPairResult,
 	DomainReachabilityCoordinator,
 	DomainReachabilityObservation,
+	DomainEconomicExecution,
 	DomainRoomMembership,
 	DomainPayload,
 	DomainInboxPolicy,

@@ -459,6 +459,41 @@ func TestTermsMustNameTheCounterparty(t *testing.T) {
 	}
 }
 
+// The economic execution identity is stable across how a purchase is described
+// and scoped to the mandate and the exact terms: the same purchase yields the
+// same identity, a different price or a different mandate a different one. That
+// is what lets a one-shot be keyed on the purchase rather than on the action.
+func TestExecutionIDIsStableAndPurchaseScoped(t *testing.T) {
+	base, err := ExecutionID("mandate-1", terms("50000000"))
+	if err != nil {
+		t.Fatalf("execution id: %v", err)
+	}
+	same, err := ExecutionID("mandate-1", terms("50000000"))
+	if err != nil {
+		t.Fatalf("execution id: %v", err)
+	}
+	if base != same {
+		t.Fatal("the same purchase under the same mandate produced two identities")
+	}
+	other, err := ExecutionID("mandate-1", terms("60000000"))
+	if err != nil {
+		t.Fatalf("execution id: %v", err)
+	}
+	if base == other {
+		t.Fatal("a different price shared the same execution identity")
+	}
+	elsewhere, err := ExecutionID("mandate-2", terms("50000000"))
+	if err != nil {
+		t.Fatalf("execution id: %v", err)
+	}
+	if base == elsewhere {
+		t.Fatal("the same purchase under a different mandate shared its identity")
+	}
+	if _, err := ExecutionID("", terms("50000000")); err == nil {
+		t.Fatal("an execution with no mandate was accepted")
+	}
+}
+
 func proposalMandate() Mandate {
 	m := testMandate()
 	m.Authority = AuthorityPropose

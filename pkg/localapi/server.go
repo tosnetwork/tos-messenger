@@ -399,6 +399,23 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 		// authorised inline: a reply repeated is a nuisance, a payment
 		// repeated is a loss, and the machinery is spent where the damage is.
 		if action.Effect == firewall.EffectSpend {
+			// One purchase is authorised once, keyed on the economic execution --
+			// the mandate and the terms -- not on the action identifier, which a
+			// re-described replay of the same purchase would change. A purchase
+			// already bound to another action is not authorised a second time.
+			executionID, err := negotiation.ExecutionID(request.MandateID, *action.Terms)
+			if err != nil {
+				return refuse(fault.CodeInternal, err)
+			}
+			bound, fresh, err := s.config.Journal.ClaimEconomicExecution(executionID, actionID, now)
+			if err != nil {
+				return refuse(fault.CodeInternal, err)
+			}
+			if !fresh && bound != actionID {
+				return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
+					Decision: string(firewall.Refuse),
+					Detail:   "this purchase is already authorised under another action"}
+			}
 			approval, err := s.config.Journal.RecordAutoAuthorization(eventlog.ApprovalRequest{
 				ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
 				Reason:  "allowed by policy, inside the owner's mandate",
