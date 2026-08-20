@@ -124,6 +124,9 @@ const (
 	// It is deliberately distinct from delivery and application ACK payloads:
 	// a Relay storing ciphertext proves neither recipient nor runtime action.
 	DomainStoredAck = "tos.messaging.stored-ack.v1\x00"
+	// DomainConformanceReport namespaces an implementation's signed claim that
+	// it consumed the committed positive and adversarial vector artifacts.
+	DomainConformanceReport = "tos.messaging.conformance-report.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -152,6 +155,7 @@ var Domains = []string{
 	DomainEconomicExecution,
 	DomainRoomMembership,
 	DomainStoredAck,
+	DomainConformanceReport,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainNegotiationRecord,

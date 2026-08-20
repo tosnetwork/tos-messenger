@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tosnetwork/tos-messenger/pkg/conformance"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
@@ -72,6 +73,7 @@ var decoders = map[string]func([]byte) error{
 	"negotiation-snapshot": func(b []byte) error { _, err := negotiation.DecodeSnapshotJSON(b); return err },
 	"reachability-trial":   func(b []byte) error { _, err := reachability.DecodeTrialJSON(b); return err },
 	"stored-ack":           func(b []byte) error { _, err := mailbox.DecodeAckJSON(b); return err },
+	"conformance-report":   func(b []byte) error { _, err := conformance.DecodeJSON(b); return err },
 }
 
 func TestAdversarialCorpus(t *testing.T) {
@@ -172,6 +174,7 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 		"messaging-event":      validEventJSON(t),
 		"negotiation-snapshot": validSnapshotJSON(t),
 		"stored-ack":           validStoredAckJSON(t),
+		"conformance-report":   validConformanceReportJSON(t),
 	}
 	baselineTargets := make([]string, 0, len(jsonBaselines))
 	for target := range jsonBaselines {
@@ -354,6 +357,24 @@ func validStoredAckJSON(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	raw, err := mailbox.EncodeAckJSON(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func validConformanceReportJSON(t *testing.T) []byte {
+	t.Helper()
+	report, err := conformance.Sign(conformance.Report{
+		Implementation: "example.org/independent-messenger", ImplementationCommit: "release-1",
+		Toolchain: "rustc-1.90", RunAtUnix: baseUnix + 2,
+		Artifacts:      []conformance.Artifact{{Name: "adversarial", SHA256: strings.Repeat("1", 64)}, {Name: "e2ee", SHA256: strings.Repeat("2", 64)}, {Name: "objects", SHA256: strings.Repeat("3", 64)}},
+		PositiveChecks: 12, AdversarialChecks: 44,
+	}, endpointKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := conformance.EncodeJSON(report)
 	if err != nil {
 		t.Fatal(err)
 	}

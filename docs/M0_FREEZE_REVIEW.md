@@ -85,13 +85,17 @@ cross-checked against published RFC and NIST known answers. This closes the
 codeable implementation gap, not the freeze decision: the owner has not
 ratified the suite, and no independent implementation has consumed its vectors.
 
-### 4. Nothing has checked this against a second implementation
+### 4. No second implementation report exists
 
 The positive vectors and adversarial corpus exist at the object, verification,
-and concrete E2EE-suite layers. The suite vector test is also a deterministic
-consumer harness. No independent implementation has consumed any of those
-artifacts, so there is still no interoperability evidence. A freeze without it
-would fix formats that exactly one program has ever agreed with.
+and concrete E2EE-suite layers. The suite vector test is also deterministic.
+`pkg/conformance`, `cmd/tos-vector-report`, and
+[`M0_EVIDENCE_BUNDLE.md`](M0_EVIDENCE_BUNDLE.md) now freeze the handoff and
+signed-report verification path an external consumer uses, while
+`scripts/assemble-m0-evidence.sh` packages the exact artifacts with dual-arch
+build evidence. No independent implementation has returned such a report, so
+there is still no interoperability evidence. A freeze without it would fix
+formats that exactly one program has ever agreed with.
 
 ## Limits that are stated rather than fixed
 

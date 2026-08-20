@@ -44,6 +44,8 @@ decision:
 | `pkg/e2ee` (devices) | The multi-device model: device-set succession with rollback and revocation defences, deterministic per-pair session identifiers, and the per-event fan-out to every live device of both parties |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
 | `pkg/probe` | M0-R measurement transport: rendezvous coordinator with cold-source filter probing, the UDP and ADNL collectors with their post-establishment phases, and the tunnel relay the proxy-fallback phase measures against |
+| `pkg/evidence` | Deterministic, self-verifying M0 review bundles containing verify logs, dual-arch binaries/build logs, collector manifests, and frozen vectors |
+| `pkg/conformance` | Strict signed report consumed from an external implementation that checked the exact committed vector artifacts |
 | `internal/canon` | Domain-separated length-prefixed canonical encoding shared by every signed object |
 | `internal/ids` | Every identifier pattern, defined once |
 | `internal/vectors` | The canonical forms a second implementation checks itself against, and the adversarial corpus of inputs it must refuse |
@@ -63,6 +65,8 @@ Commands:
 | `cmd/tos-reachability-tunnel` | Double-registration UDP forwarder for the study's proxy-fallback phase; measurement infrastructure, never the Relay milestone |
 | `cmd/tos-reachability-report` | Aggregates a study log against a predeclared policy; exits non-zero when the study supports no decision |
 | `cmd/tos-messengerd` | Runs one installation. See [`docs/RUNNING.md`](docs/RUNNING.md) |
+| `cmd/tos-m0-evidence` | Packs and independently verifies the bounded M0 evidence archive |
+| `cmd/tos-vector-report` | Verifies a signed external vector-consumer report against the committed artifacts |
 
 Deliberately absent, with the reason:
 

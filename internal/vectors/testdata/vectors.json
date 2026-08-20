@@ -62,6 +62,11 @@
     "canonical_sha256": "sha256:465ec6e1c3061c251e6ce3a79eb40832dfdda63d3f9b92a359676de5a0088633"
   },
   {
+    "name": "conformance-report",
+    "wire": "{\"schema\":\"tos.messaging.conformance-report.v1\",\"implementation\":\"example.org/independent-messenger\",\"implementation_commit\":\"release-1\",\"toolchain\":\"rustc-1.90\",\"run_at_unix\":1800000012,\"artifacts\":[{\"name\":\"adversarial\",\"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\"},{\"name\":\"e2ee\",\"sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\"},{\"name\":\"objects\",\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\"}],\"positive_checks\":12,\"adversarial_checks\":44,\"consumer_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"signature_hex\":\"004f9c7cd2acc10590948f93e9f2d9cdc8725b1acc07cd11001f36d6ce3c005772ea459f3d70adad9abb0f09f6f0cdfed52c234cf859124643c1a57a626e1b0c\"}",
+    "canonical_sha256": "sha256:f7212dde836439ded68e0910fd4f3f35d6e0fea15898465c9b59f698de08bf43"
+  },
+  {
     "name": "fault-response",
     "wire": "{\"schema\":\"tos.messaging.fault-response.v1\",\"code\":\"rate-limited\",\"retry_after_seconds\":30}",
     "canonical_sha256": "sha256:627a40a5aab6232c569d70635d7445449a647392960a41299bbec16c8a321d57"

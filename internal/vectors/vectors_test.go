@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/pkg/conformance"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
@@ -355,6 +356,29 @@ func build(t *testing.T) []Vector {
 		t.Fatalf("StoredAck canonical: %v", err)
 	}
 	add("stored-ack", ackWire, ackCanonical, "")
+
+	// Signed report from an independent vector consumer.
+	consumer, err := conformance.Sign(conformance.Report{
+		Implementation: "example.org/independent-messenger", ImplementationCommit: "release-1",
+		Toolchain: "rustc-1.90", RunAtUnix: baseUnix + 12,
+		Artifacts: []conformance.Artifact{
+			{Name: "adversarial", SHA256: strings.Repeat("1", 64)},
+			{Name: "e2ee", SHA256: strings.Repeat("2", 64)},
+			{Name: "objects", SHA256: strings.Repeat("3", 64)},
+		}, PositiveChecks: 12, AdversarialChecks: 44,
+	}, key)
+	if err != nil {
+		t.Fatalf("conformance report: %v", err)
+	}
+	consumerWire, err := conformance.EncodeJSON(consumer)
+	if err != nil {
+		t.Fatalf("conformance report wire: %v", err)
+	}
+	consumerCanonical, err := conformance.CanonicalBytes(consumer)
+	if err != nil {
+		t.Fatalf("conformance report canonical: %v", err)
+	}
+	add("conformance-report", consumerWire, consumerCanonical, "")
 
 	// Typed fault response.
 	responseWire, err := fault.EncodeResponseJSON(fault.PeerCode(fault.CodeRateLimited, 30))

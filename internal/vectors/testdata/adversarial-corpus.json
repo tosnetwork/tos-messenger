@@ -1,5 +1,33 @@
 [
   {
+    "name": "conformance-report/empty",
+    "layer": "decode",
+    "target": "conformance-report",
+    "wire": "",
+    "reason": "an empty document is not an object"
+  },
+  {
+    "name": "conformance-report/trailing-json",
+    "layer": "decode",
+    "target": "conformance-report",
+    "wire": "{\"schema\":\"tos.messaging.conformance-report.v1\",\"implementation\":\"example.org/independent-messenger\",\"implementation_commit\":\"release-1\",\"toolchain\":\"rustc-1.90\",\"run_at_unix\":1800000002,\"artifacts\":[{\"name\":\"adversarial\",\"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\"},{\"name\":\"e2ee\",\"sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\"},{\"name\":\"objects\",\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\"}],\"positive_checks\":12,\"adversarial_checks\":44,\"consumer_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"signature_hex\":\"7a95a1d736d7a08a2645af8f3d70b0183b9d851623e4fd1ccfac324db2ae92bc0d789cc7e0b55a964ef69dc25117a598f4048ecd72f5f8d4f9b0ebc665f9790b\"}{\"x\":1}",
+    "reason": "trailing data lets two byte streams decode to one object"
+  },
+  {
+    "name": "conformance-report/truncated",
+    "layer": "decode",
+    "target": "conformance-report",
+    "wire": "{\"schema\":\"tos.messaging.conformance-report.v1\",\"implementation\":\"example.org/independent-messenger\",\"implementation_commit\":\"release-1\",\"toolchain\":\"rustc-1.90\",\"run_at_unix\":1800000002,\"artifacts\":[{\"name\":\"adversarial\",\"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\"},{\"name\":\"e2ee\",\"sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\"},{\"name\":\"objects\",\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\"}],\"positive_checks\":12,\"adversarial_checks\":44,\"consumer_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"signature_hex\":\"7a95a1d736d7a08a2645af8f3d70b0183b9d851623e4fd1ccfac324db2ae92bc0d789cc7e0b55a964ef69dc25117a598f4048ecd72f5f8d4f9b0ebc665f9790b\"",
+    "reason": "a truncated document is not the object it was cut from"
+  },
+  {
+    "name": "conformance-report/unknown-field",
+    "layer": "decode",
+    "target": "conformance-report",
+    "wire": "{\"unknown_field\":1,\"schema\":\"tos.messaging.conformance-report.v1\",\"implementation\":\"example.org/independent-messenger\",\"implementation_commit\":\"release-1\",\"toolchain\":\"rustc-1.90\",\"run_at_unix\":1800000002,\"artifacts\":[{\"name\":\"adversarial\",\"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\"},{\"name\":\"e2ee\",\"sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\"},{\"name\":\"objects\",\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\"}],\"positive_checks\":12,\"adversarial_checks\":44,\"consumer_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"signature_hex\":\"7a95a1d736d7a08a2645af8f3d70b0183b9d851623e4fd1ccfac324db2ae92bc0d789cc7e0b55a964ef69dc25117a598f4048ecd72f5f8d4f9b0ebc665f9790b\"}",
+    "reason": "an unknown field means the sender and receiver disagree about the object's shape"
+  },
+  {
     "name": "contact-descriptor/empty",
     "layer": "decode",
     "target": "contact-descriptor",
