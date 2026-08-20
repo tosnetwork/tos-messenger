@@ -291,23 +291,35 @@ func TestCoordinatorRejectsInvalidOptions(t *testing.T) {
 }
 
 func TestMappingClassificationIsHonestAboutOneObservation(t *testing.T) {
+	// The host's own public address, used for the unmapped case.
+	own := source(t, "203.0.113.7:41234").Addr()
+	local := []netip.Addr{own}
+
 	single := []netip.AddrPort{source(t, "203.0.113.7:41234")}
-	if behavior := classifyMapping(single, 55555); behavior != reachability.NATUndetermined {
+	if behavior := classifyMapping(single, 55555, local); behavior != reachability.NATUndetermined {
 		t.Fatalf("one coordinator cannot separate mapping classes, got %q", behavior)
 	}
 	same := []netip.AddrPort{source(t, "203.0.113.7:41234"), source(t, "203.0.113.7:41234")}
-	if behavior := classifyMapping(same, 55555); behavior != reachability.NATEndpointIndependent {
+	if behavior := classifyMapping(same, 55555, local); behavior != reachability.NATEndpointIndependent {
 		t.Fatalf("expected an endpoint-independent mapping, got %q", behavior)
 	}
 	differing := []netip.AddrPort{source(t, "203.0.113.7:41234"), source(t, "203.0.113.7:41999")}
-	if behavior := classifyMapping(differing, 55555); behavior != reachability.NATAddressPortDependent {
+	if behavior := classifyMapping(differing, 55555, local); behavior != reachability.NATAddressPortDependent {
 		t.Fatalf("expected an address-and-port-dependent mapping, got %q", behavior)
 	}
+	// Unmapped: the observed address is the host's own, at the same port.
 	direct := []netip.AddrPort{source(t, "203.0.113.7:41234")}
-	if behavior := classifyMapping(direct, 41234); behavior != reachability.NATNone {
+	if behavior := classifyMapping(direct, 41234, local); behavior != reachability.NATNone {
 		t.Fatalf("expected an unmapped endpoint, got %q", behavior)
 	}
-	if behavior := classifyMapping(nil, 1); behavior != reachability.NATUndetermined {
+	// A NAT that preserves the source port but translates the IP is not
+	// unmapped: the observed IP is not one the host holds, so matching the port
+	// must not call it public. One observation, so it stays undetermined.
+	behindPortPreservingNAT := []netip.AddrPort{source(t, "203.0.113.7:41234")}
+	if behavior := classifyMapping(behindPortPreservingNAT, 41234, []netip.Addr{source(t, "192.168.1.10:41234").Addr()}); behavior != reachability.NATUndetermined {
+		t.Fatalf("a port-preserving NAT was classified %q, not undetermined", behavior)
+	}
+	if behavior := classifyMapping(nil, 1, local); behavior != reachability.NATUndetermined {
 		t.Fatalf("expected no observation to be undetermined, got %q", behavior)
 	}
 }

@@ -241,7 +241,7 @@ func (r *runner) discover(ctx context.Context) error {
 		}
 		r.result.Observed = append(r.result.Observed, observed)
 	}
-	r.result.Mapping = classifyMapping(r.result.Observed, r.localPort())
+	r.result.Mapping = classifyMapping(r.result.Observed, r.localPort(), hostAddrs())
 	r.result.AddressFamily = classifyFamily(r.result.Observed)
 	r.selfPublic = r.result.Mapping == reachability.NATNone
 	return nil
@@ -335,12 +335,19 @@ func (r *runner) classifySelf() {
 // address-dependent one, so a single observation is reported as undetermined
 // rather than guessed. Deciding a route strategy on a guessed NAT class is the
 // failure this study exists to prevent.
-func classifyMapping(observed []netip.AddrPort, localPort uint16) reachability.NATBehavior {
+//
+// An endpoint is unmapped only when the address a coordinator observed is the
+// endpoint's own -- the same global IP on one of its interfaces, at the same
+// port. Matching the port alone is not enough: a NAT that preserves the source
+// port still translates the IP, and treating a port-preserving NAT as a public
+// host would put a NATed endpoint into a cell it does not belong to.
+func classifyMapping(observed []netip.AddrPort, localPort uint16, localAddrs []netip.Addr) reachability.NATBehavior {
 	if len(observed) == 0 {
 		return reachability.NATUndetermined
 	}
 	first := observed[0]
-	if first.Port() == localPort && first.Addr().IsGlobalUnicast() && !isPrivate(first.Addr()) {
+	if first.Port() == localPort && first.Addr().IsGlobalUnicast() && !isPrivate(first.Addr()) &&
+		containsAddr(localAddrs, first.Addr()) {
 		return reachability.NATNone
 	}
 	if len(observed) < 2 {
@@ -356,6 +363,39 @@ func classifyMapping(observed []netip.AddrPort, localPort uint16) reachability.N
 
 func isPrivate(address netip.Addr) bool {
 	return address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast()
+}
+
+// containsAddr reports whether an address is one of the host's own, comparing
+// canonicalised forms so an IPv4-in-IPv6 mapping does not hide a match.
+func containsAddr(addrs []netip.Addr, target netip.Addr) bool {
+	want := target.Unmap()
+	for _, addr := range addrs {
+		if addr.Unmap() == want {
+			return true
+		}
+	}
+	return false
+}
+
+// hostAddrs returns the host's own interface addresses. An endpoint is only
+// unmapped if a coordinator observed one of these, so a NAT cannot be mistaken
+// for a direct public address.
+func hostAddrs() []netip.Addr {
+	interfaces, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	addrs := make([]netip.Addr, 0, len(interfaces))
+	for _, entry := range interfaces {
+		network, ok := entry.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if addr, ok := netip.AddrFromSlice(network.IP); ok {
+			addrs = append(addrs, addr.Unmap())
+		}
+	}
+	return addrs
 }
 
 func (r *runner) bind(ctx context.Context, coordinator string) (netip.AddrPort, error) {
