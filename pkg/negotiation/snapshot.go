@@ -43,7 +43,13 @@ type Snapshot struct {
 
 	Approval   *Approval `json:"owner_approval,omitempty"`
 	Commitment string    `json:"commitment,omitempty"`
-	Failure    string    `json:"failure,omitempty"`
+	// Quote is the finalized Accepted Quote a finalized negotiation was
+	// committed against. It is persisted whole: without it a restart would find
+	// a finalized state and a commitment but no evidence of what was committed,
+	// so Committed() would be true while Quote() was false -- a finalisation the
+	// installation can no longer show.
+	Quote   *VerifiedAcceptedQuote `json:"finalized_quote,omitempty"`
+	Failure string                 `json:"failure,omitempty"`
 }
 
 // Snapshot returns what has to survive.
@@ -72,6 +78,10 @@ func (n *Negotiation) Snapshot() (Snapshot, error) {
 	if n.approval != nil {
 		approval := *n.approval
 		snapshot.Approval = &approval
+	}
+	if n.quote != nil {
+		quote := *n.quote
+		snapshot.Quote = &quote
 	}
 	return snapshot, nil
 }
@@ -119,6 +129,10 @@ func Restore(snapshot Snapshot, mandate Mandate, budget *Budget, store Store) (*
 		approval := *snapshot.Approval
 		instance.approval = &approval
 	}
+	if snapshot.Quote != nil {
+		quote := *snapshot.Quote
+		instance.quote = &quote
+	}
 	return instance, nil
 }
 
@@ -157,8 +171,22 @@ func (s Snapshot) Validate() error {
 	if s.Approval != nil && s.Approval.Generation > s.Generation {
 		return errors.New("snapshot carries an approval from a later version of itself")
 	}
-	if State(s.State) == StateFinalized && s.Commitment == "" {
-		return errors.New("a finalized negotiation carries no commitment")
+	if State(s.State) == StateFinalized {
+		if s.Commitment == "" {
+			return errors.New("a finalized negotiation carries no commitment")
+		}
+		// A finalized negotiation must carry the quote it was committed against,
+		// and that quote must be the one the commitment names -- otherwise a
+		// restart would report a commitment it cannot substantiate.
+		if s.Quote == nil {
+			return errors.New("a finalized negotiation carries no quote evidence")
+		}
+		if err := s.Quote.Validate(); err != nil {
+			return err
+		}
+		if s.Quote.Commitment != s.Commitment {
+			return errors.New("the finalized quote does not match the commitment")
+		}
 	}
 	return nil
 }

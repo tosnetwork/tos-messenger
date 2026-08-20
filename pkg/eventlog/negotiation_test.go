@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
 func testSnapshot(id, state string) negotiation.Snapshot {
@@ -19,7 +20,16 @@ func testSnapshot(id, state string) negotiation.Snapshot {
 		State:               state,
 	}
 	if negotiation.State(state) == negotiation.StateFinalized {
-		snapshot.Commitment = "sha256:" + strings.Repeat("4", 64)
+		commitment := "sha256:" + strings.Repeat("4", 64)
+		snapshot.Commitment = commitment
+		// A finalized snapshot carries the quote it was committed against.
+		snapshot.Quote = &negotiation.VerifiedAcceptedQuote{
+			Commitment:      commitment,
+			Terms:           *approvalTerms(),
+			Reference:       &nativev1.ChainReference{FinalizedCheckpoint: 100},
+			Network:         &nativev1.NetworkDomain{NetworkId: "tos-local"},
+			FinalizedAtUnix: 1_800_000_000,
+		}
 	}
 	return snapshot
 }

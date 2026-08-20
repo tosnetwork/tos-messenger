@@ -68,6 +68,9 @@ type QuoteResolver interface {
 // be a different purchase, and matching terms are not enough, because a caller
 // could restate the agreement without anything having been committed.
 func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now time.Time) error {
+	if n.poisoned {
+		return ErrPoisoned
+	}
 	if n.state != StateCanonicalizationPending {
 		return errors.New("nothing is being canonicalised")
 	}

@@ -561,6 +561,92 @@ func TestFinalizeReleasesBudgetOnMandateExpiry(t *testing.T) {
 	}
 }
 
+// poisonStore fails Save after a set number of successful ones, to exercise a
+// durable write that fails mid-negotiation.
+type poisonStore struct {
+	allow int
+	saves int
+}
+
+func (p *poisonStore) Save(Snapshot) error {
+	p.saves++
+	if p.saves > p.allow {
+		return errors.New("the disk is full")
+	}
+	return nil
+}
+
+// When a durable write fails after the in-memory state has moved, the two
+// disagree, and the negotiation is poisoned: every further operation is refused
+// until it is reloaded, rather than acting on a transition the disk never took.
+func TestFailedWritePoisonsTheNegotiation(t *testing.T) {
+	store := &poisonStore{allow: 1} // the New() write succeeds; the next fails.
+	instance, err := New("neg-poison", conversation, counterparty, testMandate(), testBudget(t, "1000000000"), store, at(0))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err == nil {
+		t.Fatal("a failed durable write was reported as a successful transition")
+	}
+	if err := instance.AcceptIntent(at(2)); !errors.Is(err, ErrPoisoned) {
+		t.Fatalf("a poisoned negotiation kept working: %v", err)
+	}
+	if err := instance.ReceiveProposal(terms("50000000"), at(3)); !errors.Is(err, ErrPoisoned) {
+		t.Fatalf("a poisoned negotiation accepted another proposal: %v", err)
+	}
+}
+
+// A finalized negotiation carries its quote evidence across a restart. Without
+// it, a restored negotiation would report a commitment it could no longer
+// substantiate: Committed() true, Quote() false.
+func TestFinalizedQuoteSurvivesRestart(t *testing.T) {
+	budget := testBudget(t, "1000000000")
+	instance := start(t, budget)
+	if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+		t.Fatalf("proposal: %v", err)
+	}
+	if err := instance.AcceptIntent(at(2)); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := instance.BeginCanonicalization(at(3)); err != nil {
+		t.Fatalf("canonicalise: %v", err)
+	}
+	if err := instance.Finalize(stubResolver{quote: finalizedQuote(terms("50000000")), found: true}, commitment, at(4)); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if _, ok := instance.Quote(); !ok {
+		t.Fatal("no quote after finalisation")
+	}
+
+	// The restart: snapshot, encode, decode, restore.
+	snap, err := instance.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	encoded, err := EncodeSnapshotJSON(snap)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	decoded, err := DecodeSnapshotJSON(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	restored, err := Restore(decoded, testMandate(), budget, &memoryStore{})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, committed := restored.Committed(); !committed {
+		t.Fatal("a restored finalized negotiation is not committed")
+	}
+	quote, ok := restored.Quote()
+	if !ok {
+		t.Fatal("the finalized quote did not survive the restart")
+	}
+	if quote.Commitment != commitment {
+		t.Fatalf("the restored quote names another commitment: %q", quote.Commitment)
+	}
+}
+
 // One commitment per negotiation. A repeated event does not produce a second.
 func TestFinalizingTwiceIsRefused(t *testing.T) {
 	instance := start(t, testBudget(t, "1000000000"))

@@ -62,7 +62,16 @@ type Negotiation struct {
 	failure    string
 	budget     *Budget
 	store      Store
+	// poisoned is set when a durable write failed after the in-memory state had
+	// already moved. The two then disagree, and rather than let the caller act
+	// on a transition the disk never recorded, every further operation is
+	// refused until the negotiation is reloaded from what was actually written.
+	poisoned bool
 }
+
+// ErrPoisoned reports a negotiation whose last write failed; it must be reloaded
+// from its snapshot before it is used again.
+var ErrPoisoned = errors.New("this negotiation's last write failed and it must be reloaded")
 
 // Approval is an owner decision bound to what it was a decision about.
 type Approval struct {
@@ -122,7 +131,13 @@ func (n *Negotiation) persist() error {
 	if err != nil {
 		return err
 	}
-	return n.store.Save(snapshot)
+	if err := n.store.Save(snapshot); err != nil {
+		// The in-memory state moved and the disk did not. Poison the object so
+		// nothing acts on the difference; a reload rebuilds it from the disk.
+		n.poisoned = true
+		return err
+	}
+	return nil
 }
 
 // State returns where the negotiation stands.
@@ -162,11 +177,6 @@ func (n *Negotiation) Committed() (string, bool) {
 // Failure returns why the negotiation ended badly, for display.
 func (n *Negotiation) Failure() string { return n.failure }
 
-// ReceiveProposal records an offer from the counterparty.
-//
-// The offer is recorded whether or not it is inside the mandate. A proposal
-// above the ceiling is a thing that was said, and refusing to record it would
-// leave an Agent unable to counter it.
 // bindsCounterparty refuses terms whose named provider is not the party this
 // negotiation is with. A one-to-one service negotiation names one provider, and
 // terms that quietly name another are a different purchase wearing this
@@ -179,6 +189,11 @@ func (n *Negotiation) bindsCounterparty(terms Terms) error {
 	return nil
 }
 
+// ReceiveProposal records an offer from the counterparty.
+//
+// The offer is recorded whether or not it is inside the mandate. A proposal
+// above the ceiling is a thing that was said, and refusing to record it would
+// leave an Agent unable to counter it.
 func (n *Negotiation) ReceiveProposal(terms Terms, now time.Time) error {
 	if err := n.open(now); err != nil {
 		return err
@@ -229,6 +244,9 @@ func (n *Negotiation) Counter(terms Terms, now time.Time) error {
 // establishes is that both parties said yes. It creates no Quote, funds no
 // escrow, and obliges nobody.
 func (n *Negotiation) AcceptIntent(now time.Time) error {
+	if n.poisoned {
+		return ErrPoisoned
+	}
 	if err := n.open(now); err != nil {
 		return err
 	}
@@ -369,6 +387,9 @@ func (n *Negotiation) DenyByOwner(reason string) error {
 
 // BeginCanonicalization moves from conversation towards a commitment.
 func (n *Negotiation) BeginCanonicalization(now time.Time) error {
+	if n.poisoned {
+		return ErrPoisoned
+	}
 	if n.state != StateIntentAgreed {
 		return errors.New("only an agreed intent can be canonicalised")
 	}
@@ -450,6 +471,9 @@ func (n *Negotiation) ActiveAgreement() bool {
 }
 
 func (n *Negotiation) open(now time.Time) error {
+	if n.poisoned {
+		return ErrPoisoned
+	}
 	if n.settled() {
 		return errors.New("this negotiation has already ended")
 	}
