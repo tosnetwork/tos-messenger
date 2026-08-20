@@ -199,14 +199,19 @@ func set[T ~string](values ...T) map[T]struct{} {
 //     PeerPublic observation about its peer must agree with the other half's
 //     declared reachability, so a side cannot self-declare "public" while the
 //     coordinator saw its peer treat it as behind NAT.
+//   - NATBehavior's mapping class is checked in VerifyTrial against the
+//     per-coordinator BindObservations the trial carries: endpoint-independent
+//     when two or more distinct coordinators reflected the same external
+//     address, address-and-port-dependent when they differ. A declaration that
+//     contradicts the signed reflections is rejected and not counted.
 //
-// NATBehavior remains endpoint-attested and is NOT yet evidence-derived. The
-// single pair-observation each trial carries cannot distinguish
-// mapping-behavior (endpoint-independent vs address/port-dependent) from
-// filtering-behavior: that needs the per-coordinator BIND observations -- the
-// same endpoint reflected off several coordinator addresses/ports -- signed
-// into the trial, which is a collector-and-schema change coupled to the
-// NAT-taxonomy collector rework and deliberately out of scope here.
+// The mapping check is a refutation, not a full derivation. With fewer than two
+// distinct coordinator reflections the class is undetermined and the
+// declaration stands unchecked, and the no-NAT (none) case is not decided
+// remotely at all, because confirming it needs the host's own interface
+// addresses. FILTERING behaviour -- whether unsolicited inbound datagrams are
+// admitted -- is a separate dimension a different probe measures, and remains
+// out of scope: it is the remaining NAT-taxonomy work.
 //
 // Carrier, EndpointClass, Mobility, and Assistance are legitimately
 // operator-self-reported: they are facts about the operator's own deployment
@@ -331,11 +336,17 @@ type Trial struct {
 	OperatorID string `json:"operator_id"`
 	// SessionID and Role tie this half of a measurement to the attestation the
 	// coordinator made about it.
-	SessionID            string      `json:"session_id"`
-	Role                 Role        `json:"role"`
-	Observation          Observation `json:"observation"`
-	EndpointPublicKeyHex string      `json:"endpoint_public_key_hex"`
-	EndpointSignatureHex string      `json:"endpoint_signature_hex,omitempty"`
+	SessionID   string      `json:"session_id"`
+	Role        Role        `json:"role"`
+	Observation Observation `json:"observation"`
+	// BindObservations are the per-coordinator reflections the endpoint's own
+	// external address was seen at, one signed by each coordinator it bound to.
+	// They carry the evidence the NAT mapping class is derived from, and they
+	// are folded into the trial's canonical preimage so the endpoint signature
+	// covers them: a set swapped after signing breaks the signature.
+	BindObservations     []BindObservation `json:"bind_observations,omitempty"`
+	EndpointPublicKeyHex string            `json:"endpoint_public_key_hex"`
+	EndpointSignatureHex string            `json:"endpoint_signature_hex,omitempty"`
 
 	Probe           ProbeKind    `json:"probe"`
 	Outcome         Outcome      `json:"outcome"`
@@ -420,6 +431,23 @@ func (t Trial) Validate() error {
 	if t.SurvivalSeconds != 0 && t.Outcome != OutcomeDirect {
 		return errors.New("session survival requires a direct session")
 	}
+	// Bind observations are bounded and well-shaped before anything is derived
+	// from them. Each coordinator reflects once, so a set with the same
+	// coordinator twice is malformed: it would let a reporter pad the distinct
+	// count with duplicates, or slip two conflicting reflections under one name.
+	if len(t.BindObservations) > MaxBindObservations {
+		return errors.New("too many bind observations")
+	}
+	seenBindCoordinators := make(map[string]struct{}, len(t.BindObservations))
+	for _, observation := range t.BindObservations {
+		if err := validateBindObservationShape(observation, true); err != nil {
+			return err
+		}
+		if _, duplicate := seenBindCoordinators[observation.CoordinatorID]; duplicate {
+			return errors.New("a coordinator bound more than once")
+		}
+		seenBindCoordinators[observation.CoordinatorID] = struct{}{}
+	}
 	return nil
 }
 
@@ -453,6 +481,17 @@ func (t Trial) CanonicalBytes() ([]byte, error) {
 	canon.Uint64(buffer, t.TxBytes)
 	canon.Uint64(buffer, t.RxBytes)
 	canon.Uint64(buffer, t.PeakRSSBytes)
+	// The bind observations are folded in so the endpoint signature covers the
+	// mapping evidence in the exact order and content the trial carries. The
+	// coordinator id, reflected address, and coordinator signature of each are
+	// what the mapping is derived from, so committing to them is what stops the
+	// set from being rewritten after signing.
+	canon.Uint32(buffer, uint32(len(t.BindObservations)))
+	for _, observation := range t.BindObservations {
+		canon.Text(buffer, observation.CoordinatorID)
+		canon.Text(buffer, observation.Observed)
+		canon.Text(buffer, observation.SignatureHex)
+	}
 	return buffer.Bytes(), nil
 }
 

@@ -1308,6 +1308,253 @@ func TestPeerObservationMustMatchDeclaredReachability(t *testing.T) {
 	}
 }
 
+// A second predeclared coordinator, so a trial can carry reflections from two
+// distinct coordinators -- the minimum the mapping class can be derived from.
+func secondCoordinatorKey() ed25519.PrivateKey {
+	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x22}, ed25519.SeedSize))
+}
+
+func secondCoordinatorID() string {
+	public, ok := secondCoordinatorKey().Public().(ed25519.PublicKey)
+	if !ok {
+		panic("unexpected key type")
+	}
+	identifier, err := CoordinatorID(public)
+	if err != nil {
+		panic(err)
+	}
+	return identifier
+}
+
+// strangerCoordinatorKey signs a self-consistent reflection from a coordinator
+// no policy predeclared.
+func strangerCoordinatorKey() ed25519.PrivateKey {
+	return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x33}, ed25519.SeedSize))
+}
+
+// twoCoordinatorPolicy predeclares both test coordinators, which is all
+// VerifyTrial reads from a policy.
+func twoCoordinatorPolicy() Policy {
+	return Policy{Coordinators: []string{testCoordinatorID(), secondCoordinatorID()}}
+}
+
+// endpointIndependentLocal is a mapped endpoint that declares an
+// endpoint-independent mapping, the class an honest set of equal reflections
+// derives.
+func endpointIndependentLocal() EndpointStratum {
+	local := mapped(CarrierConsumerISP, ClassDesktop)
+	local.NATBehavior = NATEndpointIndependent
+	return local
+}
+
+// signBind signs one coordinator's reflection of an endpoint's external
+// address, for the same key the endpoint signs its trial with.
+func signBind(session string, role Role, operator string, coordinatorKey ed25519.PrivateKey, observed string) BindObservation {
+	public, ok := endpointKeyFor(operator, role).Public().(ed25519.PublicKey)
+	if !ok {
+		panic("unexpected key type")
+	}
+	observation, err := SignBindObservation(BindObservation{
+		SessionID:            session,
+		Role:                 string(role),
+		EndpointPublicKeyHex: hex.EncodeToString(public),
+		Probe:                string(ProbeUDP),
+		Observed:             observed,
+		AtUnix:               1_800_000_000,
+	}, coordinatorKey)
+	if err != nil {
+		panic(err)
+	}
+	return observation
+}
+
+// sameAddressBinds is two coordinators reflecting one address: the signed
+// evidence of an endpoint-independent mapping.
+func sameAddressBinds(session string, role Role, operator string, family AddressFamily) []BindObservation {
+	return []BindObservation{
+		signBind(session, role, operator, testCoordinatorKey(), observedFor(family)),
+		signBind(session, role, operator, secondCoordinatorKey(), observedFor(family)),
+	}
+}
+
+// bindHalf is one signed measurement half whose bind observations are built by
+// the given binder over the half's own session.
+func bindHalf(local EndpointStratum, binder func(session string) []BindObservation) Trial {
+	session := nextSession()
+	scene := Scenario{Initiator: local, Responder: publicEndpoint()}
+	trial := rawTrial(scene, session, RoleA, opA, OutcomeDirect, FailureNone, 100)
+	// The responder is public, so the coordinator's peer observation is "yes".
+	trial.Observation = attest(session, RoleA, opA, "yes", local.Family)
+	trial.BindObservations = binder(session)
+	return resign(trial)
+}
+
+// The NAT mapping class a trial declares is now checked against the
+// coordinator-signed reflections it carries. A declaration the signed evidence
+// refutes -- endpoint-independent against reflections that differ, or a
+// destination-dependent class against reflections that agree -- is rejected;
+// one the evidence supports is accepted.
+func TestDeclaredMappingMustMatchBindObservations(t *testing.T) {
+	policy := twoCoordinatorPolicy()
+
+	consistent := func(session string) []BindObservation {
+		return sameAddressBinds(session, RoleA, opA, FamilyIPv4)
+	}
+	if err := VerifyTrial(policy, bindHalf(endpointIndependentLocal(), consistent)); err != nil {
+		t.Fatalf("an endpoint-independent declaration matching equal reflections was rejected: %v", err)
+	}
+
+	// Two coordinators reflected different addresses: the mapping depends on the
+	// destination, which refutes the endpoint-independent declaration.
+	differing := func(session string) []BindObservation {
+		return []BindObservation{
+			signBind(session, RoleA, opA, testCoordinatorKey(), "203.0.113.7:41234"),
+			signBind(session, RoleA, opA, secondCoordinatorKey(), "198.51.100.9:5000"),
+		}
+	}
+	if err := VerifyTrial(policy, bindHalf(endpointIndependentLocal(), differing)); err == nil {
+		t.Fatal("endpoint-independent survived reflections that differ")
+	}
+
+	// The reverse contradiction: a destination-dependent declaration against
+	// reflections that agree.
+	dependent := mapped(CarrierConsumerISP, ClassDesktop) // NATAddressPortDependent
+	agreeing := func(session string) []BindObservation {
+		return sameAddressBinds(session, RoleA, opA, FamilyIPv4)
+	}
+	if err := VerifyTrial(policy, bindHalf(dependent, agreeing)); err == nil {
+		t.Fatal("a destination-dependent declaration survived reflections that agree")
+	}
+
+	// Fewer than two distinct coordinators cannot separate the classes, so the
+	// mapping is undetermined and the declaration stands unchecked. This is the
+	// documented residual case, not a bug.
+	single := func(session string) []BindObservation {
+		return []BindObservation{signBind(session, RoleA, opA, testCoordinatorKey(), "203.0.113.7:41234")}
+	}
+	if err := VerifyTrial(policy, bindHalf(endpointIndependentLocal(), single)); err != nil {
+		t.Fatalf("a single reflection should leave the mapping undetermined, not refute it: %v", err)
+	}
+}
+
+// A reflection from a coordinator the policy did not predeclare proves only that
+// somebody signed something, exactly as for the pair observation.
+func TestBindObservationFromUndeclaredCoordinatorIsRejected(t *testing.T) {
+	policy := twoCoordinatorPolicy()
+	fromStranger := func(session string) []BindObservation {
+		return []BindObservation{
+			signBind(session, RoleA, opA, testCoordinatorKey(), observedFor(FamilyIPv4)),
+			signBind(session, RoleA, opA, strangerCoordinatorKey(), observedFor(FamilyIPv4)),
+		}
+	}
+	if err := VerifyTrial(policy, bindHalf(endpointIndependentLocal(), fromStranger)); err == nil {
+		t.Fatal("a bind observation from an unpredeclared coordinator was accepted")
+	}
+}
+
+// A reflection whose coordinator signature does not verify attests nothing, even
+// though the endpoint signature over the trial that carries it is valid.
+func TestForgedBindObservationSignatureIsRejected(t *testing.T) {
+	policy := twoCoordinatorPolicy()
+	forged := func(session string) []BindObservation {
+		binds := sameAddressBinds(session, RoleA, opA, FamilyIPv4)
+		signature, err := hex.DecodeString(binds[0].SignatureHex)
+		if err != nil || len(signature) == 0 {
+			t.Fatalf("decode bind signature: %v", err)
+		}
+		signature[0] ^= 0xff
+		binds[0].SignatureHex = hex.EncodeToString(signature)
+		return binds
+	}
+	trial := bindHalf(endpointIndependentLocal(), forged)
+	// The endpoint signature still verifies: the forgery is in the reflection it
+	// commits to, not in the trial signature.
+	if err := VerifyBindObservation(trial.BindObservations[0]); err == nil {
+		t.Fatal("the fixture's bind signature was not actually broken")
+	}
+	if err := VerifyTrial(policy, trial); err == nil {
+		t.Fatal("a trial carrying a forged reflection was accepted")
+	}
+}
+
+// An honest study whose declared mappings agree with the signed reflections
+// still aggregates. The cross-check rejects contradictions, not consistent
+// evidence, and a swapped set breaks the endpoint signature.
+func TestConsistentBindEvidenceAggregates(t *testing.T) {
+	policy := testPolicy()
+	policy.Coordinators = append(policy.Coordinators, secondCoordinatorID())
+
+	var trials []Trial
+	for _, required := range policy.RequiredScenarios {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+
+	// An extra cell whose two halves both declare an endpoint-independent
+	// mapping and carry the equal reflections that show it.
+	initiator := endpointIndependentLocal()
+	responder := endpointIndependentLocal()
+	responder.Carrier = CarrierMobile
+	responder.EndpointClass = ClassMobile
+	extra := Scenario{Initiator: initiator, Responder: responder}
+	for index := 0; index < 4; index++ {
+		operator := []string{opA, opB, opC}[index%3]
+		session := nextSession()
+		a := rawTrial(extra, session, RoleA, operator, OutcomeDirect, FailureNone, uint64(100+index))
+		a.Observation = attest(session, RoleA, operator, "no", initiator.Family)
+		a.BindObservations = sameAddressBinds(session, RoleA, operator, initiator.Family)
+		b := rawTrial(extra, session, RoleB, operator, OutcomeDirect, FailureNone, uint64(100+index))
+		b.Observation = attest(session, RoleB, operator, "no", responder.Family)
+		b.BindObservations = sameAddressBinds(session, RoleB, operator, responder.Family)
+		trials = append(trials, resign(a), resign(b))
+	}
+
+	report, err := Aggregate(policy, trials, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.UnverifiedTrials != 0 {
+		t.Fatalf("consistent bind evidence was dropped as unverified: %+v", report)
+	}
+	if report.IncompletePairs != 0 {
+		t.Fatalf("a consistent pair was discarded: %+v", report)
+	}
+	found := false
+	for _, cell := range report.Cells {
+		if cell.ScenarioKey == extra.Key() {
+			found = true
+			if cell.Samples != 4 {
+				t.Fatalf("the bind-evidenced cell was miscounted: %+v", cell)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the bind-evidenced cell was not aggregated")
+	}
+
+	// A reflection set swapped after signing breaks the endpoint signature.
+	tampered := resign(func() Trial {
+		session := nextSession()
+		half := rawTrial(extra, session, RoleA, opA, OutcomeDirect, FailureNone, 100)
+		half.Observation = attest(session, RoleA, opA, "no", initiator.Family)
+		half.BindObservations = sameAddressBinds(session, RoleA, opA, initiator.Family)
+		return half
+	}())
+	tampered.BindObservations = differingReflections(tampered)
+	if err := VerifyTrial(policy, tampered); err == nil {
+		t.Fatal("swapping the reflections after signing left the trial verifiable")
+	}
+}
+
+// differingReflections rewrites a half's reflections to disagree, without
+// re-signing the trial, so the swap is caught by the endpoint signature rather
+// than by the mapping check.
+func differingReflections(trial Trial) []BindObservation {
+	return []BindObservation{
+		signBind(trial.SessionID, RoleA, opA, testCoordinatorKey(), "203.0.113.7:41234"),
+		signBind(trial.SessionID, RoleA, opA, secondCoordinatorKey(), "198.51.100.9:5000"),
+	}
+}
+
 // An honest study whose declarations agree with the coordinator-signed evidence
 // still aggregates to a decision. The cross-checks reject contradictions, not
 // consistent measurements.

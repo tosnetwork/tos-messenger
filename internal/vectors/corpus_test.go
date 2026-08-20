@@ -271,6 +271,15 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 		trialTamperedSignatureJSON(t),
 		"a trial whose endpoint signature does not verify is rewritable after the fact and is not the measurement it claims")
 
+	// A trial may declare its NAT mapping, but the class is derived from the
+	// coordinator-signed bind reflections it carries. Declaring
+	// endpoint-independent while two distinct coordinators reflected differing
+	// addresses is the endpoint attesting to a mapping the signed evidence
+	// refutes, and it must not count.
+	addVerify("reachability-trial/mapping-contradicts-bind", "reachability-trial",
+		trialMappingContradictsBindJSON(t),
+		"a declared endpoint-independent mapping contradicted by reflections from two coordinators at differing addresses is refuted by the signed evidence")
+
 	sort.Slice(corpus, func(i, j int) bool { return corpus[i].Name < corpus[j].Name })
 	return corpus
 }

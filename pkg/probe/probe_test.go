@@ -158,6 +158,72 @@ func TestCoordinatorReportsObservedAddress(t *testing.T) {
 	}
 }
 
+// A bind request that names the endpoint key and probe is answered with a
+// coordinator-signed reflection of the source address, which is what lets the
+// NAT mapping class be derived from evidence instead of the endpoint's own
+// declaration.
+func TestCoordinatorAttestsBindReflection(t *testing.T) {
+	coordinator := testCoordinator(t)
+	endpointKey := strings.Repeat("a", 64)
+	request, err := EncodeRequest(Message{
+		Kind: KindBind, SessionID: testSession, Role: RoleA, Nonce: testNonce,
+		EndpointKey: endpointKey, Probe: string(reachability.ProbeUDP),
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	response := coordinator.Handle(request, source(t, "203.0.113.7:41234"))
+	if response == nil {
+		t.Fatal("expected a bind answer")
+	}
+	if err := CheckNoAmplification(request, response); err != nil {
+		t.Fatalf("coordinator amplified its request: %v", err)
+	}
+	message, err := Decode(response)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if message.Signature == "" || message.SignerKey == "" {
+		t.Fatalf("bind answer carried no attestation: %+v", message)
+	}
+	// Reconstruct the reflection the way the runner does and check it verifies
+	// and attests exactly what was presented.
+	identifier, err := reachability.CoordinatorID(mustKey(message.SignerKey))
+	if err != nil {
+		t.Fatalf("coordinator id: %v", err)
+	}
+	observation := reachability.BindObservation{
+		CoordinatorID:        identifier,
+		SessionID:            testSession,
+		Role:                 string(RoleA),
+		EndpointPublicKeyHex: endpointKey,
+		Probe:                string(reachability.ProbeUDP),
+		Observed:             message.Observed,
+		AtUnix:               message.ObservedAt,
+		PublicKeyHex:         message.SignerKey,
+		SignatureHex:         message.Signature,
+	}
+	if err := reachability.VerifyBindObservation(observation); err != nil {
+		t.Fatalf("the coordinator's bind reflection did not verify: %v", err)
+	}
+	if observation.Observed != "203.0.113.7:41234" || identifier != testServerID(t) {
+		t.Fatalf("the reflection attested the wrong thing: %+v", observation)
+	}
+	// A bind request that omits the endpoint key gets its address but no
+	// attestation, so an older client is still answered.
+	bare, err := EncodeRequest(Message{Kind: KindBind, SessionID: testSession, Role: RoleA, Nonce: testNonce})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	plain, err := Decode(coordinator.Handle(bare, source(t, "203.0.113.7:41234")))
+	if err != nil {
+		t.Fatalf("decode bare bind: %v", err)
+	}
+	if plain.Signature != "" || plain.SignerKey != "" {
+		t.Fatal("a bind request without an endpoint key was attested anyway")
+	}
+}
+
 // testEndpointKey is the key an endpoint tells the coordinator it will sign
 // with. The attestation names it, so a test that omitted it would be
 // exercising a pairing the coordinator now refuses.
@@ -382,6 +448,16 @@ func TestEndToEndDirectEstablishment(t *testing.T) {
 			}
 			if received.result.TxBytes == 0 || received.result.RxBytes == 0 {
 				t.Fatal("expected byte counters to be measured")
+			}
+			// The coordinator attested its reflection at bind, and the runner
+			// carried the verified reflection into the result.
+			if len(received.result.BindObservations) == 0 {
+				t.Fatal("no bind reflection was collected")
+			}
+			for _, observation := range received.result.BindObservations {
+				if err := reachability.VerifyBindObservation(observation); err != nil {
+					t.Fatalf("a collected bind reflection did not verify: %v", err)
+				}
 			}
 		case <-ctx.Done():
 			t.Fatal("probes did not finish")

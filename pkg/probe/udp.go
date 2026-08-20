@@ -64,8 +64,14 @@ type Result struct {
 	// without one cannot be filed under a stratum, because the two facts that
 	// place it there would be the endpoint's own claim.
 	Observation reachability.Observation
-	TxBytes     uint64
-	RxBytes     uint64
+	// BindObservations are the per-coordinator signed reflections of this
+	// endpoint's external address, one per coordinator that answered with a
+	// verifiable attestation. The NAT mapping class is derived from them rather
+	// than declared, so a trial that carries them lets a verifier check the
+	// mapping against evidence instead of trusting the endpoint's own label.
+	BindObservations []reachability.BindObservation
+	TxBytes          uint64
+	RxBytes          uint64
 }
 
 // NewSessionID returns a fresh session identifier for one measured pair.
@@ -234,12 +240,20 @@ func validateConfig(config *Config) error {
 // classifies the mapping behavior from the answers.
 func (r *runner) discover(ctx context.Context) error {
 	for _, coordinator := range r.config.Coordinators {
-		observed, err := r.bind(ctx, coordinator)
+		observed, attestation, err := r.bind(ctx, coordinator)
 		if err != nil {
 			r.result.Failure = reachability.FailureUDPBlocked
 			return err
 		}
 		r.result.Observed = append(r.result.Observed, observed)
+		// Only a reflection that verifies under the coordinator key it names is
+		// carried forward. An unverifiable one is worth no more than the
+		// endpoint's own claim about its mapping, so it is dropped here rather
+		// than folded into a trial that would fail verification later.
+		if reachability.VerifyBindObservation(attestation) == nil &&
+			len(r.result.BindObservations) < reachability.MaxBindObservations {
+			r.result.BindObservations = append(r.result.BindObservations, attestation)
+		}
 	}
 	r.result.Mapping = classifyMapping(r.result.Observed, r.localPort(), hostAddrs())
 	r.result.AddressFamily = classifyFamily(r.result.Observed)
@@ -398,25 +412,29 @@ func hostAddrs() []netip.Addr {
 	return addrs
 }
 
-func (r *runner) bind(ctx context.Context, coordinator string) (netip.AddrPort, error) {
+func (r *runner) bind(ctx context.Context, coordinator string) (netip.AddrPort, reachability.BindObservation, error) {
 	nonce, err := newNonce()
 	if err != nil {
-		return netip.AddrPort{}, err
+		return netip.AddrPort{}, reachability.BindObservation{}, err
 	}
+	// The endpoint key and probe are presented so the coordinator can attest to
+	// a named party and probe rather than to a bare session, which is what makes
+	// the reflection usable as mapping evidence.
 	request, err := EncodeRequest(Message{
 		Kind: KindBind, SessionID: r.config.SessionID, Role: r.config.Role, Nonce: nonce,
+		EndpointKey: r.config.EndpointKeyHex, Probe: string(r.config.Probe),
 	})
 	if err != nil {
-		return netip.AddrPort{}, err
+		return netip.AddrPort{}, reachability.BindObservation{}, err
 	}
 	target, err := net.ResolveUDPAddr("udp", coordinator)
 	if err != nil {
-		return netip.AddrPort{}, errors.New("resolve coordinator")
+		return netip.AddrPort{}, reachability.BindObservation{}, errors.New("resolve coordinator")
 	}
 	deadline := time.Now().Add(r.config.BindTimeout)
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
-			return netip.AddrPort{}, err
+			return netip.AddrPort{}, reachability.BindObservation{}, err
 		}
 		r.send(request, target)
 		window := minTime(deadline, time.Now().Add(r.config.PollInterval))
@@ -428,14 +446,41 @@ func (r *runner) bind(ctx context.Context, coordinator string) (netip.AddrPort, 
 			if reply.Kind == KindBindOK && reply.Nonce == nonce && reply.SessionID == r.config.SessionID {
 				observed, parseErr := netip.ParseAddrPort(reply.Observed)
 				if parseErr == nil {
-					return observed, nil
+					return observed, r.reflection(reply), nil
 				}
 				continue
 			}
 			r.observe(reply, from)
 		}
 	}
-	return netip.AddrPort{}, errors.New("coordinator did not answer")
+	return netip.AddrPort{}, reachability.BindObservation{}, errors.New("coordinator did not answer")
+}
+
+// reflection reconstructs the coordinator's signed bind observation from a bind
+// answer. The endpoint key, probe, session, and role are this endpoint's own
+// inputs, not something the reply echoes: the signature verifies only if the
+// coordinator signed exactly what was presented, so filling them in locally is
+// reconstruction, not trust. A reply without a signature yields a zero value
+// the caller discards.
+func (r *runner) reflection(reply Message) reachability.BindObservation {
+	if reply.Signature == "" || reply.SignerKey == "" {
+		return reachability.BindObservation{}
+	}
+	identifier, err := reachability.CoordinatorID(mustKey(reply.SignerKey))
+	if err != nil {
+		return reachability.BindObservation{}
+	}
+	return reachability.BindObservation{
+		CoordinatorID:        identifier,
+		SessionID:            r.config.SessionID,
+		Role:                 string(r.config.Role),
+		EndpointPublicKeyHex: r.config.EndpointKeyHex,
+		Probe:                string(r.config.Probe),
+		Observed:             reply.Observed,
+		AtUnix:               reply.ObservedAt,
+		PublicKeyHex:         reply.SignerKey,
+		SignatureHex:         reply.Signature,
+	}
 }
 
 // exchange publishes local candidates and waits for the peer's.

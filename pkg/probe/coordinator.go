@@ -150,6 +150,21 @@ func (c *Coordinator) Handle(request []byte, from netip.AddrPort) []byte {
 			Kind: KindBindOK, SessionID: message.SessionID, Role: message.Role,
 			Nonce: message.Nonce, Observed: from.String(), ServerID: c.serverID,
 		}
+		// The address a coordinator reflects at bind, attested per coordinator,
+		// is what lets the NAT mapping class be derived from signed evidence
+		// across several coordinators rather than from the endpoint's own
+		// declaration. A bind request that names the endpoint key and probe
+		// gets a signed reflection; an older one that omits them still gets its
+		// address, unsigned.
+		if message.EndpointKey != "" && message.Probe != "" {
+			attested, err := c.attestBind(message, from)
+			if err != nil {
+				return nil
+			}
+			response.ObservedAt = attested.AtUnix
+			response.SignerKey = attested.PublicKeyHex
+			response.Signature = attested.SignatureHex
+		}
 	case KindPair:
 		peer, peerPublic, peerCommit, peerTransportKey, reason := c.pair(message, from)
 		if reason != "" {
@@ -217,6 +232,23 @@ func (c *Coordinator) attest(message Message, from netip.AddrPort, peerPublic st
 		Probe:                message.Probe,
 		Observed:             from.String(),
 		PeerPublic:           peerPublic,
+		AtUnix:               uint64(c.now().Unix()),
+	}, c.key)
+}
+
+// attestBind signs the external address a coordinator reflected at bind.
+//
+// Each coordinator attests only to what it reflected, for the named endpoint
+// and probe. The set of these across several coordinators is what the NAT
+// mapping class is derived from, so no single coordinator decides it and the
+// endpoint cannot declare it for itself.
+func (c *Coordinator) attestBind(message Message, from netip.AddrPort) (reachability.BindObservation, error) {
+	return reachability.SignBindObservation(reachability.BindObservation{
+		SessionID:            message.SessionID,
+		Role:                 string(message.Role),
+		EndpointPublicKeyHex: message.EndpointKey,
+		Probe:                message.Probe,
+		Observed:             from.String(),
 		AtUnix:               uint64(c.now().Unix()),
 	}, c.key)
 }

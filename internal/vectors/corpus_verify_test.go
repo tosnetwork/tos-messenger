@@ -49,11 +49,20 @@ func foreignCoordinatorKey() ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(seed)
 }
 
-// trialPolicy predeclares exactly the in-policy coordinator, which is all
-// VerifyTrial reads from a policy.
-func trialPolicy(t *testing.T) reachability.Policy {
+// secondCoordinatorKey is a second predeclared coordinator, so a trial can
+// carry bind reflections from two distinct coordinators -- the minimum the NAT
+// mapping class can be derived from.
+func secondCoordinatorKey() ed25519.PrivateKey {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = 0x22
+	}
+	return ed25519.NewKeyFromSeed(seed)
+}
+
+func coordinatorID(t *testing.T, key ed25519.PrivateKey) string {
 	t.Helper()
-	public, ok := inPolicyCoordinatorKey().Public().(ed25519.PublicKey)
+	public, ok := key.Public().(ed25519.PublicKey)
 	if !ok {
 		t.Fatal("unexpected public key type")
 	}
@@ -61,7 +70,17 @@ func trialPolicy(t *testing.T) reachability.Policy {
 	if err != nil {
 		t.Fatalf("coordinator id: %v", err)
 	}
-	return reachability.Policy{Coordinators: []string{id}}
+	return id
+}
+
+// trialPolicy predeclares both test coordinators, which is all VerifyTrial
+// reads from a policy.
+func trialPolicy(t *testing.T) reachability.Policy {
+	t.Helper()
+	return reachability.Policy{Coordinators: []string{
+		coordinatorID(t, inPolicyCoordinatorKey()),
+		coordinatorID(t, secondCoordinatorKey()),
+	}}
 }
 
 // buildVerifiers returns the verify-layer checks, each closing over the fixed
@@ -376,4 +395,47 @@ func trialTamperedSignatureJSON(t *testing.T) string {
 	signature[0] ^= 0xff
 	trial.EndpointSignatureHex = hex.EncodeToString(signature)
 	return encodeTrial(t, trial)
+}
+
+// signBindReflection signs one coordinator's reflection of the baseline
+// endpoint's external address, for the key the baseline trial signs with.
+func signBindReflection(t *testing.T, coordinatorKey ed25519.PrivateKey, session, observed string) reachability.BindObservation {
+	t.Helper()
+	public, ok := endpointKey().Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatal("unexpected public key type")
+	}
+	observation, err := reachability.SignBindObservation(reachability.BindObservation{
+		SessionID:            session,
+		Role:                 string(reachability.RoleA),
+		EndpointPublicKeyHex: hex.EncodeToString(public),
+		Probe:                string(reachability.ProbeUDP),
+		Observed:             observed,
+		AtUnix:               baseUnix,
+	}, coordinatorKey)
+	if err != nil {
+		t.Fatalf("sign bind observation: %v", err)
+	}
+	return observation
+}
+
+// trialMappingContradictsBindJSON is a fully valid, signed trial that declares
+// an endpoint-independent mapping while carrying two predeclared coordinators'
+// reflections of differing external addresses. The signed evidence shows a
+// destination-dependent mapping, so the declaration is refused.
+func trialMappingContradictsBindJSON(t *testing.T) string {
+	t.Helper()
+	trial := signedTrial(t, inPolicyCoordinatorKey())
+	// The baseline already declares NATEndpointIndependent; attach reflections
+	// that refute it, then re-sign so the endpoint signature covers them and the
+	// refusal is owed to the mapping check, not a broken signature.
+	trial.BindObservations = []reachability.BindObservation{
+		signBindReflection(t, inPolicyCoordinatorKey(), trial.SessionID, "203.0.113.7:41234"),
+		signBindReflection(t, secondCoordinatorKey(), trial.SessionID, "198.51.100.9:5000"),
+	}
+	signed, err := reachability.SignTrial(trial, endpointKey())
+	if err != nil {
+		t.Fatalf("sign trial: %v", err)
+	}
+	return encodeTrial(t, signed)
 }
