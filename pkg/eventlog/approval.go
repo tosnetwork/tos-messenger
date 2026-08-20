@@ -95,8 +95,14 @@ type ApprovalRequest struct {
 	// persisted so the owner is shown the real amount, asset, provider, and
 	// expiry from typed state rather than the runtime's summary, and so the
 	// identifier can be recomputed and checked against what is being signed.
-	Terms   *negotiation.Terms
-	AskedAt uint64
+	Terms *negotiation.Terms
+	// MandateID names the standing authorisation a spend draws on. It is stored
+	// so the per-mandate budget can be reopened and the reservation named --
+	// the reservation key is ExecutionID(MandateID, Terms) -- when the spend is
+	// committed, released, or expired. It is required for a spend and empty for
+	// anything else, which holds no budget.
+	MandateID string
+	AskedAt   uint64
 }
 
 // Approval is the durable state of one request.
@@ -108,6 +114,7 @@ type Approval struct {
 	Reason        string             `json:"reason"`
 	Origins       []ApprovalOrigin   `json:"origins,omitempty"`
 	Terms         *negotiation.Terms `json:"terms,omitempty"`
+	MandateID     string             `json:"mandate_id,omitempty"`
 	State         ApprovalState      `json:"state"`
 	AskedAtUnix   uint64             `json:"asked_at_unix"`
 	DecidedAtUnix uint64             `json:"decided_at_unix,omitempty"`
@@ -148,7 +155,8 @@ func (j *Journal) RequestApproval(request ApprovalRequest) (Approval, error) {
 	approval := Approval{
 		Schema: ApprovalSchema, ActionID: request.ActionID, Effect: request.Effect,
 		Summary: request.Summary, Reason: request.Reason, Origins: request.Origins,
-		Terms: request.Terms, State: ApprovalPending, AskedAtUnix: request.AskedAt,
+		Terms: request.Terms, MandateID: request.MandateID, State: ApprovalPending,
+		AskedAtUnix: request.AskedAt,
 	}
 	return j.commitApproval(approval)
 }
@@ -373,6 +381,19 @@ func validateApprovalRequest(request ApprovalRequest) error {
 			return err
 		}
 	}
+	// A spend draws on a mandate's budget, so it must name the mandate that
+	// bounds it: the reservation the spend lifecycle commits or releases is keyed
+	// by that mandate. Anything else holds no budget and names none, so a mandate
+	// on a non-spend is a record that would never be reconciled.
+	if request.MandateID != "" && !mandatePattern.MatchString(request.MandateID) {
+		return errors.New("invalid mandate identifier")
+	}
+	if request.Effect == "spend" && request.MandateID == "" {
+		return errors.New("a spend approval must name the mandate it draws on")
+	}
+	if request.Effect != "spend" && request.MandateID != "" {
+		return errors.New("only a spend approval names a mandate")
+	}
 	return nil
 }
 
@@ -418,15 +439,33 @@ func (j *Journal) ExpirePendingApprovals(now time.Time) (int, error) {
 	if now.IsZero() || now.Unix() < 0 {
 		return 0, errors.New("invalid expiry time")
 	}
+	// The records are retired under the journal lock; the budget holds they back
+	// are freed afterwards, because reopening a per-mandate budget takes the same
+	// lock and it is not re-entrant. Freeing after the record is durably denied
+	// keeps the safe ordering: a crash in between leaves a hold with no live
+	// approval -- an over-count -- never a spend the budget forgot.
+	expired, err := j.expirePendingApprovalsLocked(now)
+	if err != nil {
+		return 0, err
+	}
+	for _, approval := range expired {
+		if err := j.ReleaseMandateReservation(approval); err != nil {
+			return len(expired), err
+		}
+	}
+	return len(expired), nil
+}
+
+func (j *Journal) expirePendingApprovalsLocked(now time.Time) ([]Approval, error) {
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
 	entries, err := os.ReadDir(j.approvalRoot())
 	if err != nil {
-		return 0, errors.New("read approval directory")
+		return nil, errors.New("read approval directory")
 	}
 	seconds := uint64(now.Unix())
-	expired := 0
+	expired := make([]Approval, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -442,10 +481,11 @@ func (j *Journal) ExpirePendingApprovals(now time.Time) (int, error) {
 		approval.State = ApprovalDenied
 		approval.DecidedAtUnix = seconds
 		approval.DenialReason = "nobody decided within the window this installation keeps requests for"
-		if _, err := j.commitApproval(approval); err != nil {
-			return expired, err
+		stored, err := j.commitApproval(approval)
+		if err != nil {
+			return nil, err
 		}
-		expired++
+		expired = append(expired, stored)
 	}
 	return expired, nil
 }
@@ -482,7 +522,82 @@ func (j *Journal) RecordAutoAuthorization(request ApprovalRequest) (Approval, er
 	approval := Approval{
 		Schema: ApprovalSchema, ActionID: request.ActionID, Effect: request.Effect,
 		Summary: request.Summary, Reason: request.Reason, Origins: request.Origins,
-		Terms: request.Terms, State: ApprovalGranted, AskedAtUnix: request.AskedAt, DecidedAtUnix: request.AskedAt,
+		Terms: request.Terms, MandateID: request.MandateID, State: ApprovalGranted,
+		AskedAtUnix: request.AskedAt, DecidedAtUnix: request.AskedAt,
 	}
 	return j.commitApproval(approval)
+}
+
+// CommitMandateReservation turns the budget hold behind a spent spend approval
+// into a committed amount, so the mandate records it as spent rather than a
+// reservation that could still be released. It must be called with the journal
+// lock free. It is idempotent and a no-op for anything that holds no hold: a
+// non-spend, an owner-approved over-budget spend that never took one, or a
+// reservation already committed.
+func (j *Journal) CommitMandateReservation(approval Approval) error {
+	budget, executionID, err := j.mandateBudgetFor(approval)
+	if err != nil {
+		return err
+	}
+	if budget == nil {
+		return nil
+	}
+	if _, held := budget.Reserved(executionID); !held {
+		return nil
+	}
+	return budget.Commit(executionID)
+}
+
+// ReleaseMandateReservation frees the budget hold behind a denied or abandoned
+// spend approval, so the mandate can spend that amount on something the owner
+// does approve. It must be called with the journal lock free. It is idempotent
+// -- releasing twice, or releasing a hold already committed to a spend, changes
+// nothing -- and a no-op for anything that holds no reservation.
+func (j *Journal) ReleaseMandateReservation(approval Approval) error {
+	budget, executionID, err := j.mandateBudgetFor(approval)
+	if err != nil {
+		return err
+	}
+	if budget == nil {
+		return nil
+	}
+	return budget.Release(executionID)
+}
+
+// mandateBudgetFor reopens the per-mandate budget one spend approval draws on
+// and derives the reservation key that names its hold. It returns a nil budget
+// for anything that holds no budget -- a non-spend, or a record missing the
+// mandate or terms a spend carries -- so its callers no-op cleanly. It takes the
+// journal lock (via the mandate lookup and the ledger), so it must not be called
+// while that lock is held.
+func (j *Journal) mandateBudgetFor(approval Approval) (*negotiation.Budget, string, error) {
+	if approval.Effect != "spend" || approval.Terms == nil || approval.MandateID == "" {
+		return nil, "", nil
+	}
+	stored, found, err := j.LookupMandate(approval.MandateID)
+	if err != nil {
+		return nil, "", err
+	}
+	if !found {
+		return nil, "", ErrMandateUnknown
+	}
+	asset := negotiation.Asset{
+		Workchain: stored.Workchain, AccountID: stored.AssetAccountID,
+		MasterCodeHash: stored.AssetMasterCodeHash, WalletCodeHash: stored.AssetWalletCodeHash,
+		Decimals: stored.AssetDecimals,
+	}
+	ledger, err := j.OpenMandateBudgetLedger(approval.MandateID, asset)
+	if err != nil {
+		return nil, "", err
+	}
+	total := negotiation.Money{Asset: asset, Atomic: stored.MaxTotalAtomic}
+	budget, err := negotiation.OpenBudget(total, ledger)
+	if err != nil {
+		return nil, "", err
+	}
+	executionID, err := negotiation.ExecutionID(approval.MandateID, *approval.Terms)
+	if err != nil {
+		return nil, "", err
+	}
+	return budget, executionID, nil
 }

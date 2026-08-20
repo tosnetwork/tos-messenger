@@ -21,6 +21,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/firewall"
+	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
@@ -1005,6 +1006,203 @@ func TestDistinctPurchasesAreBoundedByTheMandateTotal(t *testing.T) {
 	d := h.call(t, Request{Op: OpRequestAction, Action: fresh, MandateID: other})
 	if d.Decision != string(firewall.Allow) {
 		t.Fatalf("a fresh mandate's budget was drawn down by another mandate: %+v", d)
+	}
+}
+
+// mandateBudget reopens one mandate's durable budget so a test can see what a
+// spend is holding. The total is the ceiling the mandate was placed with; the
+// asset is the one every purchase in these tests names.
+func (h *harness) mandateBudget(t *testing.T, mandateID, total string) *negotiation.Budget {
+	t.Helper()
+	ledger, err := h.journal.OpenMandateBudgetLedger(mandateID, toAsset(testAssetIdentity()))
+	if err != nil {
+		t.Fatalf("open mandate budget ledger: %v", err)
+	}
+	budget, err := negotiation.OpenBudget(
+		negotiation.Money{Asset: toAsset(testAssetIdentity()), Atomic: total}, ledger)
+	if err != nil {
+		t.Fatalf("open mandate budget: %v", err)
+	}
+	return budget
+}
+
+func executionOf(t *testing.T, mandateID string, terms *PurchaseTerms) string {
+	t.Helper()
+	id, err := negotiation.ExecutionID(mandateID, *toTerms(terms))
+	if err != nil {
+		t.Fatalf("execution id: %v", err)
+	}
+	return id
+}
+
+func remainingAtomic(t *testing.T, budget *negotiation.Budget) string {
+	t.Helper()
+	remaining, err := budget.Remaining()
+	if err != nil {
+		t.Fatalf("remaining: %v", err)
+	}
+	return remaining.Atomic
+}
+
+// A spend the owner refuses frees the budget it was holding, so the mandate can
+// spend that amount on something the owner does approve.
+func TestDeniedSpendReleasesItsMandateHold(t *testing.T) {
+	h := newHarness(t)
+	mandateID := h.placeMandateWithTotal(t, "250", "250")
+	purchase := testPurchase(200)
+	spend := testProposal("spend")
+	spend.Terms = purchase
+
+	asked := h.call(t, Request{Op: OpRequestAction, Action: spend, MandateID: mandateID})
+	if asked.Decision != string(firewall.RequireOwnerApproval) || asked.State != "pending" {
+		t.Fatalf("a spend inside the mandate did not wait for the owner: %+v", asked)
+	}
+	// The pending spend holds its slice of the budget while it waits.
+	if amount, held := h.mandateBudget(t, mandateID, "250").Reserved(executionOf(t, mandateID, purchase)); !held || amount.Atomic != "200" {
+		t.Fatalf("a pending spend did not hold its budget: held=%v amount=%+v", held, amount)
+	}
+	if left := remainingAtomic(t, h.mandateBudget(t, mandateID, "250")); left != "50" {
+		t.Fatalf("the hold was not counted against the mandate: remaining=%s", left)
+	}
+
+	// The owner refuses it, and the hold is freed.
+	if denied := h.owner(t, Request{Op: OpDenyAction, ActionID: asked.ActionID, Reason: "not this one"}); !denied.OK {
+		t.Fatalf("deny: %+v", denied)
+	}
+	if _, held := h.mandateBudget(t, mandateID, "250").Reserved(executionOf(t, mandateID, purchase)); held {
+		t.Fatal("a denied spend kept its hold")
+	}
+	if left := remainingAtomic(t, h.mandateBudget(t, mandateID, "250")); left != "250" {
+		t.Fatalf("the mandate's full ceiling did not return: remaining=%s", left)
+	}
+
+	// The freed amount is available again: a distinct purchase of the same size
+	// now fits where the mandate's ceiling would otherwise have been spent.
+	againTerms := testPurchaseCap("8", 200)
+	again := &ProposedAction{Effect: "spend", Summary: "a different purchase", Terms: againTerms}
+	retry := h.call(t, Request{Op: OpRequestAction, Action: again, MandateID: mandateID})
+	if retry.Decision != string(firewall.RequireOwnerApproval) {
+		t.Fatalf("the freed budget could not be reserved again: %+v", retry)
+	}
+	if left := remainingAtomic(t, h.mandateBudget(t, mandateID, "250")); left != "50" {
+		t.Fatalf("re-reserving the freed amount did not take: remaining=%s", left)
+	}
+}
+
+// A spend the owner grants and the runtime claims turns its standing hold into a
+// committed amount, so the mandate records it as spent rather than a reservation
+// that could still be released.
+func TestClaimedSpendCommitsItsMandateHold(t *testing.T) {
+	h := newHarness(t)
+	mandateID := h.placeMandateWithTotal(t, "250", "250")
+	purchase := testPurchase(200)
+	spend := testProposal("spend")
+	spend.Terms = purchase
+
+	asked := h.call(t, Request{Op: OpRequestAction, Action: spend, MandateID: mandateID})
+	if asked.Decision != string(firewall.RequireOwnerApproval) {
+		t.Fatalf("unexpected decision: %+v", asked)
+	}
+	if granted := h.owner(t, Request{Op: OpGrantAction, ActionID: asked.ActionID}); !granted.OK {
+		t.Fatalf("grant: %+v", granted)
+	}
+	claimed := h.call(t, Request{Op: OpClaimAction, ActionID: asked.ActionID})
+	if !claimed.Authorised {
+		t.Fatalf("a granted spend could not proceed: %+v", claimed)
+	}
+
+	budget := h.mandateBudget(t, mandateID, "250")
+	// The hold is gone -- it became a spend.
+	if _, held := budget.Reserved(executionOf(t, mandateID, purchase)); held {
+		t.Fatal("a committed spend was still a standing hold")
+	}
+	if budget.Spent().Atomic != "200" {
+		t.Fatalf("the spend was not committed: spent=%+v", budget.Spent())
+	}
+	if left := remainingAtomic(t, budget); left != "50" {
+		t.Fatalf("the committed spend was not counted: remaining=%s", left)
+	}
+}
+
+// A spend nobody decides within the window is retired, and its hold is freed
+// rather than consuming the mandate's ceiling forever.
+func TestExpiredSpendReleasesItsMandateHold(t *testing.T) {
+	h := newHarness(t)
+	mandateID := h.placeMandateWithTotal(t, "250", "250")
+	purchase := testPurchase(200)
+	spend := testProposal("spend")
+	spend.Terms = purchase
+
+	asked := h.call(t, Request{Op: OpRequestAction, Action: spend, MandateID: mandateID})
+	if asked.State != "pending" {
+		t.Fatalf("the spend did not wait for the owner: %+v", asked)
+	}
+	if _, held := h.mandateBudget(t, mandateID, "250").Reserved(executionOf(t, mandateID, purchase)); !held {
+		t.Fatal("a pending spend held no budget")
+	}
+
+	later := h.clock.Add(eventlog.DefaultMaxPendingAge + time.Hour)
+	if count, err := h.journal.ExpirePendingApprovals(later); err != nil || count != 1 {
+		t.Fatalf("expire: count=%d err=%v", count, err)
+	}
+	if _, held := h.mandateBudget(t, mandateID, "250").Reserved(executionOf(t, mandateID, purchase)); held {
+		t.Fatal("an expired spend kept its hold")
+	}
+	if left := remainingAtomic(t, h.mandateBudget(t, mandateID, "250")); left != "250" {
+		t.Fatalf("the expired hold was not freed: remaining=%s", left)
+	}
+	status := h.call(t, Request{Op: OpActionStatus, ActionID: asked.ActionID})
+	if status.State != string(eventlog.ApprovalDenied) {
+		t.Fatalf("the expired request was not retired: %+v", status)
+	}
+}
+
+// MaxTotal is enforced across the owner-approval path: a within-budget spend
+// awaiting the owner holds its slice, and a second spend that would cross the
+// ceiling while the first is pending takes no hold until budget is freed.
+func TestMandateTotalEnforcedAcrossTheOwnerApprovalPath(t *testing.T) {
+	h := newHarness(t)
+	mandateID := h.placeMandateWithTotal(t, "250", "250")
+
+	firstTerms := testPurchaseCap("1", 200)
+	first := &ProposedAction{Effect: "spend", Summary: "first", Terms: firstTerms}
+	a := h.call(t, Request{Op: OpRequestAction, Action: first, MandateID: mandateID})
+	if a.Decision != string(firewall.RequireOwnerApproval) {
+		t.Fatalf("the first spend did not wait for the owner: %+v", a)
+	}
+	if _, held := h.mandateBudget(t, mandateID, "250").Reserved(executionOf(t, mandateID, firstTerms)); !held {
+		t.Fatal("a within-budget pending spend held no budget")
+	}
+
+	// 200 + 100 > 250, so the second spend is put to the owner without a hold
+	// while the first is still pending.
+	secondTerms := testPurchaseCap("2", 100)
+	second := &ProposedAction{Effect: "spend", Summary: "second", Terms: secondTerms}
+	b := h.call(t, Request{Op: OpRequestAction, Action: second, MandateID: mandateID})
+	if b.Decision != string(firewall.RequireOwnerApproval) {
+		t.Fatalf("the second spend was not put to the owner: %+v", b)
+	}
+	if _, held := h.mandateBudget(t, mandateID, "250").Reserved(executionOf(t, mandateID, secondTerms)); held {
+		t.Fatal("an over-budget pending spend took a hold it should not have")
+	}
+	if left := remainingAtomic(t, h.mandateBudget(t, mandateID, "250")); left != "50" {
+		t.Fatalf("only the first spend should be held: remaining=%s", left)
+	}
+
+	// Refusing the first frees its 200, and the second's 100 fits once re-asked.
+	if denied := h.owner(t, Request{Op: OpDenyAction, ActionID: a.ActionID, Reason: "no"}); !denied.OK {
+		t.Fatalf("deny: %+v", denied)
+	}
+	if left := remainingAtomic(t, h.mandateBudget(t, mandateID, "250")); left != "250" {
+		t.Fatalf("the first hold was not freed: remaining=%s", left)
+	}
+	third := &ProposedAction{Effect: "spend", Summary: "second again", Terms: testPurchaseCap("2", 100)}
+	c := h.call(t, Request{Op: OpRequestAction, Action: third, MandateID: mandateID})
+	if c.Decision != string(firewall.RequireOwnerApproval) {
+		t.Fatalf("the freed budget could not admit the second spend: %+v", c)
+	}
+	if left := remainingAtomic(t, h.mandateBudget(t, mandateID, "250")); left != "150" {
+		t.Fatalf("the second spend's hold did not take after the first was freed: remaining=%s", left)
 	}
 }
 

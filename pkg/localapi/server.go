@@ -424,48 +424,28 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 			// several purchases each inside that ceiling could still commit more
 			// than the mandate allows. The reservation is keyed by the economic
 			// execution, so it is idempotent across a re-described same purchase
-			// and accumulates once per distinct purchase.
-			ledger, err := s.config.Journal.OpenMandateBudgetLedger(request.MandateID, mandate.MaxTotal.Asset)
-			if err != nil {
-				return refuse(fault.CodeInternal, err)
-			}
-			budget, err := negotiation.OpenBudget(mandate.MaxTotal, ledger)
-			if err != nil {
-				return refuse(fault.CodeInternal, err)
-			}
-			// The reservation is written durably BEFORE the auto-authorization is
-			// recorded, so a crash between the two can only leave a reservation
-			// with no authorization -- which over-counts the budget, the safe
-			// direction -- and never an authorization the budget never counted.
-			// This is a conservative, fail-closed enforcement: reservations only
-			// accumulate here, never released or committed, so MaxTotal is never
-			// exceeded across distinct auto-authorized purchases. The
-			// commit-on-spend / release-on-deny lifecycle is a documented
-			// follow-up: it needs the approval record to carry the mandate and
-			// execution across handlers, which is out of scope here.
-			if err := budget.Reserve(executionID, action.Terms.Price); err != nil {
-				// The purchase does not fit the mandate's durable total (or the
-				// budget could not be held), so it is not auto-authorised. The
-				// owner may still decide, so this escalates rather than refusing.
-				approval, requestErr := s.config.Journal.RequestApproval(eventlog.ApprovalRequest{
-					ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
-					Reason:  "would exceed the mandate's remaining budget: " + err.Error(),
-					Origins: toApprovalOrigins(decision.Provenance), Terms: action.Terms,
-					AskedAt: uint64(now.Unix()),
-				})
-				if requestErr != nil {
-					return refuse(fault.CodeInternal, requestErr)
+			// and accumulates once per distinct purchase. It is written durably
+			// BEFORE the auto-authorization, so a crash between the two can only
+			// leave a hold with no authorization -- an over-count, the safe
+			// direction -- never an authorization the budget never counted. The
+			// hold becomes a spend when the grant is claimed, and is freed if the
+			// purchase is later denied or abandoned.
+			if err := s.reserveMandateBudget(request.MandateID, mandate, executionID, action.Terms.Price); err != nil {
+				if !errors.Is(err, negotiation.ErrBudgetExceeded) {
+					return refuse(fault.CodeInternal, err)
 				}
-				return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
-					Decision: string(firewall.RequireOwnerApproval),
-					Detail:   "would exceed the mandate's remaining budget",
-					State:    string(approval.State)}
+				// The purchase does not fit the mandate's durable total, so it is
+				// not auto-authorised. The owner may still decide, so this
+				// escalates rather than refusing, and holds no budget until they
+				// approve it.
+				return s.escalateSpend(request, action, actionID, decision.Provenance,
+					"would exceed the mandate's remaining budget", now)
 			}
 			approval, err := s.config.Journal.RecordAutoAuthorization(eventlog.ApprovalRequest{
 				ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
 				Reason:  "allowed by policy, inside the owner's mandate",
 				Origins: toApprovalOrigins(decision.Provenance), Terms: action.Terms,
-				AskedAt: uint64(now.Unix()),
+				MandateID: request.MandateID, AskedAt: uint64(now.Unix()),
 			})
 			if err != nil {
 				return refuse(fault.CodeInternal, err)
@@ -477,6 +457,22 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 		return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
 			Decision: string(decision.Outcome), Detail: decision.Reason, Authorised: true}
 	}
+	// The decision requires an owner. A spend that still fits its mandate holds
+	// its slice of the budget while it waits, so concurrent spends cannot
+	// oversubscribe MaxTotal behind a pending one; a spend that will not fit is
+	// put to the owner without a hold, who may approve it over budget.
+	if action.Effect == firewall.EffectSpend {
+		executionID, err := negotiation.ExecutionID(request.MandateID, *action.Terms)
+		if err != nil {
+			return refuse(fault.CodeInternal, err)
+		}
+		if err := s.reserveMandateBudget(request.MandateID, mandate, executionID, action.Terms.Price); err != nil {
+			if !errors.Is(err, negotiation.ErrBudgetExceeded) {
+				return refuse(fault.CodeInternal, err)
+			}
+		}
+		return s.escalateSpend(request, action, actionID, decision.Provenance, decision.Reason, now)
+	}
 	approval, err := s.config.Journal.RequestApproval(eventlog.ApprovalRequest{
 		ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
 		Reason: decision.Reason, Origins: toApprovalOrigins(decision.Provenance),
@@ -487,6 +483,42 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 	}
 	return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
 		Decision: string(decision.Outcome), Detail: decision.Reason,
+		State: string(approval.State)}
+}
+
+// reserveMandateBudget holds a purchase's price against its mandate's durable
+// total, keyed by the economic execution so it is idempotent across a
+// re-described same purchase. It returns negotiation.ErrBudgetExceeded when the
+// hold would carry the mandate past MaxTotal, which the caller escalates rather
+// than treating as a failure.
+func (s *Server) reserveMandateBudget(mandateID string, mandate negotiation.Mandate,
+	executionID string, price negotiation.Money) error {
+	ledger, err := s.config.Journal.OpenMandateBudgetLedger(mandateID, mandate.MaxTotal.Asset)
+	if err != nil {
+		return err
+	}
+	budget, err := negotiation.OpenBudget(mandate.MaxTotal, ledger)
+	if err != nil {
+		return err
+	}
+	return budget.Reserve(executionID, price)
+}
+
+// escalateSpend puts a spend to the owner. The reservation, if any, was taken by
+// the caller before this record is written, so the durable hold always precedes
+// the owner-visible question a crash could otherwise strand.
+func (s *Server) escalateSpend(request Request, action firewall.Action, actionID string,
+	provenance []firewall.Origin, reason string, now time.Time) Response {
+	approval, err := s.config.Journal.RequestApproval(eventlog.ApprovalRequest{
+		ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
+		Reason: reason, Origins: toApprovalOrigins(provenance), Terms: action.Terms,
+		MandateID: request.MandateID, AskedAt: uint64(now.Unix()),
+	})
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
+		Decision: string(firewall.RequireOwnerApproval), Detail: reason,
 		State: string(approval.State)}
 }
 
@@ -518,6 +550,15 @@ func (s *Server) claimAction(request Request, now time.Time) Response {
 			return Response{Schema: ResponseSchema, OK: true, ActionID: request.ActionID,
 				Authorised: false, Detail: err.Error()}
 		}
+		return refuse(fault.CodeInternal, err)
+	}
+	// A spent purchase turns its standing budget hold into a committed amount, so
+	// the mandate records it as spent rather than a reservation that could still
+	// be released. This runs after the durable spend, so a crash between them
+	// leaves an uncommitted hold -- an over-count, the safe direction -- not an
+	// executed spend the budget forgot. It is a no-op for anything holding no
+	// reservation.
+	if err := s.config.Journal.CommitMandateReservation(approval); err != nil {
 		return refuse(fault.CodeInternal, err)
 	}
 	return Response{Schema: ResponseSchema, OK: true, ActionID: request.ActionID,
@@ -561,6 +602,13 @@ func (s *Server) grantAction(request Request, now time.Time) Response {
 func (s *Server) denyAction(request Request, now time.Time) Response {
 	approval, err := s.config.Journal.DenyAction(request.ActionID, request.Reason, now)
 	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	// A refused purchase frees the hold it was holding, so the mandate can spend
+	// that amount on something the owner does approve. The release follows the
+	// durable denial and is idempotent, so a crash between them leaves a hold the
+	// next release would clear -- an over-count, the safe direction.
+	if err := s.config.Journal.ReleaseMandateReservation(approval); err != nil {
 		return refuse(fault.CodeInternal, err)
 	}
 	return Response{Schema: ResponseSchema, OK: true, ActionID: request.ActionID,

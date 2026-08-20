@@ -35,6 +35,7 @@ func TestSpendApprovalPersistsStructuredPurchase(t *testing.T) {
 	journal := approvalJournal(t)
 	request := testRequest("a")
 	request.Effect = "spend"
+	request.MandateID = "mdt_" + strings.Repeat("2", 64)
 	if _, err := journal.RequestApproval(request); err == nil {
 		t.Fatal("a spend approval with no structured terms was accepted")
 	}

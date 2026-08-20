@@ -10,6 +10,12 @@ import (
 // once. An unbounded set is an unbounded record and an unbounded restart.
 const MaxReservations = 256
 
+// ErrBudgetExceeded reports that a reservation or commitment would carry the
+// budget past its total. It is a result a caller acts on -- escalating the
+// spend to the owner rather than auto-authorising it -- not a durability
+// failure, so it is a sentinel the caller can tell apart from a write error.
+var ErrBudgetExceeded = errors.New("this would commit more than the budget allows")
+
 // BudgetState is everything a budget needs to be reconstructed.
 //
 // It is written whole rather than as a delta. A delta applied halfway leaves a
@@ -122,7 +128,7 @@ func (b *Budget) Reserve(negotiationID string, amount Money) error {
 	}
 	if !within {
 		b.restore(negotiationID, previous, held)
-		return errors.New("this would commit more than the budget allows")
+		return ErrBudgetExceeded
 	}
 	if err := b.record(); err != nil {
 		b.restore(negotiationID, previous, held)
@@ -182,7 +188,7 @@ func (b *Budget) Commit(negotiationID string) error {
 		return err
 	}
 	if !within {
-		return errors.New("this would spend more than the budget allows")
+		return ErrBudgetExceeded
 	}
 	previousSpent := b.spent
 	b.spent = spent
