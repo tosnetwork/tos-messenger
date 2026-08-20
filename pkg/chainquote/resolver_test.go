@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
@@ -17,6 +18,7 @@ import (
 
 // The resolver satisfies the Messenger's own interface.
 var _ negotiation.QuoteResolver = (*Resolver)(nil)
+var _ EscrowLocator = (*eventlog.Journal)(nil)
 
 const (
 	testCommitment = "tvm-cell-sha256:" + "abababababababababababababababababababababababababababababababab"

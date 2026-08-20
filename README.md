@@ -177,6 +177,10 @@ Deliberately absent, with the reason:
 - Finalized state is re-verified where it is used: which network it came from,
   that it is final, which registry produced it, and that it describes the Agent
   that was asked about.
+- A funded quote's local lookup is durable provenance, not configuration: the
+  journal binds one quote commitment to its escrow address and capability class
+  once, refuses redirects, and supplies that binding to the finalized Quote
+  resolver after restart. Only the future funding path may create it.
 - Every domain separator is registered in one list, because a reused separator
   is signature confusion rather than a merge conflict.
 
