@@ -183,6 +183,92 @@ func TestADNLTrialEndToEnd(t *testing.T) {
 	}
 }
 
+// With a sidecar configured, the CLI produces a trial whose collector
+// manifest tells the truth about the build that spoke on the wire: the
+// implementation and its commit from the sidecar's own hello, the binary hash
+// of the sidecar binary itself. One half runs the sidecar, the other the
+// gateway, so the trial also proves the two manifests cross correctly.
+func TestADNLSidecarTrialEndToEnd(t *testing.T) {
+	if probe.RaceEnabled {
+		t.Skip("tonutils-go's TL serializer trips checkptr; the ADNL gateway cannot run under -race")
+	}
+	binary := os.Getenv("TOS_ADNL_PROBE_BIN")
+	if binary == "" {
+		t.Skip("set TOS_ADNL_PROBE_BIN to a tos-adnl-probe binary to run the live interop tests")
+	}
+	coordinatorAddress, coordinatorID := startCoordinator(t)
+	session := "ses_fedcba9876543210fedcba9876543210"
+	labels := declared{operator: "op-one", site: "site-one", carrier: "consumer-isp",
+		udpPolicy: "allowed", mobility: "stationary", class: "desktop", assistance: "none"}
+	peerLabels := declared{operator: "op-two", site: "site-two", carrier: "datacenter",
+		udpPolicy: "allowed", mobility: "stationary", class: "server", assistance: "none"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	type outcome struct {
+		trial     reachability.Trial
+		artifacts measured
+		err       error
+	}
+	results := make(chan outcome, 2)
+	go func() {
+		trial, artifacts, err := measure(ctx, coordinatorAddress, session, "a", "127.0.0.1:0",
+			strings.Repeat("a", 40), identityFile(t), reachability.ProbeADNL,
+			10*time.Second, 10*time.Second,
+			sessionPhases{adnlProbe: binary, echoSizes: []int{1024}}, labels)
+		results <- outcome{trial: trial, artifacts: artifacts, err: err}
+	}()
+	go func() {
+		trial, artifacts, err := measure(ctx, coordinatorAddress, session, "b", "127.0.0.1:0",
+			strings.Repeat("b", 40), identityFile(t), reachability.ProbeADNL,
+			10*time.Second, 10*time.Second, sessionPhases{}, peerLabels)
+		results <- outcome{trial: trial, artifacts: artifacts, err: err}
+	}()
+	policy := testPolicyWith(coordinatorID)
+	trials := make(map[reachability.Role]reachability.Trial, 2)
+	manifests := make(map[reachability.Role]reachability.CollectorManifest, 2)
+	for index := 0; index < 2; index++ {
+		received := <-results
+		if received.err != nil {
+			t.Fatalf("measure: %v", received.err)
+		}
+		if received.trial.Outcome != reachability.OutcomeDirect {
+			t.Fatalf("no direct ADNL session: %q/%q", received.trial.Outcome, received.trial.Failure)
+		}
+		if err := reachability.VerifyTrial(policy, received.trial); err != nil {
+			t.Fatalf("the trial does not verify: %v", err)
+		}
+		trials[received.trial.Role] = received.trial
+		manifests[received.trial.Role] = received.artifacts.manifest
+	}
+	sidecarManifest := manifests[reachability.RoleA]
+	if sidecarManifest.ADNLImplementation != "tos-native-adnl" {
+		t.Fatalf("the sidecar half's manifest names %q as its implementation", sidecarManifest.ADNLImplementation)
+	}
+	if len(sidecarManifest.ADNLImplementationCommit) != 40 ||
+		sidecarManifest.DependencyVersion != sidecarManifest.ADNLImplementationCommit {
+		t.Fatalf("the sidecar manifest does not pin the implementation commit: %+v", sidecarManifest)
+	}
+	wantHash, err := fileSHA256(binary)
+	if err != nil {
+		t.Fatalf("hash sidecar binary: %v", err)
+	}
+	if sidecarManifest.BinarySHA256 != wantHash {
+		t.Fatalf("the manifest's binary hash %q is not the sidecar binary's %q",
+			sidecarManifest.BinarySHA256, wantHash)
+	}
+	if manifests[reachability.RoleB].ADNLImplementation != "tonutils-go" {
+		t.Fatalf("the gateway half's manifest names %q", manifests[reachability.RoleB].ADNLImplementation)
+	}
+	// The digests cross: what the gateway half learned as its peer's build is
+	// the sidecar manifest, and vice versa.
+	a, b := trials[reachability.RoleA], trials[reachability.RoleB]
+	if a.LocalManifestDigest != b.PeerManifestDigest || a.PeerManifestDigest != b.LocalManifestDigest {
+		t.Fatalf("the halves disagree about each other's manifests: a=%q/%q b=%q/%q",
+			a.LocalManifestDigest, a.PeerManifestDigest, b.LocalManifestDigest, b.PeerManifestDigest)
+	}
+}
+
 // classify is the single translation from what the probe measured to the
 // trial vocabulary the schema validates, so its cases are pinned directly.
 func TestClassifyOutcomes(t *testing.T) {

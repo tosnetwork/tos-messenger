@@ -65,6 +65,13 @@ type Config struct {
 	// evidence from one where the tunnel also failed, and the operator chooses
 	// which is being collected.
 	TunnelAddr string
+	// SidecarPath selects the native ADNL sidecar runner and names its binary.
+	// Empty selects the in-process tonutils-go gateway, which is the default
+	// and the historical behavior. The sidecar runner refuses the tunnel
+	// fallback and IPv6 sockets, because the native transport supports
+	// neither and a silent no-op would record "not measured" for something
+	// the operator asked for.
+	SidecarPath string
 	// EchoSizes asks for one echo round trip per size after a confirmed
 	// direct establishment: an ADNL query carrying that many random bytes,
 	// answered with their sha256. The results are cross-check harness
@@ -363,12 +370,20 @@ func validateConfig(config *Config) error {
 		}
 	}
 	// The datagram probe has no session to hold, reconnect, tunnel, or echo
-	// over. Ignoring the request would record "not measured" for something
-	// the operator asked to measure, so it is refused instead.
+	// over, and no sidecar speaks it. Ignoring the request would record "not
+	// measured" for something the operator asked to measure, so it is refused
+	// instead.
 	if config.Probe == reachability.ProbeUDP &&
 		(config.HoldWindow > 0 || config.MeasureReconnect || config.TunnelAddr != "" ||
-			len(config.EchoSizes) > 0) {
+			config.SidecarPath != "" || len(config.EchoSizes) > 0) {
 		return errors.New("the udp probe measures datagram establishment only")
+	}
+	// The native sidecar has no tunnel path yet; that is a later production
+	// gate. Accepting the flag and silently not tunneling would file "direct
+	// failed" for runs the operator configured as "direct failed but a tunnel
+	// works", which is exactly the distinction the tunnel-first route needs.
+	if config.SidecarPath != "" && config.TunnelAddr != "" {
+		return errors.New("the sidecar runner does not measure the tunnel fallback")
 	}
 	// An echo that cannot be sent must be refused where the operator can see
 	// it: the native stack caps query payloads, and a size past the cap would

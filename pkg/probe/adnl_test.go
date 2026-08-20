@@ -462,6 +462,27 @@ func TestConfigRefusesWhatTheRunnersCannotMeasure(t *testing.T) {
 	if _, err := Run(ctx, udpEcho); err == nil {
 		t.Fatal("the udp probe accepted an echo it cannot measure")
 	}
+	tunneled := base
+	tunneled.SidecarPath = "/no/such/sidecar"
+	tunneled.TunnelAddr = "127.0.0.1:9"
+	if _, err := RunADNLSidecar(ctx, tunneled); err == nil {
+		t.Fatal("the sidecar runner accepted a tunnel it cannot measure")
+	}
+	misrouted := base
+	misrouted.SidecarPath = "/no/such/sidecar"
+	if _, err := RunADNL(ctx, misrouted); err == nil {
+		t.Fatal("the gateway runner accepted a sidecar configuration")
+	}
+	pathless := base
+	if _, err := RunADNLSidecar(ctx, pathless); err == nil {
+		t.Fatal("the sidecar runner accepted a run without a sidecar binary")
+	}
+	udpSidecar := base
+	udpSidecar.Probe = reachability.ProbeUDP
+	udpSidecar.SidecarPath = "/no/such/sidecar"
+	if _, err := Run(ctx, udpSidecar); err == nil {
+		t.Fatal("the udp probe accepted a sidecar it cannot use")
+	}
 }
 
 // skipUnderRace names the reason once. The Makefile's verify target runs these

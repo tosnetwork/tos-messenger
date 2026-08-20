@@ -24,6 +24,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,6 +75,8 @@ func main() {
 	flag.DurationVar(&phases.keepalive, "keepalive", 0, "keepalive ping interval of the hold phase, defaulted when 0")
 	flag.BoolVar(&phases.reconnect, "reconnect", false, "deliberately drop and re-establish the session after the hold phase (requires -hold; role a only, refused on role b, which never dials)")
 	flag.StringVar(&phases.tunnel, "tunnel", "", "tunnel relay address for the fallback phase after a failed direct attempt, empty for none")
+	flag.StringVar(&phases.adnlProbe, "adnl-probe", "", "path to a tos-adnl-probe binary; the adnl probe then speaks through the native sidecar instead of the in-process gateway")
+	echoSizes := flag.String("echo-sizes", "", "comma-separated payload sizes (1..8176) to echo over the established adnl session; cross-check evidence, reported on stderr and never in the trial")
 
 	var labels declared
 	flag.StringVar(&labels.operator, "operator", "", "operator name, hashed into an opaque identifier")
@@ -85,7 +88,14 @@ func main() {
 	flag.StringVar(&labels.assistance, "mapping-assistance", string(reachability.AssistanceNone), "none, static-port-mapping, or discovery-assisted")
 	flag.Parse()
 
-	trial, manifest, err := measure(context.Background(), *coordinators, *session, *role, *listen, *commit, *identity,
+	parsedSizes, err := parseEchoSizes(*echoSizes)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tos-reachability:", err)
+		os.Exit(1)
+	}
+	phases.echoSizes = parsedSizes
+
+	trial, artifacts, err := measure(context.Background(), *coordinators, *session, *role, *listen, *commit, *identity,
 		reachability.ProbeKind(*probeKind), *pairTimeout, *punchTimeout, phases, labels)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tos-reachability:", err)
@@ -101,7 +111,7 @@ func main() {
 		os.Exit(1)
 	}
 	if *manifestOut != "" {
-		if err := writeManifest(*manifestOut, manifest); err != nil {
+		if err := writeManifest(*manifestOut, artifacts.manifest); err != nil {
 			fmt.Fprintln(os.Stderr, "tos-reachability:", err)
 			os.Exit(1)
 		}
@@ -113,6 +123,43 @@ func main() {
 		phaseStatus(trial.ReconnectAttempted, trial.ReconnectSucceeded),
 		phaseStatus(trial.TunnelHoldAttempted, trial.TunnelHoldCompleted),
 		trial.LocalManifestDigest)
+	// The echo cross-check is harness evidence, deliberately outside the
+	// signed trial, so the stderr summary is where it reports.
+	if len(artifacts.echoes) > 0 {
+		fmt.Fprintf(os.Stderr, "echo=%s\n", formatEchoes(artifacts.echoes))
+	}
+}
+
+// parseEchoSizes turns the flag's comma-separated list into sizes; the probe
+// validates their bounds.
+func parseEchoSizes(value string) ([]int, error) {
+	if value == "" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ",")
+	sizes := make([]int, 0, len(parts))
+	for _, part := range parts {
+		size, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil {
+			return nil, errors.New("echo sizes must be a comma-separated list of byte counts")
+		}
+		sizes = append(sizes, size)
+	}
+	return sizes, nil
+}
+
+// formatEchoes renders each echo as size:verdict, with the round-trip time on
+// the verified ones.
+func formatEchoes(echoes []probe.EchoResult) string {
+	rendered := make([]string, 0, len(echoes))
+	for _, echoed := range echoes {
+		if echoed.OK {
+			rendered = append(rendered, fmt.Sprintf("%d:ok:%dms", echoed.Bytes, echoed.Millis))
+			continue
+		}
+		rendered = append(rendered, fmt.Sprintf("%d:failed", echoed.Bytes))
+	}
+	return strings.Join(rendered, ",")
 }
 
 // phaseStatus renders one phase's status pair the way the schema means it:
@@ -142,62 +189,89 @@ func writeManifest(path string, manifest reachability.CollectorManifest) error {
 }
 
 // sessionPhases carries the measurement phases that run beyond the direct
-// establishment attempt. They are collected in one place because they travel
-// together: reconnect requires a hold window, and all of them are refused for
-// the udp probe, which has no session to hold, reconnect, or tunnel.
+// establishment attempt, and which implementation runs them. They are
+// collected in one place because they travel together: reconnect requires a
+// hold window, echoes need a session, and all of them are refused for the udp
+// probe, which has no session to hold, reconnect, tunnel, or echo over.
 type sessionPhases struct {
 	hold      time.Duration
 	keepalive time.Duration
 	reconnect bool
 	tunnel    string
+	// echoSizes are the sized cross-check round trips run after an
+	// established session; their results report beside the trial, never in
+	// it.
+	echoSizes []int
+	// adnlProbe names a native sidecar binary; when set, the adnl probe's
+	// wire is spoken by that process instead of the in-process gateway, and
+	// the collector manifest describes the sidecar's build.
+	adnlProbe string
+}
+
+// measured is everything one run produces around the trial itself: the
+// manifest the trial's local digest names, and the echo cross-check outcomes,
+// which are deliberately not part of the signed trial.
+type measured struct {
+	manifest reachability.CollectorManifest
+	echoes   []probe.EchoResult
 }
 
 func measure(ctx context.Context, coordinators, session, role, listen, commit, identity string,
 	probeKind reachability.ProbeKind, pairTimeout, punchTimeout time.Duration,
-	phases sessionPhases, labels declared) (reachability.Trial, reachability.CollectorManifest, error) {
+	phases sessionPhases, labels declared) (reachability.Trial, measured, error) {
 	addresses := splitAddresses(coordinators)
 	if len(addresses) == 0 {
-		return reachability.Trial{}, reachability.CollectorManifest{}, errors.New("at least one coordinator is required")
+		return reachability.Trial{}, measured{}, errors.New("at least one coordinator is required")
 	}
 	if commit == "" {
 		commit = buildCommit()
 	}
 	if commit == "" {
-		return reachability.Trial{}, reachability.CollectorManifest{}, errors.New("the exact commit is required and could not be read from build information")
+		return reachability.Trial{}, measured{}, errors.New("the exact commit is required and could not be read from build information")
 	}
 	// The manifest describes the build that is about to measure, so it is
 	// constructed before anything runs and fails closed: a record whose
-	// provenance cannot be stated is a record that must not be written.
-	manifest, err := collectorManifest(commit)
+	// provenance cannot be stated is a record that must not be written. With
+	// a sidecar configured, the code that will speak ADNL on the wire is the
+	// sidecar's, so the manifest describes that build, taken from its own
+	// hello and the hash of its actual binary.
+	var manifest reachability.CollectorManifest
+	var err error
+	if phases.adnlProbe != "" {
+		manifest, err = sidecarCollectorManifest(ctx, commit, phases.adnlProbe)
+	} else {
+		manifest, err = collectorManifest(commit)
+	}
 	if err != nil {
-		return reachability.Trial{}, reachability.CollectorManifest{}, err
+		return reachability.Trial{}, measured{}, err
 	}
 	manifestDigest, err := manifest.Digest()
 	if err != nil {
-		return reachability.Trial{}, reachability.CollectorManifest{}, err
+		return reachability.Trial{}, measured{}, err
 	}
+	artifacts := measured{manifest: manifest}
 	operator, err := reachability.OperatorID(labels.operator)
 	if err != nil {
-		return reachability.Trial{}, manifest, err
+		return reachability.Trial{}, artifacts, err
 	}
 	site, err := reachability.SiteID(labels.site)
 	if err != nil {
-		return reachability.Trial{}, manifest, err
+		return reachability.Trial{}, artifacts, err
 	}
 	// Both endpoints of one attempt derive the same pair identifier from the
 	// session they shared, so the two halves are recognisable as one
 	// measurement rather than two independent successes.
 	pair, err := reachability.PairID(session)
 	if err != nil {
-		return reachability.Trial{}, manifest, err
+		return reachability.Trial{}, artifacts, err
 	}
 	endpointKey, err := loadOrCreateKey(identity)
 	if err != nil {
-		return reachability.Trial{}, manifest, err
+		return reachability.Trial{}, artifacts, err
 	}
 	endpointPublic, ok := endpointKey.Public().(ed25519.PublicKey)
 	if !ok {
-		return reachability.Trial{}, manifest, errors.New("unexpected endpoint key type")
+		return reachability.Trial{}, artifacts, errors.New("unexpected endpoint key type")
 	}
 	endpointPublicHex := hex.EncodeToString(endpointPublic)
 	configuration := probe.Config{
@@ -211,45 +285,52 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		KeepaliveInterval: phases.keepalive,
 		MeasureReconnect:  phases.reconnect,
 		TunnelAddr:        phases.tunnel,
+		SidecarPath:       phases.adnlProbe,
+		EchoSizes:         phases.echoSizes,
 		Commit:            commit,
 		ManifestDigest:    manifestDigest,
 		EndpointKeyHex:    endpointPublicHex,
 		Probe:             probeKind,
 	}
-	// The two runners measure different questions. The UDP one answers
-	// whether datagrams pass; the ADNL one answers whether the session a
-	// route decision is actually about comes up. Each refuses the other's
-	// name, so the attestation always describes what happened.
+	// The runners measure different questions with different code. The UDP
+	// one answers whether datagrams pass; the ADNL ones answer whether the
+	// session a route decision is actually about comes up -- through the
+	// in-process gateway, or through the native sidecar when one is named.
+	// Each refuses the others' configuration, so the attestation always
+	// describes what happened.
 	var result probe.Result
-	switch probeKind {
-	case reachability.ProbeUDP:
+	switch {
+	case probeKind == reachability.ProbeUDP:
 		result, err = probe.Run(ctx, configuration)
-	case reachability.ProbeADNL:
+	case probeKind == reachability.ProbeADNL && phases.adnlProbe != "":
+		result, err = probe.RunADNLSidecar(ctx, configuration)
+	case probeKind == reachability.ProbeADNL:
 		result, err = probe.RunADNL(ctx, configuration)
 	default:
-		return reachability.Trial{}, manifest, errors.New("probe must be udp or adnl")
+		return reachability.Trial{}, artifacts, errors.New("probe must be udp or adnl")
 	}
 	if err != nil {
-		return reachability.Trial{}, manifest, err
+		return reachability.Trial{}, artifacts, err
 	}
+	artifacts.echoes = result.EchoResults
 	if result.PeerCommit == "" {
-		return reachability.Trial{}, manifest, errors.New("the peer's commit was never learned, so the trial cannot name what it measured")
+		return reachability.Trial{}, artifacts, errors.New("the peer's commit was never learned, so the trial cannot name what it measured")
 	}
 	// The peer's manifest digest is learned during pairing exactly as its
 	// commit is, and a trial without it cannot say which collector build the
 	// far side ran -- which is the provenance a per-implementation report is
 	// split by, so no record is written.
 	if result.PeerManifestDigest == "" {
-		return reachability.Trial{}, manifest, errors.New("the peer's collector manifest was never learned, so the trial cannot name what it measured against")
+		return reachability.Trial{}, artifacts, errors.New("the peer's collector manifest was never learned, so the trial cannot name what it measured against")
 	}
 	if result.Reachability == "" {
-		return reachability.Trial{}, manifest, errors.New("this endpoint's own public reachability was never established")
+		return reachability.Trial{}, artifacts, errors.New("this endpoint's own public reachability was never established")
 	}
 	// Without a verified attestation the endpoint's declared situation would be
 	// its own unchecked claim about where its result counts, so no record is
 	// written.
 	if result.Observation.SignatureHex == "" {
-		return reachability.Trial{}, manifest, errors.New("no coordinator attested to this measurement")
+		return reachability.Trial{}, artifacts, errors.New("no coordinator attested to this measurement")
 	}
 
 	trial := reachability.Trial{
@@ -286,16 +367,16 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		EstablishMillis:       result.EstablishMillis,
 	}
 	if err := classify(&trial, result); err != nil {
-		return reachability.Trial{}, manifest, err
+		return reachability.Trial{}, artifacts, err
 	}
 	signed, err := reachability.SignTrial(trial, endpointKey)
 	if err != nil {
-		return reachability.Trial{}, manifest, err
+		return reachability.Trial{}, artifacts, err
 	}
 	if err := signed.Validate(); err != nil {
-		return reachability.Trial{}, manifest, err
+		return reachability.Trial{}, artifacts, err
 	}
-	return signed, manifest, nil
+	return signed, artifacts, nil
 }
 
 // collectorManifest describes this build: which orchestrator at which commit,
@@ -326,6 +407,43 @@ func collectorManifest(commit string) (reachability.CollectorManifest, error) {
 		Toolchain:                runtime.Version(),
 		WireProfile:              wireProfile,
 	}, nil
+}
+
+// sidecarCollectorManifest describes a run whose ADNL is spoken by the native
+// sidecar. The orchestrator fields still name this repository and commit --
+// this binary runs the rendezvous and signs the trial -- but the
+// implementation fields come from the sidecar's own hello and the binary hash
+// is the sidecar binary's, because that is the code whose wire behavior the
+// evidence describes. The sidecar pins its revision as a commit, so the
+// dependency version is that same identity.
+func sidecarCollectorManifest(ctx context.Context, commit, sidecarPath string) (reachability.CollectorManifest, error) {
+	hello, err := probe.SidecarHello(ctx, sidecarPath)
+	if err != nil {
+		return reachability.CollectorManifest{}, err
+	}
+	binaryHash, err := fileSHA256(sidecarPath)
+	if err != nil {
+		return reachability.CollectorManifest{}, err
+	}
+	return reachability.CollectorManifest{
+		OrchestratorRepository:   orchestratorRepository,
+		OrchestratorCommit:       commit,
+		ADNLImplementation:       hello.Implementation,
+		ADNLImplementationCommit: hello.ImplementationCommit,
+		DependencyVersion:        hello.ImplementationCommit,
+		BinarySHA256:             binaryHash,
+		Target:                   manifestToken(hello.Target),
+		Toolchain:                manifestToken(hello.Toolchain),
+		WireProfile:              wireProfile,
+	}, nil
+}
+
+// manifestToken renders a hello field as the single whitespace-free token the
+// manifest schema requires; the sidecar reports its toolchain as prose (for
+// example "clang 21.1.8"), and the deterministic join keeps one build one
+// spelling.
+func manifestToken(value string) string {
+	return strings.Join(strings.Fields(value), "-")
 }
 
 // adnlModuleVersion reads the resolved version of the ADNL module from build
@@ -359,9 +477,14 @@ func executableSHA256() (string, error) {
 	if err != nil {
 		return "", errors.New("the running binary could not be located for hashing")
 	}
+	return fileSHA256(path)
+}
+
+// fileSHA256 hashes one file's exact bytes.
+func fileSHA256(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return "", errors.New("the running binary could not be read for hashing")
+		return "", errors.New("the measuring binary could not be read for hashing")
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:]), nil

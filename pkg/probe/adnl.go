@@ -87,6 +87,10 @@ func RunADNL(ctx context.Context, config Config) (Result, error) {
 	if config.Probe != reachability.ProbeADNL {
 		return Result{}, errors.New("this runner measures the adnl probe; use Run for udp")
 	}
+	if config.SidecarPath != "" {
+		return Result{}, errors.New("this runner speaks through the in-process gateway; use RunADNLSidecar for the native sidecar")
+	}
+
 	transportPublic, transportPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return Result{}, errors.New("generate transport key")
