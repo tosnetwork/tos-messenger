@@ -55,7 +55,7 @@ func main() {
 	var phases sessionPhases
 	flag.DurationVar(&phases.hold, "hold", 0, "how long past establishment to keep the adnl session alive and measure survival, 0 for establishment only")
 	flag.DurationVar(&phases.keepalive, "keepalive", 0, "keepalive ping interval of the hold phase, defaulted when 0")
-	flag.BoolVar(&phases.reconnect, "reconnect", false, "deliberately drop and re-establish the session after the hold phase (initiator only, requires -hold)")
+	flag.BoolVar(&phases.reconnect, "reconnect", false, "deliberately drop and re-establish the session after the hold phase (requires -hold; role a only, refused on role b, which never dials)")
 	flag.StringVar(&phases.tunnel, "tunnel", "", "tunnel relay address for the fallback phase after a failed direct attempt, empty for none")
 
 	var labels declared

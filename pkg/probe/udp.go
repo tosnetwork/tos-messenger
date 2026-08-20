@@ -54,7 +54,10 @@ type Config struct {
 	// MeasureReconnect asks the initiating side to deliberately drop its
 	// channel state after the hold phase and time the re-establishment. It
 	// requires a hold window: a reconnect measured against a session that was
-	// never shown to still be alive would time an unknown baseline.
+	// never shown to still be alive would time an unknown baseline. It is also
+	// refused on the responding role, which never dials and so has nothing to
+	// re-establish: a responder run that accepted it would validate and then
+	// silently measure nothing.
 	MeasureReconnect bool
 	// TunnelAddr names the relay the fallback phase registers with when the
 	// direct phase ends without a session. Empty disables the fallback, which
@@ -289,6 +292,14 @@ func validateConfig(config *Config) error {
 	}
 	if config.MeasureReconnect && config.HoldWindow == 0 {
 		return errors.New("reconnect measurement requires a hold window")
+	}
+	// Reconnect is the initiator's measurement: the responder never dials, so
+	// it has no channel to deliberately drop and re-dial. Accepting the flag on
+	// the responding role would validate a run that then measures nothing --
+	// "not measured" recorded for something the operator asked for -- so it is
+	// refused, exactly as the udp probe refuses the phases it cannot measure.
+	if config.MeasureReconnect && config.Role == RoleB {
+		return errors.New("reconnect measurement belongs to the initiating role")
 	}
 	if config.TunnelAddr != "" {
 		if _, err := net.ResolveUDPAddr("udp", config.TunnelAddr); err != nil {

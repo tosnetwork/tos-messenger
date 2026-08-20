@@ -72,10 +72,13 @@ func establishOverLoopback(t *testing.T, host string) {
 // reconnect number, because pair joining takes the max of the two halves.
 func TestEndToEndADNLHoldSurvivalAndReconnect(t *testing.T) {
 	hold := 3 * time.Second
-	results := runADNLPair(t, "127.0.0.1", func(config *Config) {
+	results := runADNLPair(t, "127.0.0.1", func(role Role, config *Config) {
 		config.HoldWindow = hold
 		config.KeepaliveInterval = 300 * time.Millisecond
-		config.MeasureReconnect = true
+		// Only the initiator asks for the reconnect. The responder refuses the
+		// request outright at validation, because it never dials and a request
+		// it cannot act on must not pass as a run that measured it.
+		config.MeasureReconnect = role == RoleA
 	})
 	for role, result := range results {
 		if !result.Established {
@@ -97,9 +100,11 @@ func TestEndToEndADNLHoldSurvivalAndReconnect(t *testing.T) {
 }
 
 // runADNLPair runs both endpoints of one ADNL attempt against a live
-// coordinator on the given loopback host, applies the same configuration
-// adjustment to both, and returns each role's result.
-func runADNLPair(t *testing.T, host string, adjust func(*Config)) map[Role]Result {
+// coordinator on the given loopback host, applies the configuration
+// adjustment to each role, and returns each role's result. The adjustment
+// sees the role because the phases are not symmetric: only the initiator may
+// request a reconnect.
+func runADNLPair(t *testing.T, host string, adjust func(Role, *Config)) map[Role]Result {
 	t.Helper()
 	skipUnderRace(t)
 	loopback := net.JoinHostPort(host, "0")
@@ -126,9 +131,6 @@ func runADNLPair(t *testing.T, host string, adjust func(*Config)) map[Role]Resul
 		PollInterval: 50 * time.Millisecond,
 		LingerWindow: 500 * time.Millisecond,
 	}
-	if adjust != nil {
-		adjust(&config)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -143,6 +145,9 @@ func runADNLPair(t *testing.T, host string, adjust func(*Config)) map[Role]Resul
 			local := config
 			local.Role = role
 			local.EndpointKeyHex = testEndpointKey(role)
+			if adjust != nil {
+				adjust(role, &local)
+			}
 			result, err := RunADNL(ctx, local)
 			outcomes <- outcome{role: role, result: result, err: err}
 		}(role)
@@ -299,6 +304,17 @@ func TestConfigRefusesUnusableMeasurementWindows(t *testing.T) {
 	unheld.MeasureReconnect = true
 	if _, err := RunADNL(ctx, unheld); err == nil {
 		t.Fatal("reconnect measurement without a hold window was accepted")
+	}
+	// The responder never dials, so it has no channel to deliberately drop and
+	// re-dial: a responder run that accepted the request would validate and
+	// then silently measure nothing.
+	responder := base
+	responder.Role = RoleB
+	responder.EndpointKeyHex = testEndpointKey(RoleB)
+	responder.HoldWindow = time.Second
+	responder.MeasureReconnect = true
+	if _, err := RunADNL(ctx, responder); err == nil {
+		t.Fatal("the responder accepted a reconnect it cannot measure")
 	}
 	wrongProbe := base
 	wrongProbe.Probe = reachability.ProbeUDP

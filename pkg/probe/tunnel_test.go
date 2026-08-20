@@ -312,7 +312,7 @@ func TestEndToEndADNLTunnelFallback(t *testing.T) {
 	}
 	defer func() { directPeersForTest = nil }()
 
-	results := runADNLPair(t, "127.0.0.1", func(config *Config) {
+	results := runADNLPair(t, "127.0.0.1", func(_ Role, config *Config) {
 		config.PunchTimeout = 3 * time.Second
 		config.TunnelAddr = listener.LocalAddr().String()
 	})

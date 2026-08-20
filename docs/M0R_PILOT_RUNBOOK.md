@@ -174,7 +174,9 @@ exercises the post-establishment phases. Add `-hold 30s` on **both** sides —
 survival needs both halves, and a pair where only one end held contributes
 nothing to the survival percentile — and `-reconnect` on role `a` only, since
 only the initiator can deliberately drop and re-dial (`-reconnect` without
-`-hold` is refused, and all three phase flags are refused with `-probe udp`):
+`-hold` is refused, `-reconnect` on role `b` is refused rather than silently
+ignored — a run that measured nothing the operator asked for must not look
+like one that did — and all three phase flags are refused with `-probe udp`):
 
 ```sh
 SESSION="ses_$(openssl rand -hex 16)"
@@ -281,7 +283,7 @@ probes:
 | `incomplete_pairs > 0` | both endpoints used the same identity file, or one side's record never made it into the combined log |
 | report exit `2` | truncated or hand-edited JSONL, or a policy the tooling refuses — read the stderr line |
 | coordinator silent | it answers only well-formed probe datagrams and never amplifies; check the port with the endpoint tool itself, not with netcat |
-| `reconnect requires a hold window` (or a phase flag refused with `-probe udp`) | `-reconnect` needs `-hold`, and the udp probe has no session to hold, reconnect, or tunnel — the phase flags belong to `-probe adnl` |
+| `reconnect requires a hold window`, `reconnect measurement belongs to the initiating role` (or a phase flag refused with `-probe udp`) | `-reconnect` needs `-hold` and role `a` — the responder never dials, so it has nothing to re-establish — and the udp probe has no session to hold, reconnect, or tunnel: the phase flags belong to `-probe adnl` |
 | `survival_s=0` on one half of a held pair | that side ran without `-hold`; both sides must hold, or the pair drops out of the survival percentile |
 | fallback run stays `outcome=failed` | one side is missing `-tunnel` (registration is double, so half a registration forwards nothing), the relay is unreachable, or the direct block also cut the relay port — the fallback runs inside its own bounded window, so a relay that never answers leaves the direct failure standing |
 | no `filtering_observations` in a trial | the coordinator ran with `-filter-listen` set empty, or the cold probes were filtered or lost — silence is not evidence, and the trial stays valid with filtering `undetermined` |
