@@ -20,7 +20,7 @@ test-openmls:
 	cargo fmt --manifest-path rust/openmls-driver/Cargo.toml -- --check
 	cargo test --locked --manifest-path rust/openmls-driver/Cargo.toml
 	cargo build --locked --manifest-path rust/openmls-driver/Cargo.toml
-	TOS_OPENMLS_DRIVER="$$(pwd)/rust/openmls-driver/target/debug/tos-openmls-driver" GOWORK=off go test -count=1 -run OpenMLS ./pkg/group ./pkg/eventlog
+	TOS_OPENMLS_DRIVER="$$(pwd)/rust/openmls-driver/target/debug/tos-openmls-driver" GOWORK=off go test -count=1 -run OpenMLS ./pkg/group ./pkg/eventlog ./pkg/mlslab
 
 build:
 	GOWORK=off go build ./...

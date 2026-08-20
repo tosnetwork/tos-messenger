@@ -343,6 +343,18 @@ func deriveRoomID(label string, members []string) string {
 	sum := sha256.Sum256(buffer.Bytes())
 	return "room_" + hex.EncodeToString(sum[:])
 }
+
+// DeriveRoomID returns the carrier room identifier for an already normalized
+// member set. Encrypted per-Agent proxies use it to bind their private MLS
+// state to the exact room the opaque relay exposes.
+func DeriveRoomID(label string, members []string) string {
+	return deriveRoomID(label, members)
+}
+
+// NormalizeMembers validates and sorts a lab room member set.
+func NormalizeMembers(members []string) ([]string, error) {
+	return normalizeMembers(members)
+}
 func deriveMessageID(roomID, sender, clientID, content string) string {
 	buffer := bytes.NewBufferString(canon.DomainLabMessage)
 	for _, value := range []string{roomID, sender, clientID, content} {
@@ -350,6 +362,12 @@ func deriveMessageID(roomID, sender, clientID, content string) string {
 	}
 	sum := sha256.Sum256(buffer.Bytes())
 	return "msg_" + hex.EncodeToString(sum[:])
+}
+
+// DeriveMessageID binds the opaque Relay record to its room, sender,
+// idempotency key, and exact ciphertext content.
+func DeriveMessageID(roomID, sender, clientID, content string) string {
+	return deriveMessageID(roomID, sender, clientID, content)
 }
 
 func normalizeMembers(members []string) ([]string, error) {

@@ -48,6 +48,7 @@ decision:
 | `pkg/e2ee` (devices) | The multi-device model: device-set succession with rollback and revocation defences, deterministic per-pair session identifiers, and the per-event fan-out to every live device of both parties |
 | `pkg/group`, `rust/openmls-driver` | TOS-MLS candidate adapter plus pinned OpenMLS `0.8.1`: explicit room/MLS clocks, Endpoint-authorised leaf credentials, succession/self-update, suite-`0x0001` KeyPackage/Welcome/Commit/PrivateMessage/exporter operations, bounded deterministic snapshots, and no-past/no-future/PCS adversarial tests; no home-grown MLS cryptography |
 | `pkg/eventlog` (MLS) | Crash-safe MLS controller and opaque state ledger: commit ancestry, same-epoch ratchet CAS, group/epoch binding, persist-before-output, Welcome replay refusal, and installation-wide one-time KeyPackage consumption |
+| `pkg/mlslab` | Local multi-process OpenFox acceptance: sequential MLS invitations, one private state owner per Agent, opaque Relay carriage, durable exact retry, tamper refusal, and restart-safe encrypted group chat |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
 | `pkg/probe` | M0-R measurement transport: rendezvous coordinator with cold-source filter probing, the UDP and ADNL collectors with their post-establishment phases, and the tunnel relay the proxy-fallback phase measures against |
 | `pkg/evidence` | Deterministic, self-verifying M0 review bundles containing verify logs, dual-arch binaries/build logs, collector manifests, and frozen vectors |
@@ -73,6 +74,7 @@ Commands:
 | `cmd/tos-messengerd` | Runs one installation. See [`docs/RUNNING.md`](docs/RUNNING.md) |
 | `cmd/tos-messenger-owner` | Lists held actions and performs challenge-bound offline-sign/submit owner decisions without placing the private key in the Agent runtime |
 | `cmd/tos-messenger-lab-group` | Runs the owner-private Unix-socket plaintext group carrier used only for OpenFox integration acceptance; see [`docs/OPENFOX_LAB_GROUP.md`](docs/OPENFOX_LAB_GROUP.md) |
+| `cmd/tos-messenger-openfox-mls` | Bootstraps sequential OpenMLS invitations and serves one Agent's private encryption proxy in front of the opaque lab Relay |
 | `cmd/tos-m0-evidence` | Packs and independently verifies the bounded M0 evidence archive |
 | `cmd/tos-vector-report` | Verifies a signed external vector-consumer report against the committed artifacts |
 

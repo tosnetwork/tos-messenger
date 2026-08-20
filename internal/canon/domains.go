@@ -169,6 +169,9 @@ const (
 	DomainLabRoom = "tos.messaging.lab.room.v1\x00"
 	// DomainLabMessage namespaces a local acceptance message identifier.
 	DomainLabMessage = "tos.messaging.lab.message.v1\x00"
+	// DomainOpenFoxMLSAAD binds a local encrypted acceptance message to the
+	// exact room, authenticated sender, and retry-stable client identifier.
+	DomainOpenFoxMLSAAD = "tos.messaging.openfox-mls-message-aad.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -214,6 +217,7 @@ var Domains = []string{
 	DomainLabToken,
 	DomainLabRoom,
 	DomainLabMessage,
+	DomainOpenFoxMLSAAD,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainAdmissionInvite,

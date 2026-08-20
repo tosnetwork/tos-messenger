@@ -116,6 +116,14 @@ validates the randomized wire Commit reference; `Apply` checks it; and
 plaintext. Direct `MLSLedger` methods remain lower-level persistence primitives.
 Relays may deliver these bytes, but Relay order never chooses a commit.
 
+`pkg/mlslab` exercises that boundary end to end without choosing the M0-R
+route: bootstrap performs sequential KeyPackage/Welcome/Commit invitations,
+then three per-Agent proxy processes exchange PrivateMessages through a shared
+Hub whose durable state contains neither plaintext nor private MLS snapshots.
+Exact send retries reuse one persisted ciphertext, modified ciphertext leaves
+receiver state unchanged, and chat continues after every process restarts.
+This is executable local acceptance, not independently operated Relay evidence.
+
 ## Still open — why this remains 🟡
 
 - independent review of the concrete OpenMLS Driver and its snapshot/process
