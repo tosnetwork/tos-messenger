@@ -91,13 +91,35 @@ type Result struct {
 	// keepalive, floored at one second so a session that was measured and died
 	// at once stays distinguishable from a session that was never measured:
 	// zero is the schema's "not measured". Surviving the whole hold window
-	// records the window's full length.
+	// records the window's full length. It is a DIRECT-session measurement
+	// only: the tunneled hold phase reports its booleans below and never this
+	// number, because a relayed session's lifetime would be measuring the
+	// relay.
 	SurvivalSeconds uint64
 	// ReconnectMillis is the initiating side's time from a deliberate channel
 	// drop to the first confirming round trip. The responder leaves it zero;
 	// pair joining takes the max of the two halves, so the pair still carries
 	// one number.
 	ReconnectMillis uint64
+	// The phase-status booleans say which phases ran and how they ended,
+	// because the zero measurements above are ambiguous on their own: a
+	// reconnect that was never asked for and a reconnect that failed both leave
+	// ReconnectMillis at zero. Attempted is set when the phase ran; completed
+	// or succeeded reports what actually happened, so a failed phase is finally
+	// attempted-and-not-completed rather than invisible.
+	HoldAttempted bool
+	// HoldCompleted reports the direct session surviving its FULL hold window;
+	// a session that died mid-window leaves it false while SurvivalSeconds
+	// still records the measured span.
+	HoldCompleted      bool
+	ReconnectAttempted bool
+	ReconnectSucceeded bool
+	// TunnelHoldAttempted and TunnelHoldCompleted are the tunneled session's
+	// hold phase, run when a hold window is configured and the session came up
+	// through the relay. They are the tunnel-survival evidence; SurvivalSeconds
+	// stays direct-only.
+	TunnelHoldAttempted bool
+	TunnelHoldCompleted bool
 	// TunneledEstablish reports that the session came up through the relay
 	// after the direct phase failed. When it is set, Failure keeps the direct
 	// phase's class rather than none, because a proxy-fallback trial is defined

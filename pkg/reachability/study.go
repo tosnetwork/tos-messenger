@@ -27,10 +27,12 @@ import (
 )
 
 const (
-	// TrialSchema is the strict record schema identifier. v2 requires both
-	// endpoints' collector-manifest digests and folds them into the canonical
-	// preimage: this repository is pre-launch, so the break is loud rather than
-	// compatible, and a v1 record simply does not decode.
+	// TrialSchema is the strict record schema identifier. v2 is one loud
+	// pre-launch break carrying two additions: both endpoints'
+	// collector-manifest digests, and the phase-status booleans that make a
+	// failed hold or reconnect distinguishable from one nobody ran. All of it is
+	// folded into the canonical preimage, and a v1 record simply does not
+	// decode.
 	TrialSchema = "tos.messaging.reachability-trial.v2"
 	// PolicySchema is the strict acceptance-policy schema identifier.
 	PolicySchema = "tos.messaging.reachability-policy.v1"
@@ -378,9 +380,35 @@ type Trial struct {
 	EstablishMillis uint64       `json:"establish_millis"`
 	ReconnectMillis uint64       `json:"reconnect_millis,omitempty"`
 	SurvivalSeconds uint64       `json:"survival_seconds,omitempty"`
-	StartedAtUnix   uint64       `json:"started_at_unix"`
-	LocalCommit     string       `json:"local_commit"`
-	PeerCommit      string       `json:"peer_commit"`
+	// The phase-status booleans exist because a zero measurement is ambiguous
+	// on its own: ReconnectMillis == 0 used to mean both "never asked" and
+	// "asked and it failed", and the report's percentiles silently lost the
+	// failures. Attempted says the phase ran; completed or succeeded says what
+	// actually happened. A failed phase is attempted-and-not-completed with its
+	// measurement left at the unmeasured zero, finally distinguishable from a
+	// phase nobody ran.
+	//
+	// HoldAttempted says the direct session's hold phase ran.
+	HoldAttempted bool `json:"hold_attempted,omitempty"`
+	// HoldCompleted says the session survived the FULL configured hold window.
+	// A session that died mid-window is attempted-but-not-completed, and
+	// SurvivalSeconds still records the span it did survive.
+	HoldCompleted bool `json:"hold_completed,omitempty"`
+	// ReconnectAttempted says the deliberate drop-and-redial phase ran.
+	ReconnectAttempted bool `json:"reconnect_attempted,omitempty"`
+	// ReconnectSucceeded says the redial confirmed, exactly when
+	// ReconnectMillis carries the measured latency.
+	ReconnectSucceeded bool `json:"reconnect_succeeded,omitempty"`
+	// TunnelHoldAttempted says the hold phase ran over the tunneled session of
+	// a proxy fallback. The tunnel hold records no SurvivalSeconds -- that
+	// field stays a direct-session measurement -- so these booleans are the
+	// tunnel-survival evidence.
+	TunnelHoldAttempted bool `json:"tunnel_hold_attempted,omitempty"`
+	// TunnelHoldCompleted says the tunneled session survived the full window.
+	TunnelHoldCompleted bool   `json:"tunnel_hold_completed,omitempty"`
+	StartedAtUnix       uint64 `json:"started_at_unix"`
+	LocalCommit         string `json:"local_commit"`
+	PeerCommit          string `json:"peer_commit"`
 	// LocalManifestDigest is the digest of this endpoint's own CollectorManifest.
 	// The commit names a repository revision; the manifest names the build --
 	// which ADNL implementation at which version, compiled by what for what,
@@ -474,6 +502,36 @@ func (t Trial) Validate() error {
 	if t.SurvivalSeconds != 0 && t.Outcome != OutcomeDirect {
 		return errors.New("session survival requires a direct session")
 	}
+	// The phase-status booleans are cross-checked fail-closed, because a record
+	// whose flags and measurements can disagree is a record whose meaning the
+	// reader chooses. Completed or succeeded implies attempted; success and its
+	// measurement imply each other; a completed hold has a measured span; the
+	// direct phases belong to a direct outcome, the tunnel hold to a proxy
+	// fallback; and the udp probe, which has no session, carries none of them.
+	if t.HoldCompleted && !t.HoldAttempted {
+		return errors.New("a completed hold phase must have been attempted")
+	}
+	if t.ReconnectSucceeded && !t.ReconnectAttempted {
+		return errors.New("a successful reconnect must have been attempted")
+	}
+	if t.TunnelHoldCompleted && !t.TunnelHoldAttempted {
+		return errors.New("a completed tunnel hold must have been attempted")
+	}
+	if t.ReconnectSucceeded != (t.ReconnectMillis != 0) {
+		return errors.New("a reconnect success and its measured latency imply each other")
+	}
+	if t.HoldCompleted && t.SurvivalSeconds == 0 {
+		return errors.New("a hold phase that completed its window must carry the measured survival")
+	}
+	if (t.HoldAttempted || t.ReconnectAttempted) && t.Outcome != OutcomeDirect {
+		return errors.New("hold and reconnect phases require a direct session")
+	}
+	if t.TunnelHoldAttempted && t.Outcome != OutcomeProxyFallback {
+		return errors.New("a tunnel hold requires a proxy fallback")
+	}
+	if t.Probe == ProbeUDP && (t.HoldAttempted || t.ReconnectAttempted || t.TunnelHoldAttempted) {
+		return errors.New("the udp probe has no session phases to report")
+	}
 	// Bind observations are bounded and well-shaped before anything is derived
 	// from them. Each coordinator reflects once, so a set with the same
 	// coordinator twice is malformed: it would let a reporter pad the distinct
@@ -536,6 +594,15 @@ func (t Trial) CanonicalBytes() ([]byte, error) {
 	canon.Uint64(buffer, t.EstablishMillis)
 	canon.Uint64(buffer, t.ReconnectMillis)
 	canon.Uint64(buffer, t.SurvivalSeconds)
+	// The phase-status booleans are inside the signed preimage because they are
+	// measurements: a signature that did not cover them would let a failed
+	// reconnect be rewritten into an unattempted one after signing.
+	canon.Bool(buffer, t.HoldAttempted)
+	canon.Bool(buffer, t.HoldCompleted)
+	canon.Bool(buffer, t.ReconnectAttempted)
+	canon.Bool(buffer, t.ReconnectSucceeded)
+	canon.Bool(buffer, t.TunnelHoldAttempted)
+	canon.Bool(buffer, t.TunnelHoldCompleted)
 	canon.Uint64(buffer, t.StartedAtUnix)
 	canon.Text(buffer, t.LocalCommit)
 	canon.Text(buffer, t.PeerCommit)

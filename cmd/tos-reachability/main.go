@@ -106,9 +106,27 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "outcome=%s failure=%s establish_ms=%d survival_s=%d reconnect_ms=%d manifest=%s\n",
+	fmt.Fprintf(os.Stderr, "outcome=%s failure=%s establish_ms=%d survival_s=%d reconnect_ms=%d "+
+		"hold=%s reconnect=%s tunnel_hold=%s manifest=%s\n",
 		trial.Outcome, trial.Failure, trial.EstablishMillis, trial.SurvivalSeconds, trial.ReconnectMillis,
+		phaseStatus(trial.HoldAttempted, trial.HoldCompleted),
+		phaseStatus(trial.ReconnectAttempted, trial.ReconnectSucceeded),
+		phaseStatus(trial.TunnelHoldAttempted, trial.TunnelHoldCompleted),
 		trial.LocalManifestDigest)
+}
+
+// phaseStatus renders one phase's status pair the way the schema means it:
+// not-attempted, attempted-but-failed, or completed. The middle word is the
+// one the summary previously could not say.
+func phaseStatus(attempted, completed bool) string {
+	switch {
+	case !attempted:
+		return "not-attempted"
+	case !completed:
+		return "failed"
+	default:
+		return "completed"
+	}
 }
 
 // writeManifest writes the manifest document the trial's local digest names.
@@ -355,12 +373,23 @@ func executableSHA256() (string, error) {
 // A direct session carries its survival and reconnect measurements. A session
 // established through the relay files as a proxy fallback carrying the
 // failure class of the direct phase it fell back from -- exactly the pairing
-// the schema requires of that outcome -- and never a survival or reconnect,
-// which are direct-session properties. A trial with neither session is a
-// classified failure: this collector cannot claim a Relay or HTTPS fallback
+// the schema requires of that outcome -- and never a survival or reconnect
+// number, which are direct-session properties. A trial with neither session is
+// a classified failure: this collector cannot claim a Relay or HTTPS fallback
 // it never attempted, so the failure keeps its cause, and zeroing the
 // establishment latency is what the schema requires of a failed trial.
+//
+// The phase-status booleans are copied whatever the outcome, because they are
+// the runner's account of which phases ran and how they ended; the schema's
+// cross-rules then refuse any combination the outcome cannot carry, so an
+// impossible pairing fails loudly here rather than being quietly zeroed.
 func classify(trial *reachability.Trial, result probe.Result) error {
+	trial.HoldAttempted = result.HoldAttempted
+	trial.HoldCompleted = result.HoldCompleted
+	trial.ReconnectAttempted = result.ReconnectAttempted
+	trial.ReconnectSucceeded = result.ReconnectSucceeded
+	trial.TunnelHoldAttempted = result.TunnelHoldAttempted
+	trial.TunnelHoldCompleted = result.TunnelHoldCompleted
 	if !result.Established {
 		trial.Outcome = reachability.OutcomeFailed
 		trial.Failure = result.Failure

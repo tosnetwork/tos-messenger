@@ -41,6 +41,17 @@ func Uint32(buffer *bytes.Buffer, value uint32) {
 	buffer.Write(number[:])
 }
 
+// Bool appends one byte, 1 for true and 0 for false. A boolean is committed
+// explicitly rather than omitted when false, because a preimage whose length
+// depends on the value invites two objects to share one encoding.
+func Bool(buffer *bytes.Buffer, value bool) {
+	if value {
+		buffer.WriteByte(1)
+		return
+	}
+	buffer.WriteByte(0)
+}
+
 // Uint64 appends a big-endian 64-bit value.
 func Uint64(buffer *bytes.Buffer, value uint64) {
 	var number [8]byte

@@ -144,12 +144,20 @@ session failed" and "the signalling failed" have to stay distinguishable.
 The collector can measure past establishment. A hold window keeps both ends
 pinging the confirmed session and records how long it survived (a pair counts
 only when both halves measured it), and the initiator can deliberately drop
-its channel state and time the reconnect. When a tunnel relay
+its channel state and time the reconnect. Every phase also records its status
+-- attempted, and completed or succeeded -- because the measurements alone are
+ambiguous at zero: a reconnect the network refused and a reconnect nobody
+asked for both leave the latency unmeasured, and only the status booleans keep
+a failed phase from vanishing into the percentiles. When a tunnel relay
 (`tos-reachability-tunnel`, a double-registration UDP forwarder bound by the
 same amplification rules as the coordinator) is configured and the direct
 phase fails, the collector establishes the same session through the relay and
 the trial files as a proxy fallback carrying the direct phase's failure class
 -- which is what gives the `tunnel-first` route decision evidence to read.
+With a hold window configured the hold phase also runs over the tunneled
+session, reported through its own status booleans; the survival span stays a
+direct-session measurement, because a relayed lifetime would measure the
+relay.
 
 Two honest caveats. Establishment latency includes the rendezvous hand-off
 (the responder's punch burst and gateway rebind), so absolute latencies carry

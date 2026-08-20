@@ -54,6 +54,13 @@ func establishOverLoopback(t *testing.T, host string) {
 		if result.ReconnectMillis != 0 {
 			t.Fatalf("a reconnect was recorded without being requested: %d", result.ReconnectMillis)
 		}
+		// And the phase-status booleans agree: nothing was attempted, so
+		// nothing may claim to have run, let alone completed.
+		if result.HoldAttempted || result.HoldCompleted ||
+			result.ReconnectAttempted || result.ReconnectSucceeded ||
+			result.TunnelHoldAttempted || result.TunnelHoldCompleted {
+			t.Fatalf("an establishment-only run claimed a measurement phase: %+v", result)
+		}
 		// The attestation names this probe, so the trial built from this
 		// result files under adnl and nowhere else.
 		if result.Observation.Probe != string(reachability.ProbeADNL) {
@@ -90,12 +97,57 @@ func TestEndToEndADNLHoldSurvivalAndReconnect(t *testing.T) {
 		if result.SurvivalSeconds != uint64(hold/time.Second) {
 			t.Fatalf("role %s did not survive its full loopback hold window: %d", role, result.SurvivalSeconds)
 		}
+		// The hold phase ran and the loopback session survived its full window,
+		// and the booleans have to say so: they are how a died-mid-window hold
+		// would be told apart from this one.
+		if !result.HoldAttempted || !result.HoldCompleted {
+			t.Fatalf("role %s did not report its hold phase: attempted=%t completed=%t",
+				role, result.HoldAttempted, result.HoldCompleted)
+		}
+		if result.TunnelHoldAttempted || result.TunnelHoldCompleted {
+			t.Fatalf("role %s claimed a tunnel hold on a direct session", role)
+		}
 	}
 	if results[RoleA].ReconnectMillis == 0 {
 		t.Fatal("the initiator measured no reconnect")
 	}
+	if !results[RoleA].ReconnectAttempted || !results[RoleA].ReconnectSucceeded {
+		t.Fatalf("the initiator's reconnect status does not match its measurement: %+v", results[RoleA])
+	}
 	if results[RoleB].ReconnectMillis != 0 {
 		t.Fatalf("the responder invented a reconnect: %d", results[RoleB].ReconnectMillis)
+	}
+	if results[RoleB].ReconnectAttempted || results[RoleB].ReconnectSucceeded {
+		t.Fatal("the responder claimed a reconnect phase it cannot run")
+	}
+}
+
+// A reconnect the network refuses must stay visible: attempted and not
+// succeeded, with the latency left at its unmeasured zero. The failure is
+// forced deterministically by shrinking the reconnect window below any
+// possible round trip, so the deadline expires before a ping can confirm --
+// the same recording path a real refusal takes.
+func TestEndToEndADNLFailedReconnectIsRecorded(t *testing.T) {
+	reconnectWindowForTest = time.Nanosecond
+	defer func() { reconnectWindowForTest = 0 }()
+
+	results := runADNLPair(t, "127.0.0.1", func(role Role, config *Config) {
+		config.HoldWindow = 2 * time.Second
+		config.KeepaliveInterval = 300 * time.Millisecond
+		config.MeasureReconnect = role == RoleA
+	})
+	initiator := results[RoleA]
+	if !initiator.Established || !initiator.HoldCompleted {
+		t.Fatalf("the session never reached the reconnect phase: %+v", initiator)
+	}
+	if !initiator.ReconnectAttempted {
+		t.Fatal("a reconnect that ran and failed was recorded as never attempted")
+	}
+	if initiator.ReconnectSucceeded {
+		t.Fatal("a reconnect that could not complete claimed success")
+	}
+	if initiator.ReconnectMillis != 0 {
+		t.Fatalf("a failed reconnect carried a latency: %d", initiator.ReconnectMillis)
 	}
 }
 

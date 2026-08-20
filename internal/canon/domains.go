@@ -73,12 +73,13 @@ const (
 	DomainDeviceSession = "tos.messaging.device-session.v1\x00"
 	// DomainE2EEBinding namespaces the associated data of a ciphertext.
 	DomainE2EEBinding = "tos.messaging.e2ee-binding.v1\x00"
-	// DomainReachabilityTrial namespaces one measured trial record. v2 folds the
-	// collector-manifest digests of both endpoints into the preimage, so a trial
-	// commits to exactly which collector builds produced each half rather than
-	// only to two repository commits -- a sidecar collector is a different
-	// implementation at the same orchestrator commit, and the commit alone
-	// cannot tell them apart.
+	// DomainReachabilityTrial namespaces one measured trial record. v2 folds in
+	// the collector-manifest digests of both endpoints, so a trial commits to
+	// exactly which collector builds produced each half rather than only to two
+	// repository commits -- a sidecar collector is a different implementation
+	// at the same orchestrator commit, and the commit alone cannot tell them
+	// apart -- and the phase-status booleans, so a failed hold or reconnect
+	// cannot be rewritten into an unattempted one after signing.
 	DomainReachabilityTrial = "tos.messaging.reachability-trial.v2\x00"
 	// DomainReachabilityCollectorManifest namespaces the content-addressed
 	// description of one collector build: orchestrator, ADNL implementation,

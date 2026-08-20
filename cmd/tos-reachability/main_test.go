@@ -134,6 +134,7 @@ func TestADNLTrialEndToEnd(t *testing.T) {
 		results <- outcome{trial: trial, err: err}
 	}()
 	policy := testPolicyWith(coordinatorID)
+	trials := make(map[reachability.Role]reachability.Trial, 2)
 	for index := 0; index < 2; index++ {
 		received := <-results
 		if received.err != nil {
@@ -151,11 +152,34 @@ func TestADNLTrialEndToEnd(t *testing.T) {
 			t.Fatalf("the trial does not verify: %v", err)
 		}
 		// No hold window was requested, so the trial must carry the unmeasured
-		// zeros rather than an invented survival or reconnect.
+		// zeros rather than an invented survival or reconnect, and the
+		// phase-status booleans must say nothing ran.
 		if received.trial.SurvivalSeconds != 0 || received.trial.ReconnectMillis != 0 {
 			t.Fatalf("an establishment-only trial carried measurements: survival=%d reconnect=%d",
 				received.trial.SurvivalSeconds, received.trial.ReconnectMillis)
 		}
+		if received.trial.HoldAttempted || received.trial.HoldCompleted ||
+			received.trial.ReconnectAttempted || received.trial.ReconnectSucceeded ||
+			received.trial.TunnelHoldAttempted || received.trial.TunnelHoldCompleted {
+			t.Fatalf("an establishment-only trial claimed a measurement phase: %+v", received.trial)
+		}
+		if received.trial.LocalManifestDigest == "" || received.trial.PeerManifestDigest == "" {
+			t.Fatalf("the trial did not carry both collector manifests: local=%q peer=%q",
+				received.trial.LocalManifestDigest, received.trial.PeerManifestDigest)
+		}
+		trials[received.trial.Role] = received.trial
+	}
+	// The manifest digests cross exactly as the commits do: what one half
+	// names as its own build is what the other half learned as its peer's.
+	// The two halves ran with different commits here, so the manifests differ
+	// and the crossing is a real check rather than an equality of copies.
+	a, b := trials[reachability.RoleA], trials[reachability.RoleB]
+	if a.LocalManifestDigest != b.PeerManifestDigest || a.PeerManifestDigest != b.LocalManifestDigest {
+		t.Fatalf("the halves disagree about each other's manifests: a=%q/%q b=%q/%q",
+			a.LocalManifestDigest, a.PeerManifestDigest, b.LocalManifestDigest, b.PeerManifestDigest)
+	}
+	if a.LocalManifestDigest == b.LocalManifestDigest {
+		t.Fatal("two builds at different commits produced one manifest digest")
 	}
 }
 
@@ -165,6 +189,8 @@ func TestClassifyOutcomes(t *testing.T) {
 	direct := reachability.Trial{EstablishMillis: 42}
 	if err := classify(&direct, probe.Result{
 		Established: true, SurvivalSeconds: 7, ReconnectMillis: 90,
+		HoldAttempted: true, HoldCompleted: false,
+		ReconnectAttempted: true, ReconnectSucceeded: true,
 	}); err != nil {
 		t.Fatalf("classify direct: %v", err)
 	}
@@ -173,6 +199,28 @@ func TestClassifyOutcomes(t *testing.T) {
 	}
 	if direct.SurvivalSeconds != 7 || direct.ReconnectMillis != 90 {
 		t.Fatal("a direct trial dropped its survival or reconnect measurement")
+	}
+	// The phase statuses travel with the measurements: an attempted-but-died
+	// hold and a successful reconnect stay exactly what the runner reported.
+	if !direct.HoldAttempted || direct.HoldCompleted ||
+		!direct.ReconnectAttempted || !direct.ReconnectSucceeded {
+		t.Fatalf("a direct trial dropped its phase statuses: %+v", direct)
+	}
+
+	// A reconnect that ran and failed is copied as attempted-and-not-succeeded
+	// with its latency at zero: the recording this schema exists to make
+	// possible.
+	failedReconnect := reachability.Trial{EstablishMillis: 42}
+	if err := classify(&failedReconnect, probe.Result{
+		Established: true, SurvivalSeconds: 7,
+		HoldAttempted: true, HoldCompleted: true,
+		ReconnectAttempted: true,
+	}); err != nil {
+		t.Fatalf("classify failed reconnect: %v", err)
+	}
+	if !failedReconnect.ReconnectAttempted || failedReconnect.ReconnectSucceeded ||
+		failedReconnect.ReconnectMillis != 0 {
+		t.Fatalf("a failed reconnect was not recorded honestly: %+v", failedReconnect)
 	}
 
 	failed := reachability.Trial{EstablishMillis: 42}
@@ -189,6 +237,7 @@ func TestClassifyOutcomes(t *testing.T) {
 	tunneled := reachability.Trial{EstablishMillis: 42}
 	if err := classify(&tunneled, probe.Result{
 		Established: true, TunneledEstablish: true, Failure: reachability.FailureHandshake,
+		TunnelHoldAttempted: true, TunnelHoldCompleted: true,
 	}); err != nil {
 		t.Fatalf("classify tunneled: %v", err)
 	}
@@ -200,6 +249,14 @@ func TestClassifyOutcomes(t *testing.T) {
 	}
 	if tunneled.SurvivalSeconds != 0 || tunneled.ReconnectMillis != 0 {
 		t.Fatal("a proxy-fallback trial carried direct-session measurements")
+	}
+	// The tunnel hold's booleans are the tunnel-survival evidence and must
+	// survive classification, with the direct phases staying unclaimed.
+	if !tunneled.TunnelHoldAttempted || !tunneled.TunnelHoldCompleted {
+		t.Fatalf("a proxy-fallback trial dropped its tunnel hold status: %+v", tunneled)
+	}
+	if tunneled.HoldAttempted || tunneled.ReconnectAttempted {
+		t.Fatalf("a proxy-fallback trial claimed direct phases: %+v", tunneled)
 	}
 
 	// A tunneled result without the direct phase's failure class cannot become

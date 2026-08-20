@@ -530,6 +530,24 @@ func trialDuplicateFilteringCoordinatorJSON(t *testing.T) string {
 	return string(document)
 }
 
+// phaseStatusTrialJSON is the baseline trial with its phase-status fields
+// edited after signing and marshalled by hand: the signing path refuses every
+// one of these combinations, so the wire had to be assembled the way an
+// attacker would assemble it, and the decoder must refuse the result on shape.
+func phaseStatusTrialJSON(t *testing.T, mutate func(*reachability.Trial)) string {
+	t.Helper()
+	trial := signedTrial(t, inPolicyCoordinatorKey())
+	mutate(&trial)
+	document, err := json.Marshal(struct {
+		Schema string `json:"schema"`
+		reachability.Trial
+	}{Schema: reachability.TrialSchema, Trial: trial})
+	if err != nil {
+		t.Fatalf("encode trial: %v", err)
+	}
+	return string(document)
+}
+
 // trialMappingContradictsBindJSON is a fully valid, signed trial that declares
 // an endpoint-independent mapping while carrying two predeclared coordinators'
 // reflections of differing external addresses. The signed evidence shows a

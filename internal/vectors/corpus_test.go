@@ -315,6 +315,27 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 		setField(string(validTrialJSON(t)), "peer_collector_manifest_digest", "sha256:abc"),
 		"a truncated manifest digest is not a commitment to any build")
 
+	// The phase-status booleans carry cross-rules, and a record that breaks
+	// them is not weaker evidence about a phase -- it is a record whose meaning
+	// the reader would have to choose.
+	add("reachability-trial/reconnect-success-without-latency", "reachability-trial",
+		phaseStatusTrialJSON(t, func(trial *reachability.Trial) {
+			trial.ReconnectAttempted = true
+			trial.ReconnectSucceeded = true
+		}),
+		"a reconnect success and its measured latency imply each other, so a success without one is a claim without its measurement")
+	add("reachability-trial/hold-completed-without-attempt", "reachability-trial",
+		phaseStatusTrialJSON(t, func(trial *reachability.Trial) {
+			trial.HoldCompleted = true
+			trial.SurvivalSeconds = 30
+		}),
+		"a phase cannot complete without having been attempted")
+	add("reachability-trial/tunnel-hold-on-direct-outcome", "reachability-trial",
+		phaseStatusTrialJSON(t, func(trial *reachability.Trial) {
+			trial.TunnelHoldAttempted = true
+		}),
+		"a tunnel hold belongs to a proxy fallback; on a direct outcome there was no tunneled session to hold")
+
 	sort.Slice(corpus, func(i, j int) bool { return corpus[i].Name < corpus[j].Name })
 	return corpus
 }

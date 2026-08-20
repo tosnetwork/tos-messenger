@@ -296,7 +296,10 @@ func TestTunnelFrameValidation(t *testing.T) {
 // initiator's candidates with an address nothing answers at; both halves must
 // then establish through the relay, mark the establishment as tunneled, and
 // keep the direct phase's failure class -- the exact pairing the trial schema
-// requires of a proxy-fallback outcome.
+// requires of a proxy-fallback outcome. With a hold window configured, the
+// hold phase also runs over the tunneled session: its status booleans are the
+// tunnel-survival evidence, while the survival SPAN stays a direct-session
+// measurement and must keep its unmeasured zero here.
 func TestEndToEndADNLTunnelFallback(t *testing.T) {
 	skipUnderRace(t)
 	relay := testTunnelRelay(t, TunnelRelayOptions{})
@@ -315,6 +318,8 @@ func TestEndToEndADNLTunnelFallback(t *testing.T) {
 	results := runADNLPair(t, "127.0.0.1", func(_ Role, config *Config) {
 		config.PunchTimeout = 3 * time.Second
 		config.TunnelAddr = listener.LocalAddr().String()
+		config.HoldWindow = 2 * time.Second
+		config.KeepaliveInterval = 300 * time.Millisecond
 	})
 	for role, result := range results {
 		if !result.Established {
@@ -329,11 +334,21 @@ func TestEndToEndADNLTunnelFallback(t *testing.T) {
 		if result.EstablishMillis == 0 {
 			t.Fatalf("role %s recorded no tunnel establishment latency", role)
 		}
-		// Survival and reconnect are direct-session measurements; the schema
-		// forbids them off a direct outcome and the tunnel phase never takes
-		// them.
+		// Survival and reconnect numbers are direct-session measurements; the
+		// schema forbids them off a direct outcome and the tunnel phase never
+		// takes them.
 		if result.SurvivalSeconds != 0 || result.ReconnectMillis != 0 {
 			t.Fatalf("role %s measured survival or reconnect over the tunnel", role)
+		}
+		// The direct hold never ran -- there was no direct session to hold --
+		// so its booleans stay false, and the tunnel hold ran to the end of its
+		// window on loopback.
+		if result.HoldAttempted || result.HoldCompleted {
+			t.Fatalf("role %s claimed a direct hold over the tunnel", role)
+		}
+		if !result.TunnelHoldAttempted || !result.TunnelHoldCompleted {
+			t.Fatalf("role %s did not report its tunnel hold: attempted=%t completed=%t",
+				role, result.TunnelHoldAttempted, result.TunnelHoldCompleted)
 		}
 	}
 }

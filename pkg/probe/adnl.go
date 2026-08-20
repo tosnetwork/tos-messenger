@@ -174,9 +174,14 @@ func RunADNL(ctx context.Context, config Config) (Result, error) {
 // session arriving from the relay -- for the same reason as the direct phase:
 // exactly one session must ever exist.
 //
-// Survival and reconnect are never measured here. They are direct-session
-// properties and the trial schema forbids them off a direct outcome; a relay
-// session's lifetime would be measuring the relay, not the path.
+// SurvivalSeconds and reconnect are never measured here. They are
+// direct-session measurements and the trial schema forbids them off a direct
+// outcome; a relay session's lifetime number would be measuring the relay, not
+// the path. What DOES run over the tunneled session, when a hold window is
+// configured, is the hold phase itself: whether a relayed session stays up
+// under keepalives is evidence the tunnel-first route needs, and it is
+// reported through the tunnel-hold status booleans rather than a latency or a
+// span.
 func (r *runner) tunnelEstablish(ctx context.Context, transportKey ed25519.PrivateKey,
 	peerKey ed25519.PublicKey) {
 	directFailure := r.result.Failure
@@ -245,10 +250,35 @@ func (r *runner) tunnelEstablish(ctx context.Context, transportKey ed25519.Priva
 	}
 	r.result.TunneledEstablish = true
 
+	// The hold phase runs over the tunneled session exactly as it runs over a
+	// direct one, but only the booleans are recorded: the span is discarded,
+	// because SurvivalSeconds is a direct-session measurement and a relayed
+	// lifetime would measure the relay.
+	if r.config.HoldWindow > 0 {
+		r.result.TunnelHoldAttempted = true
+		_, alive := r.holdSession(ctx, confirmed)
+		r.result.TunnelHoldCompleted = alive
+	}
+
 	// The same teardown discipline as the direct phase: hold the gateway open
 	// until the peer reports done through the coordinator, so the teardown
-	// bias never lands on the slower side.
-	r.awaitPeerDone(ctx, deadline.Add(doneSignalGrace))
+	// bias never lands on the slower side. The wait is budgeted for the peer's
+	// own tunnel hold, exactly as the direct phase budgets for the peer's
+	// measurement phases.
+	r.awaitPeerDone(ctx, deadline.Add(tunnelMeasurementBudget(r.config)))
+}
+
+// tunnelMeasurementBudget is how long past the shared tunnel deadline the peer
+// may legitimately still be measuring, mirroring measurementBudget for the
+// fallback phase. The peer's tunnel hold starts at its own establishment,
+// which can land as late as the deadline itself, and its last keepalive can
+// still be in flight at the window's edge. There is no reconnect share,
+// because reconnect is a direct-session phase and never runs over the relay.
+func tunnelMeasurementBudget(config Config) time.Duration {
+	if config.HoldWindow <= 0 {
+		return doneSignalGrace
+	}
+	return config.HoldWindow + keepalivePingTimeout + doneSignalGrace
 }
 
 // freshPort strips a configured listen address to its host and a kernel-chosen
@@ -399,7 +429,13 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 	}
 
 	if r.config.HoldWindow > 0 {
-		alive := r.holdSession(ctx, confirmed)
+		r.result.HoldAttempted = true
+		span, alive := r.holdSession(ctx, confirmed)
+		r.result.SurvivalSeconds = span
+		// Completed means the FULL configured window: a session that died
+		// mid-window stays attempted-but-not-completed, with the span it did
+		// survive recorded above.
+		r.result.HoldCompleted = alive
 		// Reconnect is measured only on the initiating side, and only over a
 		// session the hold phase showed was still alive: re-establishing a
 		// session the network had already killed would time the network's
@@ -439,13 +475,17 @@ func measurementBudget(config Config) time.Duration {
 }
 
 // holdSession keeps the confirmed session alive with paced pings until the
-// hold window elapses or the session is judged dead, and records the survival
-// span. It reports whether the session was still alive when the phase ended.
+// hold window elapses or the session is judged dead. It returns the survival
+// span in whole seconds (zero for "not measured") and whether the session was
+// still alive when the phase ended -- alive meaning the FULL window was
+// survived. The caller decides what the span means: the direct phase records
+// it as SurvivalSeconds, while the tunnel phase discards it, because a relayed
+// session's lifetime would be measuring the relay.
 //
 // Both roles run this: a session exists only while both ends have it, and the
 // aggregation takes the shorter half, so a side that did not measure would
 // silently remove its pair from the survival percentile.
-func (r *runner) holdSession(ctx context.Context, peer adnl.Peer) bool {
+func (r *runner) holdSession(ctx context.Context, peer adnl.Peer) (uint64, bool) {
 	holdUntil := r.establishedAt.Add(r.config.HoldWindow)
 	lastAlive := r.establishedAt
 	failures := 0
@@ -456,16 +496,15 @@ func (r *runner) holdSession(ctx context.Context, peer adnl.Peer) bool {
 		case <-ctx.Done():
 			// A torn-down run is tooling, not the network. Recording the span
 			// measured so far would understate sessions that were still alive,
-			// so the field keeps its unmeasured zero.
-			return false
+			// so the span keeps its unmeasured zero.
+			return 0, false
 		case <-ticker.C:
 		}
 		if !time.Now().Before(holdUntil) {
 			// Death is only ever judged at the failure limit, so a window that
 			// ends with fewer misses than the limit counts as survived to its
 			// end: at the keepalive's granularity that is what was observed.
-			r.result.SurvivalSeconds = clampedSeconds(r.config.HoldWindow)
-			return true
+			return clampedSeconds(r.config.HoldWindow), true
 		}
 		attempt, cancel := context.WithTimeout(ctx, keepalivePingTimeout)
 		_, err := peer.Ping(attempt)
@@ -477,8 +516,7 @@ func (r *runner) holdSession(ctx context.Context, peer adnl.Peer) bool {
 		}
 		failures++
 		if failures >= keepaliveDeathLimit {
-			r.result.SurvivalSeconds = clampedSeconds(lastAlive.Sub(r.establishedAt))
-			return false
+			return clampedSeconds(lastAlive.Sub(r.establishedAt)), false
 		}
 	}
 }
@@ -499,15 +537,20 @@ func clampedSeconds(span time.Duration) uint64 {
 // fresh ping round trips -- the same act that defined establishment, so the
 // two latencies are comparable.
 //
-// A reconnect that fails inside its window leaves the field at zero, which
-// the schema reads as "not measured". That is honest but lossy: a failed
-// reconnect is currently indistinguishable from an unmeasured one, because
-// the trial record has no slot for a reconnect failure, and inventing one by
-// changing the trial's direct outcome would misfile a session that was
-// genuinely established and genuinely survived.
+// A reconnect that fails inside its window leaves the latency at zero, which
+// the schema reads as "not measured", and reports itself through the status
+// booleans instead: attempted true, succeeded false. That is what makes a
+// reconnect the network refused distinguishable from one nobody asked for,
+// without misfiling the trial's direct outcome -- the session was genuinely
+// established and genuinely survived; only the redial failed.
 func (r *runner) measureReconnect(ctx context.Context, peer adnl.Peer) {
+	r.result.ReconnectAttempted = true
 	dropped := time.Now()
-	deadline := dropped.Add(r.config.PunchTimeout)
+	window := r.config.PunchTimeout
+	if reconnectWindowForTest > 0 {
+		window = reconnectWindowForTest
+	}
+	deadline := dropped.Add(window)
 	peer.Reinit()
 	failures := 0
 	for time.Now().Before(deadline) {
@@ -523,6 +566,7 @@ func (r *runner) measureReconnect(ctx context.Context, peer adnl.Peer) {
 				elapsed = 1
 			}
 			r.result.ReconnectMillis = uint64(elapsed)
+			r.result.ReconnectSucceeded = true
 			return
 		}
 		failures++
@@ -532,6 +576,13 @@ func (r *runner) measureReconnect(ctx context.Context, peer adnl.Peer) {
 		time.Sleep(200 * time.Millisecond)
 	}
 }
+
+// reconnectWindowForTest lets a test shrink the reconnect window to something
+// no round trip can fit inside, forcing the deadline-expiry path so a failed
+// reconnect's recording can be asserted deterministically on loopback. It is
+// written only by tests, before their runners start, and the production path
+// reads only its zero.
+var reconnectWindowForTest time.Duration
 
 // directPeersForTest lets a test replace the direct phase's candidate set --
 // forcing a deterministic direct failure so the tunnel fallback can be

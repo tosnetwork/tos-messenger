@@ -645,6 +645,93 @@ func TestTrialValidationRejectsIncoherentRecords(t *testing.T) {
 	}
 }
 
+// The phase-status booleans carry their own cross-rules, and every one fails
+// closed: a record whose flags and measurements can disagree is a record whose
+// meaning the reader chooses, which is the ambiguity the booleans exist to
+// remove.
+func TestPhaseStatusCrossRulesFailClosed(t *testing.T) {
+	direct := switchProbe(directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100), ProbeADNL)
+
+	// The honest shapes validate: a hold that completed its window with its
+	// span, a reconnect that succeeded with its latency, and -- the case the
+	// schema previously could not say -- a reconnect that ran and failed,
+	// attempted with everything else at zero.
+	honest := direct
+	honest.HoldAttempted, honest.HoldCompleted = true, true
+	honest.SurvivalSeconds = 30
+	honest.ReconnectAttempted, honest.ReconnectSucceeded = true, true
+	honest.ReconnectMillis = 40
+	if err := honest.Validate(); err != nil {
+		t.Fatalf("an honest measured trial was refused: %v", err)
+	}
+	failedReconnect := direct
+	failedReconnect.HoldAttempted, failedReconnect.HoldCompleted = true, true
+	failedReconnect.SurvivalSeconds = 30
+	failedReconnect.ReconnectAttempted = true
+	if err := failedReconnect.Validate(); err != nil {
+		t.Fatalf("a truthfully recorded failed reconnect was refused: %v", err)
+	}
+	tunneled := fallbackTrial(scenario(CarrierConsumerISP, ClassDesktop), opA,
+		OutcomeProxyFallback, FailureHandshake)
+	tunneled = switchProbe(tunneled, ProbeADNL)
+	tunneled.TunnelHoldAttempted, tunneled.TunnelHoldCompleted = true, true
+	if err := tunneled.Validate(); err != nil {
+		t.Fatalf("an honest tunnel hold was refused: %v", err)
+	}
+
+	cases := map[string]func(*Trial){
+		"hold completed without being attempted": func(t *Trial) {
+			t.HoldCompleted = true
+			t.SurvivalSeconds = 30
+		},
+		"reconnect succeeded without being attempted": func(t *Trial) {
+			t.ReconnectSucceeded = true
+			t.ReconnectMillis = 40
+		},
+		"reconnect succeeded without a latency": func(t *Trial) {
+			t.ReconnectAttempted, t.ReconnectSucceeded = true, true
+		},
+		"reconnect latency without a success": func(t *Trial) {
+			t.ReconnectAttempted = true
+			t.ReconnectMillis = 40
+		},
+		"hold completed without a survival span": func(t *Trial) {
+			t.HoldAttempted, t.HoldCompleted = true, true
+		},
+		"tunnel hold on a direct outcome": func(t *Trial) {
+			t.TunnelHoldAttempted = true
+		},
+		"tunnel hold completed without being attempted": func(t *Trial) {
+			t.Outcome = OutcomeProxyFallback
+			t.Failure = FailureHandshake
+			t.TunnelHoldCompleted = true
+		},
+		"hold on a proxy fallback": func(t *Trial) {
+			t.Outcome = OutcomeProxyFallback
+			t.Failure = FailureHandshake
+			t.HoldAttempted = true
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			trial := direct
+			mutate(&trial)
+			if err := trial.Validate(); err == nil {
+				t.Fatalf("expected %q to be refused", name)
+			}
+		})
+	}
+
+	// The udp probe has no session, so no phase may claim to have run on it,
+	// whatever the outcome says.
+	udp := directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100)
+	udp.HoldAttempted = true
+	udp.SurvivalSeconds = 30
+	if err := udp.Validate(); err == nil {
+		t.Fatal("a udp trial claimed a session phase")
+	}
+}
+
 func TestTrialLogRefusesDuplicatesAndGarbage(t *testing.T) {
 	trial := directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100)
 	encoded, err := EncodeTrialJSON(trial)
