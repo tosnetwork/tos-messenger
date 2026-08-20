@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/internal/canon"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -40,7 +41,11 @@ func (q VerifiedAcceptedQuote) Validate() error {
 	if q.Reference == nil || q.Reference.FinalizedCheckpoint == 0 {
 		return errors.New("verified quote was not read from finalized state")
 	}
-	if q.Network == nil || q.Network.NetworkId == "" {
+	// A network id alone is not identity: the same id can front different genesis
+	// state, so a quote read from finalized state must carry a fully identified
+	// network -- id and both genesis hashes -- for the finalisation-time network
+	// check to compare against.
+	if err := validateNetworkDomain(q.Network); err != nil {
 		return errors.New("verified quote names no network")
 	}
 	if q.FinalizedAtUnix == 0 {
@@ -122,6 +127,25 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 		}
 		return errors.New("the finalized quote does not match what was agreed")
 	}
+	// The finalized quote must have come from the network this negotiation was
+	// bound to. Terms carry a workchain, an account id and code hashes, but the
+	// same tuple can exist on a different TOS network, so matching terms are not
+	// enough; a network id alone is not identity either, so both genesis hashes
+	// must agree too. A quote read from another network is a different commitment
+	// wearing the same terms, and accepting it would move value under a purchase
+	// nobody here made.
+	//
+	// This equality check is the bounded closure. The deeper fix -- folding the
+	// network domain into the canonical digests of the terms, mandate and asset,
+	// so a cross-network replay of identical terms hashes to a different
+	// commitment -- is a wire/digest change left out of scope here; see
+	// docs/OPEN_DECISIONS.md.
+	if !sameNetwork(n.network, quote.Network) {
+		if err := n.settle(StateRejected, "the finalized quote came from another network"); err != nil {
+			return err
+		}
+		return errors.New("the finalized quote came from another network")
+	}
 	// The owner's decision has to still describe this, and the terms have to
 	// still be inside the authority they were agreed under.
 	if n.needsApproval {
@@ -153,6 +177,46 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 		return n.budget.Commit(n.ID)
 	}
 	return nil
+}
+
+// validateNetworkDomain enforces a fully identified TOS network, the way
+// identity validation does: a named id and both genesis hashes carried as bare
+// hex. A network id without its genesis hashes is not an identity -- the same id
+// can front different genesis state -- so the binding a negotiation is checked
+// against must carry all three.
+func validateNetworkDomain(network *nativev1.NetworkDomain) error {
+	if network == nil || network.NetworkId == "" || len(network.NetworkId) > 128 ||
+		!canon.HashPattern.MatchString(network.GenesisRootHash) ||
+		!canon.HashPattern.MatchString(network.GenesisFileHash) {
+		return errors.New("invalid negotiation network domain")
+	}
+	return nil
+}
+
+// sameNetwork reports whether two domains name the same TOS network. Both the
+// id and both genesis hashes must agree: a shared id over different genesis
+// state is a different network.
+func sameNetwork(expected, got *nativev1.NetworkDomain) bool {
+	if expected == nil || got == nil {
+		return false
+	}
+	return expected.NetworkId == got.NetworkId &&
+		expected.GenesisRootHash == got.GenesisRootHash &&
+		expected.GenesisFileHash == got.GenesisFileHash
+}
+
+// cloneNetwork copies the three identifying fields of a network domain, so a
+// stored binding cannot be mutated through the caller's pointer. A nil input
+// clones to nil; validation elsewhere refuses a negotiation with no network.
+func cloneNetwork(network *nativev1.NetworkDomain) *nativev1.NetworkDomain {
+	if network == nil {
+		return nil
+	}
+	return &nativev1.NetworkDomain{
+		NetworkId:       network.NetworkId,
+		GenesisRootHash: network.GenesisRootHash,
+		GenesisFileHash: network.GenesisFileHash,
+	}
 }
 
 // Quote returns the finalized Accepted Quote behind a commitment.

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/ids"
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
 // State is where a negotiation stands.
@@ -52,6 +53,11 @@ type Negotiation struct {
 	onTable       *Terms
 	agreed        *Terms
 	needsApproval bool
+	// network is the TOS network this exchange is bound to. A finalized Accepted
+	// Quote is accepted only if it was read from this network: the same
+	// workchain, account and code hashes can exist on another network, so a
+	// commitment from elsewhere with matching terms is a different purchase.
+	network *nativev1.NetworkDomain
 	// approval is the owner's decision, bound to exactly what they saw. A
 	// boolean would survive a change of terms, and the change a counterparty
 	// makes right after an approval is the one they have the most reason to
@@ -91,7 +97,7 @@ type Approval struct {
 // each inside their own ceiling can agree to more than the owner has, and the
 // shortfall only appears once every yes already exists.
 func New(id, conversationID, counterpartyAgentID string, mandate Mandate,
-	budget *Budget, store Store, now time.Time) (*Negotiation, error) {
+	network *nativev1.NetworkDomain, budget *Budget, store Store, now time.Time) (*Negotiation, error) {
 	if !ids.Conversation.MatchString(conversationID) {
 		return nil, errors.New("invalid conversation identifier")
 	}
@@ -100,6 +106,12 @@ func New(id, conversationID, counterpartyAgentID string, mandate Mandate,
 	}
 	if id == "" || len(id) > 128 {
 		return nil, errors.New("invalid negotiation identifier")
+	}
+	// The network is bound at the start, not inferred at finalisation, so the
+	// exchange knows from the first transition which network a commitment must
+	// have come from.
+	if err := validateNetworkDomain(network); err != nil {
+		return nil, err
 	}
 	if err := mandate.Live(now); err != nil {
 		return nil, err
@@ -112,7 +124,8 @@ func New(id, conversationID, counterpartyAgentID string, mandate Mandate,
 	}
 	instance := &Negotiation{
 		ID: id, ConversationID: conversationID, CounterpartyAgentID: counterpartyAgentID,
-		Mandate: mandate, state: StateDiscussing, budget: budget, store: store,
+		Mandate: mandate, network: cloneNetwork(network), state: StateDiscussing,
+		budget: budget, store: store,
 	}
 	// The first state is written before it is returned. A negotiation that
 	// existed only after its first transition would leave a budget hold behind

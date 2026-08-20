@@ -123,28 +123,28 @@
     "name": "negotiation-snapshot/future-approval",
     "layer": "decode",
     "target": "negotiation-snapshot",
-    "wire": "{\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"state\":\"intent-agreed\",\"generation\":1,\"counteroffers\":0,\"needs_owner_approval\":false,\"owner_approval\":{\"TermsDigest\":\"sha256:4444444444444444444444444444444444444444444444444444444444444444\",\"Generation\":5,\"MandateDigest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"AtUnix\":1800000000}}",
+    "wire": "{\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"network\":{\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"state\":\"intent-agreed\",\"generation\":1,\"counteroffers\":0,\"needs_owner_approval\":false,\"owner_approval\":{\"TermsDigest\":\"sha256:4444444444444444444444444444444444444444444444444444444444444444\",\"Generation\":5,\"MandateDigest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"AtUnix\":1800000000}}",
     "reason": "an approval from a later version of the negotiation than the snapshot is an approval for terms that do not exist"
   },
   {
     "name": "negotiation-snapshot/trailing-json",
     "layer": "decode",
     "target": "negotiation-snapshot",
-    "wire": "{\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"state\":\"discussing\",\"generation\":0,\"counteroffers\":0,\"needs_owner_approval\":false}{\"x\":1}",
+    "wire": "{\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"network\":{\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"state\":\"discussing\",\"generation\":0,\"counteroffers\":0,\"needs_owner_approval\":false}{\"x\":1}",
     "reason": "trailing data lets two byte streams decode to one object"
   },
   {
     "name": "negotiation-snapshot/truncated",
     "layer": "decode",
     "target": "negotiation-snapshot",
-    "wire": "{\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"state\":\"discussing\",\"generation\":0,\"counteroffers\":0,\"needs_owner_approval\":false",
+    "wire": "{\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"network\":{\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"state\":\"discussing\",\"generation\":0,\"counteroffers\":0,\"needs_owner_approval\":false",
     "reason": "a truncated document is not the object it was cut from"
   },
   {
     "name": "negotiation-snapshot/unknown-field",
     "layer": "decode",
     "target": "negotiation-snapshot",
-    "wire": "{\"unknown_field\":1,\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"state\":\"discussing\",\"generation\":0,\"counteroffers\":0,\"needs_owner_approval\":false}",
+    "wire": "{\"unknown_field\":1,\"schema\":\"tos.messaging.negotiation-state.v1\",\"negotiation_id\":\"neg-1\",\"conversation_id\":\"conv_1111111111111111111111111111111111111111111111111111111111111111\",\"counterparty_agent_id\":\"agent_5555555555555555555555555555555555555555555555555555555555555555\",\"mandate_digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"network\":{\"network_id\":\"tos-local\",\"genesis_root_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"genesis_file_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"state\":\"discussing\",\"generation\":0,\"counteroffers\":0,\"needs_owner_approval\":false}",
     "reason": "an unknown field means the sender and receiver disagree about the object's shape"
   },
   {

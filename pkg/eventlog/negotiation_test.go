@@ -11,12 +11,21 @@ import (
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
+func testNetwork() *nativev1.NetworkDomain {
+	return &nativev1.NetworkDomain{
+		NetworkId:       "tos-local",
+		GenesisRootHash: strings.Repeat("a", 64),
+		GenesisFileHash: strings.Repeat("b", 64),
+	}
+}
+
 func testSnapshot(id, state string) negotiation.Snapshot {
 	snapshot := negotiation.Snapshot{
 		Schema: negotiation.SnapshotSchema, ID: id,
 		ConversationID:      "conv_" + strings.Repeat("1", 64),
 		CounterpartyAgentID: "agent_" + strings.Repeat("2", 64),
 		MandateDigest:       "sha256:" + strings.Repeat("3", 64),
+		Network:             testNetwork(),
 		State:               state,
 	}
 	if negotiation.State(state) == negotiation.StateFinalized {
@@ -27,7 +36,7 @@ func testSnapshot(id, state string) negotiation.Snapshot {
 			Commitment:      commitment,
 			Terms:           *approvalTerms(),
 			Reference:       &nativev1.ChainReference{FinalizedCheckpoint: 100},
-			Network:         &nativev1.NetworkDomain{NetworkId: "tos-local"},
+			Network:         testNetwork(),
 			FinalizedAtUnix: 1_800_000_000,
 		}
 	}

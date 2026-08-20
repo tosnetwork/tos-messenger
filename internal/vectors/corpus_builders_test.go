@@ -134,6 +134,7 @@ func validSnapshot() negotiation.Snapshot {
 		ConversationID:      convoID,
 		CounterpartyAgentID: "agent_" + strings.Repeat("5", 64),
 		MandateDigest:       "sha256:" + strings.Repeat("3", 64),
+		Network:             testNetwork(),
 		State:               string(negotiation.StateDiscussing),
 	}
 }

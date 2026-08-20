@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
 // SnapshotSchema is the strict schema of a persisted negotiation.
@@ -32,6 +34,11 @@ type Snapshot struct {
 	ConversationID      string `json:"conversation_id"`
 	CounterpartyAgentID string `json:"counterparty_agent_id"`
 	MandateDigest       string `json:"mandate_digest"`
+	// Network is the TOS network the exchange is bound to. It survives a restart
+	// so a restored negotiation keeps checking a finalized quote against the
+	// network it expected, rather than losing the binding and accepting a quote
+	// from anywhere.
+	Network *nativev1.NetworkDomain `json:"network"`
 
 	State         string `json:"state"`
 	Generation    uint64 `json:"generation"`
@@ -64,7 +71,8 @@ func (n *Negotiation) Snapshot() (Snapshot, error) {
 	snapshot := Snapshot{
 		Schema: SnapshotSchema, ID: n.ID, ConversationID: n.ConversationID,
 		CounterpartyAgentID: n.CounterpartyAgentID, MandateDigest: mandateDigest,
-		State: string(n.state), Generation: n.generation, Counteroffers: n.counteroffers,
+		Network: cloneNetwork(n.network),
+		State:   string(n.state), Generation: n.generation, Counteroffers: n.counteroffers,
 		NeedsApproval: n.needsApproval, Commitment: n.commitment, Failure: n.failure,
 	}
 	if n.onTable != nil {
@@ -112,7 +120,8 @@ func Restore(snapshot Snapshot, mandate Mandate, budget *Budget, store Store) (*
 	instance := &Negotiation{
 		ID: snapshot.ID, ConversationID: snapshot.ConversationID,
 		CounterpartyAgentID: snapshot.CounterpartyAgentID, Mandate: mandate,
-		state: State(snapshot.State), generation: snapshot.Generation,
+		network: cloneNetwork(snapshot.Network),
+		state:   State(snapshot.State), generation: snapshot.Generation,
 		counteroffers: snapshot.Counteroffers, needsApproval: snapshot.NeedsApproval,
 		commitment: snapshot.Commitment, failure: snapshot.Failure,
 		budget: budget, store: store,
@@ -155,6 +164,12 @@ func (s Snapshot) Validate() error {
 	}
 	if s.MandateDigest == "" {
 		return errors.New("snapshot names no mandate")
+	}
+	// A snapshot must carry the network its exchange is bound to, fully
+	// identified, or a restored negotiation would lose the binding and accept a
+	// finalized quote from any network.
+	if err := validateNetworkDomain(s.Network); err != nil {
+		return errors.New("snapshot names no network")
 	}
 	if s.OnTable != nil {
 		if err := s.OnTable.Validate(); err != nil {

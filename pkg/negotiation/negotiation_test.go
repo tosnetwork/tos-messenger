@@ -34,6 +34,17 @@ func usdt(atomic string) Money {
 	return Money{Asset: testAsset(), Atomic: atomic}
 }
 
+// testNetwork is a fully identified TOS network: a named id and both genesis
+// hashes. A network id alone is not identity, so the binding a negotiation is
+// checked against carries all three.
+func testNetwork() *nativev1.NetworkDomain {
+	return &nativev1.NetworkDomain{
+		NetworkId:       "tos-local",
+		GenesisRootHash: strings.Repeat("a", 64),
+		GenesisFileHash: strings.Repeat("b", 64),
+	}
+}
+
 func testMandate() Mandate {
 	return Mandate{
 		Objective:        "audit one smart contract",
@@ -123,7 +134,7 @@ func finalizedQuote(agreed Terms) VerifiedAcceptedQuote {
 			ContractCodeHash:    "tvm-cell-sha256:" + strings.Repeat("f", 64),
 			FinalizedCheckpoint: 100,
 		},
-		Network:         &nativev1.NetworkDomain{NetworkId: "tos-local"},
+		Network:         testNetwork(),
 		FinalizedAtUnix: baseUnix + 10,
 	}
 }
@@ -189,7 +200,7 @@ func at(offset uint64) time.Time { return time.Unix(int64(baseUnix+offset), 0) }
 
 func start(t *testing.T, budget *Budget) *Negotiation {
 	t.Helper()
-	instance, err := New("neg-1", conversation, counterparty, testMandate(), budget, &memoryStore{}, at(0))
+	instance, err := New("neg-1", conversation, counterparty, testMandate(), testNetwork(), budget, &memoryStore{}, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -403,6 +414,52 @@ func TestFinalizeRejectsAForeignAsset(t *testing.T) {
 	}
 }
 
+// A finalized quote read from a different TOS network is not the agreement,
+// even when every term matches. The same workchain, account and code hashes can
+// exist on another network, so terms that match are not enough; a network id
+// alone is not identity either, so a shared id over different genesis state is
+// also another network. Value must not move under a commitment from elsewhere.
+func TestFinalizeRejectsAForeignNetwork(t *testing.T) {
+	otherID := testNetwork()
+	otherID.NetworkId = "tos-somewhere-else"
+
+	otherGenesis := testNetwork()
+	otherGenesis.GenesisRootHash = strings.Repeat("9", 64)
+
+	for name, network := range map[string]*nativev1.NetworkDomain{
+		"another network id":   otherID,
+		"another genesis root": otherGenesis,
+	} {
+		t.Run(name, func(t *testing.T) {
+			instance := start(t, testBudget(t, "1000000000"))
+			if err := instance.ReceiveProposal(terms("50000000"), at(1)); err != nil {
+				t.Fatalf("proposal: %v", err)
+			}
+			if err := instance.AcceptIntent(at(2)); err != nil {
+				t.Fatalf("accept: %v", err)
+			}
+			if err := instance.BeginCanonicalization(at(3)); err != nil {
+				t.Fatalf("canonicalise: %v", err)
+			}
+
+			foreign := finalizedQuote(terms("50000000"))
+			foreign.Network = network
+			if err := instance.Finalize(stubResolver{quote: foreign, found: true}, commitment, at(4)); err == nil {
+				t.Fatal("a quote from another network was accepted")
+			}
+			if instance.State() != StateRejected {
+				t.Fatalf("a foreign-network quote left state %q", instance.State())
+			}
+			if instance.ActiveAgreement() {
+				t.Fatal("a rejected finalisation reported an active agreement")
+			}
+			if _, committed := instance.Committed(); committed {
+				t.Fatal("a quote from another network was reported as committed")
+			}
+		})
+	}
+}
+
 // A resolver that cannot read finalized state has not said the quote is absent
 // or wrong; it has said nothing. The negotiation stays where it was, to be
 // retried, rather than being rejected for the chain's unavailability -- a
@@ -507,7 +564,7 @@ func proposalMandate() Mandate {
 func TestProposalAuthorityCannotCommit(t *testing.T) {
 	// A proposal mandate is created with no budget: New demands a budget only of
 	// a committing mandate, which is the budgetless path the review flagged.
-	instance, err := New("neg-propose", conversation, counterparty, proposalMandate(), nil, &memoryStore{}, at(0))
+	instance, err := New("neg-propose", conversation, counterparty, proposalMandate(), testNetwork(), nil, &memoryStore{}, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -581,7 +638,7 @@ func (p *poisonStore) Save(Snapshot) error {
 // until it is reloaded, rather than acting on a transition the disk never took.
 func TestFailedWritePoisonsTheNegotiation(t *testing.T) {
 	store := &poisonStore{allow: 1} // the New() write succeeds; the next fails.
-	instance, err := New("neg-poison", conversation, counterparty, testMandate(), testBudget(t, "1000000000"), store, at(0))
+	instance, err := New("neg-poison", conversation, counterparty, testMandate(), testNetwork(), testBudget(t, "1000000000"), store, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -644,6 +701,11 @@ func TestFinalizedQuoteSurvivesRestart(t *testing.T) {
 	}
 	if quote.Commitment != commitment {
 		t.Fatalf("the restored quote names another commitment: %q", quote.Commitment)
+	}
+	// The expected network binding survives too: the restored negotiation still
+	// refuses a quote from another network rather than losing the binding.
+	if decoded.Network == nil || !sameNetwork(decoded.Network, testNetwork()) {
+		t.Fatalf("the expected network did not survive the restart: %+v", decoded.Network)
 	}
 }
 
@@ -796,11 +858,11 @@ func TestConcurrentNegotiationsShareOneBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("budget: %v", err)
 	}
-	first, err := New("neg-1", conversation, counterparty, testMandate(), budget, &memoryStore{}, at(0))
+	first, err := New("neg-1", conversation, counterparty, testMandate(), testNetwork(), budget, &memoryStore{}, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	second, err := New("neg-2", conversation, counterparty, testMandate(), budget, &memoryStore{}, at(0))
+	second, err := New("neg-2", conversation, counterparty, testMandate(), testNetwork(), budget, &memoryStore{}, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -838,7 +900,7 @@ func TestBudgetCommitsOnlyWhatWasHeld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("budget: %v", err)
 	}
-	instance, err := New("neg-1", conversation, counterparty, testMandate(), budget, &memoryStore{}, at(0))
+	instance, err := New("neg-1", conversation, counterparty, testMandate(), testNetwork(), budget, &memoryStore{}, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -1005,18 +1067,18 @@ func TestAssetsAreIdentifiedByContract(t *testing.T) {
 
 func TestNegotiationRefusesUnusableInput(t *testing.T) {
 	mandate := testMandate()
-	if _, err := New("", conversation, counterparty, mandate, nil, &memoryStore{}, at(0)); err == nil {
+	if _, err := New("", conversation, counterparty, mandate, testNetwork(), nil, &memoryStore{}, at(0)); err == nil {
 		t.Fatal("a negotiation without an identifier was started")
 	}
-	if _, err := New("neg-1", "conv_bad", counterparty, mandate, nil, &memoryStore{}, at(0)); err == nil {
+	if _, err := New("neg-1", "conv_bad", counterparty, mandate, testNetwork(), nil, &memoryStore{}, at(0)); err == nil {
 		t.Fatal("an invalid conversation was accepted")
 	}
-	if _, err := New("neg-1", conversation, "agent_bad", mandate, nil, &memoryStore{}, at(0)); err == nil {
+	if _, err := New("neg-1", conversation, "agent_bad", mandate, testNetwork(), nil, &memoryStore{}, at(0)); err == nil {
 		t.Fatal("an invalid counterparty was accepted")
 	}
 	expired := mandate
 	expired.ExpiresAtUnix = baseUnix
-	if _, err := New("neg-1", conversation, counterparty, expired, nil, &memoryStore{}, at(0)); err == nil {
+	if _, err := New("neg-1", conversation, counterparty, expired, testNetwork(), nil, &memoryStore{}, at(0)); err == nil {
 		t.Fatal("a negotiation started under an expired mandate")
 	}
 }
@@ -1145,12 +1207,12 @@ func TestFinalizeNeedsAQuoteThatExists(t *testing.T) {
 
 // A mandate that may commit needs somewhere to commit against.
 func TestCommitAuthorityNeedsABudget(t *testing.T) {
-	if _, err := New("neg-1", conversation, counterparty, testMandate(), nil, &memoryStore{}, at(0)); err == nil {
+	if _, err := New("neg-1", conversation, counterparty, testMandate(), testNetwork(), nil, &memoryStore{}, at(0)); err == nil {
 		t.Fatal("a commit mandate was started with no budget")
 	}
 	converse := testMandate()
 	converse.Authority = AuthorityConverse
-	if _, err := New("neg-1", conversation, counterparty, converse, nil, &memoryStore{}, at(0)); err != nil {
+	if _, err := New("neg-1", conversation, counterparty, converse, testNetwork(), nil, &memoryStore{}, at(0)); err != nil {
 		t.Fatalf("a conversation mandate needed a budget: %v", err)
 	}
 }
@@ -1214,7 +1276,7 @@ func TestNegotiationSurvivesARestart(t *testing.T) {
 		t.Fatalf("budget: %v", err)
 	}
 	store := &memoryStore{}
-	instance, err := New("neg-1", conversation, counterparty, testMandate(), budget, store, at(0))
+	instance, err := New("neg-1", conversation, counterparty, testMandate(), testNetwork(), budget, store, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -1264,7 +1326,7 @@ func TestNegotiationSurvivesARestart(t *testing.T) {
 // under an authority that was withdrawn or replaced.
 func TestRestoreRefusesAMandateThatMoved(t *testing.T) {
 	store := &memoryStore{}
-	instance, err := New("neg-1", conversation, counterparty, testMandate(),
+	instance, err := New("neg-1", conversation, counterparty, testMandate(), testNetwork(),
 		testBudget(t, "1000000000"), store, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -1290,7 +1352,7 @@ func TestRestoreRefusesAMandateThatMoved(t *testing.T) {
 // rather than half-understood.
 func TestSnapshotsAreStrict(t *testing.T) {
 	store := &memoryStore{}
-	if _, err := New("neg-1", conversation, counterparty, testMandate(),
+	if _, err := New("neg-1", conversation, counterparty, testMandate(), testNetwork(),
 		testBudget(t, "1000000000"), store, at(0)); err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -1312,6 +1374,10 @@ func TestSnapshotsAreStrict(t *testing.T) {
 		"unknown state":  func(s *Snapshot) { s.State = "haggling" },
 		"no negotiation": func(s *Snapshot) { s.ID = "" },
 		"no mandate":     func(s *Snapshot) { s.MandateDigest = "" },
+		"no network":     func(s *Snapshot) { s.Network = nil },
+		"partial network": func(s *Snapshot) {
+			s.Network = &nativev1.NetworkDomain{NetworkId: "tos-local"}
+		},
 		"finalized with no commitment": func(s *Snapshot) {
 			s.State = string(StateFinalized)
 			s.Commitment = ""
@@ -1335,7 +1401,7 @@ func TestSnapshotsAreStrict(t *testing.T) {
 // believes it is on the table.
 func TestEveryTransitionIsWrittenDown(t *testing.T) {
 	store := &memoryStore{}
-	instance, err := New("neg-1", conversation, counterparty, testMandate(),
+	instance, err := New("neg-1", conversation, counterparty, testMandate(), testNetwork(),
 		testBudget(t, "1000000000"), store, at(0))
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -1367,7 +1433,7 @@ func TestEveryTransitionIsWrittenDown(t *testing.T) {
 // end up holding a state the disk has never heard of.
 func TestAFailedWriteIsAFailedTransition(t *testing.T) {
 	store := &failingStore{}
-	if _, err := New("neg-1", conversation, counterparty, testMandate(),
+	if _, err := New("neg-1", conversation, counterparty, testMandate(), testNetwork(),
 		testBudget(t, "1000000000"), store, at(0)); err == nil {
 		t.Fatal("a negotiation started with nowhere to live")
 	}
