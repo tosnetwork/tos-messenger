@@ -185,6 +185,31 @@ func TestClassifyOutcomes(t *testing.T) {
 	if failed.EstablishMillis != 0 {
 		t.Fatal("a failed trial kept an establishment latency")
 	}
+
+	tunneled := reachability.Trial{EstablishMillis: 42}
+	if err := classify(&tunneled, probe.Result{
+		Established: true, TunneledEstablish: true, Failure: reachability.FailureHandshake,
+	}); err != nil {
+		t.Fatalf("classify tunneled: %v", err)
+	}
+	if tunneled.Outcome != reachability.OutcomeProxyFallback || tunneled.Failure != reachability.FailureHandshake {
+		t.Fatalf("tunneled misclassified: %q/%q", tunneled.Outcome, tunneled.Failure)
+	}
+	if tunneled.EstablishMillis != 42 {
+		t.Fatal("a proxy-fallback trial lost its tunnel establishment latency")
+	}
+	if tunneled.SurvivalSeconds != 0 || tunneled.ReconnectMillis != 0 {
+		t.Fatal("a proxy-fallback trial carried direct-session measurements")
+	}
+
+	// A tunneled result without the direct phase's failure class cannot become
+	// a valid proxy-fallback trial, so it is refused rather than signed.
+	inconsistent := reachability.Trial{}
+	if err := classify(&inconsistent, probe.Result{
+		Established: true, TunneledEstablish: true, Failure: reachability.FailureNone,
+	}); err == nil {
+		t.Fatal("a tunneled result without a direct failure class was accepted")
+	}
 }
 
 // startCoordinator serves a probe coordinator on loopback and returns its

@@ -56,7 +56,13 @@ type Config struct {
 	// requires a hold window: a reconnect measured against a session that was
 	// never shown to still be alive would time an unknown baseline.
 	MeasureReconnect bool
-	Commit           string
+	// TunnelAddr names the relay the fallback phase registers with when the
+	// direct phase ends without a session. Empty disables the fallback, which
+	// is the default: a study cell that never attempts the tunnel is different
+	// evidence from one where the tunnel also failed, and the operator chooses
+	// which is being collected.
+	TunnelAddr string
+	Commit     string
 	// EndpointKeyHex is the public key this endpoint will sign its trial with.
 	// It is presented to the coordinator so the attestation names a party, not
 	// only a session.
@@ -84,9 +90,15 @@ type Result struct {
 	// pair joining takes the max of the two halves, so the pair still carries
 	// one number.
 	ReconnectMillis uint64
-	PeerAddress     netip.AddrPort
-	Failure         reachability.FailureClass
-	PeerCommit      string
+	// TunneledEstablish reports that the session came up through the relay
+	// after the direct phase failed. When it is set, Failure keeps the direct
+	// phase's class rather than none, because a proxy-fallback trial is defined
+	// by what it fell back from, and EstablishMillis counts from the start of
+	// the tunnel phase.
+	TunneledEstablish bool
+	PeerAddress       netip.AddrPort
+	Failure           reachability.FailureClass
+	PeerCommit        string
 	// PeerTransportKey is the key the peer will run its measured transport
 	// under, learned during pairing.
 	PeerTransportKey string
@@ -272,10 +284,16 @@ func validateConfig(config *Config) error {
 	if config.MeasureReconnect && config.HoldWindow == 0 {
 		return errors.New("reconnect measurement requires a hold window")
 	}
-	// The datagram probe has no session to hold or reconnect. Ignoring the
-	// request would record "not measured" for something the operator asked to
-	// measure, so it is refused instead.
-	if config.Probe == reachability.ProbeUDP && (config.HoldWindow > 0 || config.MeasureReconnect) {
+	if config.TunnelAddr != "" {
+		if _, err := net.ResolveUDPAddr("udp", config.TunnelAddr); err != nil {
+			return errors.New("invalid tunnel relay address")
+		}
+	}
+	// The datagram probe has no session to hold, reconnect, or tunnel.
+	// Ignoring the request would record "not measured" for something the
+	// operator asked to measure, so it is refused instead.
+	if config.Probe == reachability.ProbeUDP &&
+		(config.HoldWindow > 0 || config.MeasureReconnect || config.TunnelAddr != "") {
 		return errors.New("the udp probe measures datagram establishment only")
 	}
 	if config.Commit != "" && !commitPattern.MatchString(config.Commit) {

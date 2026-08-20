@@ -306,6 +306,17 @@ func TestConfigRefusesUnusableMeasurementWindows(t *testing.T) {
 	if _, err := Run(ctx, wrongProbe); err == nil {
 		t.Fatal("the udp probe accepted a hold window it cannot measure")
 	}
+	badTunnel := base
+	badTunnel.TunnelAddr = "not an address"
+	if _, err := RunADNL(ctx, badTunnel); err == nil {
+		t.Fatal("an unresolvable tunnel relay address was accepted")
+	}
+	udpTunnel := base
+	udpTunnel.Probe = reachability.ProbeUDP
+	udpTunnel.TunnelAddr = "127.0.0.1:9"
+	if _, err := Run(ctx, udpTunnel); err == nil {
+		t.Fatal("the udp probe accepted a tunnel it cannot measure")
+	}
 }
 
 // skipUnderRace names the reason once. The Makefile's verify target runs these

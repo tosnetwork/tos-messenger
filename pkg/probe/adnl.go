@@ -60,6 +60,13 @@ type arrival struct {
 // with paced pings and record how long it survived, and the initiator can
 // additionally drop its channel state on purpose and time the reconnect.
 //
+// When a tunnel relay is configured and the direct phase ends without a
+// session, a fallback phase establishes the same ADNL session through the
+// relay instead. That is what gives the study's tunnel-first route a
+// collection path: without it, "direct failed" and "direct failed but a
+// tunnel works" would be indistinguishable, and the route decision needs the
+// difference.
+//
 // The flow reuses the coordinator rendezvous, then hands the socket's port to
 // a real ADNL gateway. The roles are deliberately asymmetric from there, and
 // the asymmetry is the design: if both sides dialled, their handshakes would
@@ -142,7 +149,118 @@ func RunADNL(ctx context.Context, config Config) (Result, error) {
 	}
 
 	instance.establishADNL(ctx, transportPrivate, ed25519.PublicKey(peerKey), local, peers)
+
+	// The tunnel is a fallback, never a second chance for a session that
+	// already exists: it runs only when the direct phase ended without one.
+	// The failure class the direct phase produced is what the resulting trial
+	// keeps either way, because a proxy-fallback outcome is defined by what it
+	// fell back from.
+	if !instance.result.Established && config.TunnelAddr != "" && ctx.Err() == nil {
+		instance.tunnelEstablish(ctx, transportPrivate, ed25519.PublicKey(peerKey))
+	}
 	return instance.result, nil
+}
+
+// tunnelEstablish runs the fallback phase through the relay, inside its own
+// bounded window.
+//
+// The phase gets a fresh socket rather than the rendezvous port: the peer's
+// NAT mapping toward this endpoint no longer matters, because both sides now
+// speak only to the relay, at whatever tuple each proved it can receive at
+// during registration. The registration runs over exactly the socket the
+// gateway then takes over, so the tuple the relay learned is the tuple the
+// session's packets use. The role asymmetry is kept -- the initiator dials the
+// relay's address as its sole candidate, the responder awaits the inbound
+// session arriving from the relay -- for the same reason as the direct phase:
+// exactly one session must ever exist.
+//
+// Survival and reconnect are never measured here. They are direct-session
+// properties and the trial schema forbids them off a direct outcome; a relay
+// session's lifetime would be measuring the relay, not the path.
+func (r *runner) tunnelEstablish(ctx context.Context, transportKey ed25519.PrivateKey,
+	peerKey ed25519.PublicKey) {
+	directFailure := r.result.Failure
+	if directFailure == reachability.FailureNone {
+		// A fallback with nothing to fall back from would produce a trial the
+		// schema rightly refuses.
+		return
+	}
+	started := time.Now()
+	deadline := started.Add(r.config.PunchTimeout)
+
+	connection, err := net.ListenPacket("udp", freshPort(r.config.ListenAddr))
+	if err != nil {
+		return
+	}
+	relayAddr, err := registerWithTunnel(ctx, connection, r.config.TunnelAddr,
+		r.config.SessionID, r.config.Role, deadline)
+	if err != nil {
+		_ = connection.Close()
+		return
+	}
+	local, ok := connection.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		_ = connection.Close()
+		return
+	}
+	if err := connection.Close(); err != nil {
+		return
+	}
+	bind, err := wildcardBind(local)
+	if err != nil {
+		return
+	}
+
+	gateway := adnl.NewGateway(transportKey)
+	// The relay's address is the one place the peer can reach this endpoint,
+	// so it is the only address worth advertising. The ADNL address list is
+	// IPv4-only on the wire, so an IPv6 relay simply goes unadvertised;
+	// establishment turns on the explicit dial and the answered packet source,
+	// not on the list.
+	if ip := relayAddr.Addr().Unmap(); ip.Is4() {
+		gateway.SetAddressList([]*address.UDP{{IP: ip.AsSlice(), Port: int32(relayAddr.Port())}})
+	}
+	established := make(chan arrival, 4)
+	gateway.SetConnectionHandler(confirmInbound(ctx, deadline, established))
+	if err := gateway.StartServer(bind); err != nil {
+		return
+	}
+	defer gateway.Close()
+
+	var confirmed adnl.Peer
+	if r.config.Role == RoleA {
+		confirmed = r.dial(ctx, gateway, peerKey, []netip.AddrPort{relayAddr}, established, started, deadline)
+	} else {
+		confirmed = r.awaitInbound(ctx, established, started, deadline)
+	}
+	// Whatever the loops above wrote, the failure class stays the direct
+	// phase's: a successful fallback files as proxy fallback carrying what it
+	// fell back from, and a failed fallback leaves the trial failed for the
+	// reason the direct path failed -- the schema has no slot for the tunnel's
+	// own failure, and inventing one here would grow the study's vocabulary
+	// from inside a collector.
+	r.result.Failure = directFailure
+	if confirmed == nil {
+		return
+	}
+	r.result.TunneledEstablish = true
+
+	// The same teardown discipline as the direct phase: hold the gateway open
+	// until the peer reports done through the coordinator, so the teardown
+	// bias never lands on the slower side.
+	r.awaitPeerDone(ctx, deadline.Add(doneSignalGrace))
+}
+
+// freshPort strips a configured listen address to its host and a kernel-chosen
+// port. The rendezvous port stayed with the direct phase; the relay learns
+// whatever tuple the registration arrives from, so the tunnel phase needs no
+// particular one.
+func freshPort(listen string) string {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return ":0"
+	}
+	return net.JoinHostPort(host, "0")
 }
 
 // punchBurst opens this side's NAT mapping toward every candidate.
@@ -253,39 +371,16 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 	started := time.Now()
 	deadline := started.Add(r.config.PunchTimeout)
 	established := make(chan arrival, 4)
-	// The inbound path: the responder's only path, the initiator's safety
-	// net. The confirming ping is retried, because losing the measurement to
-	// one dropped packet would understate the path.
-	gateway.SetConnectionHandler(func(client adnl.Peer) error {
-		go func() {
-			for time.Now().Before(deadline) {
-				attempt, cancel := context.WithTimeout(ctx, 2*time.Second)
-				_, err := client.Ping(attempt)
-				cancel()
-				if err != nil {
-					if ctx.Err() != nil {
-						return
-					}
-					time.Sleep(200 * time.Millisecond)
-					continue
-				}
-				if addr, parseErr := netip.ParseAddrPort(client.RemoteAddr()); parseErr == nil {
-					select {
-					case established <- arrival{addr: addr, peer: client}:
-					default:
-					}
-				}
-				return
-			}
-		}()
-		return nil
-	})
+	gateway.SetConnectionHandler(confirmInbound(ctx, deadline, established))
 	if err := gateway.StartServer(bind); err != nil {
 		r.result.Failure = reachability.FailureInternal
 		return
 	}
 	defer gateway.Close()
 
+	if directPeersForTest != nil {
+		peers = directPeersForTest(peers)
+	}
 	if len(peers) == 0 {
 		r.result.Failure = reachability.FailureNoCandidate
 		return
@@ -434,6 +529,45 @@ func (r *runner) measureReconnect(ctx context.Context, peer adnl.Peer) {
 			peer.Reinit()
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// directPeersForTest lets a test replace the direct phase's candidate set --
+// forcing a deterministic direct failure so the tunnel fallback can be
+// exercised on loopback -- without the production path reading anything but
+// nil. It is written only by tests, before their runners start, and never by
+// production code.
+var directPeersForTest func([]netip.AddrPort) []netip.AddrPort
+
+// confirmInbound is the gateway connection handler every phase shares: the
+// responder's only path, the initiator's safety net. A completed ping round
+// trip over the inbound session is what establishment means, and it is
+// retried because losing the measurement to one dropped packet would
+// understate the path.
+func confirmInbound(ctx context.Context, deadline time.Time, established chan<- arrival) func(adnl.Peer) error {
+	return func(client adnl.Peer) error {
+		go func() {
+			for time.Now().Before(deadline) {
+				attempt, cancel := context.WithTimeout(ctx, keepalivePingTimeout)
+				_, err := client.Ping(attempt)
+				cancel()
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					time.Sleep(200 * time.Millisecond)
+					continue
+				}
+				if addr, parseErr := netip.ParseAddrPort(client.RemoteAddr()); parseErr == nil {
+					select {
+					case established <- arrival{addr: addr, peer: client}:
+					default:
+					}
+				}
+				return
+			}
+		}()
+		return nil
 	}
 }
 

@@ -56,6 +56,7 @@ func main() {
 	flag.DurationVar(&phases.hold, "hold", 0, "how long past establishment to keep the adnl session alive and measure survival, 0 for establishment only")
 	flag.DurationVar(&phases.keepalive, "keepalive", 0, "keepalive ping interval of the hold phase, defaulted when 0")
 	flag.BoolVar(&phases.reconnect, "reconnect", false, "deliberately drop and re-establish the session after the hold phase (initiator only, requires -hold)")
+	flag.StringVar(&phases.tunnel, "tunnel", "", "tunnel relay address for the fallback phase after a failed direct attempt, empty for none")
 
 	var labels declared
 	flag.StringVar(&labels.operator, "operator", "", "operator name, hashed into an opaque identifier")
@@ -86,14 +87,15 @@ func main() {
 		trial.Outcome, trial.Failure, trial.EstablishMillis, trial.SurvivalSeconds, trial.ReconnectMillis)
 }
 
-// sessionPhases carries the measurement phases that run after establishment.
-// They are collected in one place because they travel together: reconnect
-// requires a hold window, and both are refused for the udp probe, which has no
-// session to hold.
+// sessionPhases carries the measurement phases that run beyond the direct
+// establishment attempt. They are collected in one place because they travel
+// together: reconnect requires a hold window, and all of them are refused for
+// the udp probe, which has no session to hold, reconnect, or tunnel.
 type sessionPhases struct {
 	hold      time.Duration
 	keepalive time.Duration
 	reconnect bool
+	tunnel    string
 }
 
 func measure(ctx context.Context, coordinators, session, role, listen, commit, identity string,
@@ -143,6 +145,7 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		HoldWindow:        phases.hold,
 		KeepaliveInterval: phases.keepalive,
 		MeasureReconnect:  phases.reconnect,
+		TunnelAddr:        phases.tunnel,
 		Commit:            commit,
 		EndpointKeyHex:    endpointPublicHex,
 		Probe:             probeKind,
@@ -222,16 +225,27 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 // classify translates what the probe measured into the trial's outcome
 // vocabulary.
 //
-// A direct session carries its survival and reconnect measurements. A trial
-// without one is a classified failure: this collector cannot claim a Relay or
-// HTTPS fallback it never attempted, so the failure keeps its cause. Zeroing
-// the establishment latency on failure is what the schema requires -- a failed
-// trial has no establishment to report.
+// A direct session carries its survival and reconnect measurements. A session
+// established through the relay files as a proxy fallback carrying the
+// failure class of the direct phase it fell back from -- exactly the pairing
+// the schema requires of that outcome -- and never a survival or reconnect,
+// which are direct-session properties. A trial with neither session is a
+// classified failure: this collector cannot claim a Relay or HTTPS fallback
+// it never attempted, so the failure keeps its cause, and zeroing the
+// establishment latency is what the schema requires of a failed trial.
 func classify(trial *reachability.Trial, result probe.Result) error {
 	if !result.Established {
 		trial.Outcome = reachability.OutcomeFailed
 		trial.Failure = result.Failure
 		trial.EstablishMillis = 0
+		return nil
+	}
+	if result.TunneledEstablish {
+		if result.Failure == reachability.FailureNone {
+			return errors.New("a tunneled establishment must carry the failure class of the direct phase it fell back from")
+		}
+		trial.Outcome = reachability.OutcomeProxyFallback
+		trial.Failure = result.Failure
 		return nil
 	}
 	trial.Outcome = reachability.OutcomeDirect
