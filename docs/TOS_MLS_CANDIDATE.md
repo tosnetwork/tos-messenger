@@ -133,6 +133,15 @@ Exact send retries reuse one persisted ciphertext, modified ciphertext leaves
 receiver state unchanged, and chat continues after every process restarts.
 This is executable local acceptance, not independently operated Relay evidence.
 
+The OpenMLS gate also composes with `mailbox.StoreRedundant`: two separately
+keyed, separately persisted Relay stores must return 2-of-2 exact StoredAcks
+for the same PrivateMessage. One member then remains offline across two PCS
+commits, retrieves the identical ordered opaque history from either Relay,
+applies both epochs, and decrypts the next application message. Tests scan both
+Relay roots for conversation plaintext and every member's private snapshot.
+This closes the local multi-Relay/catch-up acceptance vector, not live operator
+or post-M0-R transport evidence.
+
 ## Still open — why this remains 🟡
 
 - independent review of the concrete OpenMLS Driver and its snapshot/process

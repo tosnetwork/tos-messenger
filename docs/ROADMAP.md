@@ -107,7 +107,7 @@ TOS-MLS v1 remains 🟡 until all of these are true:
 - ✅ enforce one durable current authority for membership changes and a current-Endpoint-signed, adjacent-epoch transfer verified against both finalized delegations;
 - ✅ run `pkg/group/conformance` plus MLS-specific vectors for founding agreement, joiner-no-past, removed-member-no-future, forged commit, stale membership digest, wrong network/device set, exporter/secret separation and PCS after an update;
 - ✅ bound v1 private rooms to 32 Agents, 64 active leaves, 16 devices per Agent and 32 leaf operations per Commit, with fail-closed capacity tests;
-- demonstrate one encrypted application event delivered through multiple untrusted Relays to all current devices, including offline catch-up over several MLS epochs, without any Relay learning group secrets or deciding membership;
+- ✅ demonstrate one encrypted application event delivered through multiple untrusted Relays to all current devices, including offline catch-up over several MLS epochs, without any Relay learning group secrets or deciding membership (`pkg/mlslab` composes two independently keyed durable Mailbox stores; real independently operated network evidence remains open);
 - cross-check the selected TOS-MLS profile against a second independent MLS implementation before the group wire profile is called frozen.
 
 ## The policy engine, split honestly
