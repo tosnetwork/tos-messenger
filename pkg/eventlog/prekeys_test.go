@@ -268,3 +268,198 @@ func TestPublicationReloadsBeforeSinkAndSurfacesCorruption(t *testing.T) {
 		t.Fatal("corrupt publication state reached the sink")
 	}
 }
+
+func TestPublicContributionsCollectAndFinalizeAcrossRestart(t *testing.T) {
+	delegation, key := prekeyFixture(t)
+	root := t.TempDir() + "/state"
+	journal, devices, publications := openPrekeyLedgers(t, root)
+	collector, err := journal.OpenPrekeyContributions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	plan := coordinatedPlan(now)
+	suite := e2ee.NewDefaultSuite()
+	collection, created, err := collector.BeginPrekeyCollection(delegation, PrekeyCollectionPlan{
+		DeviceIDs: []string{deviceID(2), deviceID(1)}, AlgorithmID: suite.AlgorithmID(),
+		IssuedAtUnix: uint64(plan.IssuedAt.Unix()), ExpiresAtUnix: uint64(plan.ExpiresAt.Unix()),
+	}, now)
+	if err != nil || !created || collection.Plan.DeviceIDs[0] != deviceID(1) {
+		t.Fatalf("begin: created=%v collection=%+v err=%v", created, collection, err)
+	}
+	if _, created, err := collector.BeginPrekeyCollection(delegation, PrekeyCollectionPlan{
+		DeviceIDs: []string{deviceID(1), deviceID(2)}, AlgorithmID: suite.AlgorithmID(),
+		IssuedAtUnix: uint64(plan.IssuedAt.Unix()), ExpiresAtUnix: uint64(plan.ExpiresAt.Unix()),
+	}, now); err != nil || created {
+		t.Fatalf("plan retry: created=%v err=%v", created, err)
+	}
+
+	first, _, err := devices.EnsureDevicePrekey(delegation, key, suite, deviceID(1), plan, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := devices.EnsureDevicePrekey(delegation, key, suite, deviceID(2), plan, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collection, added, err := collector.AddPrekeyContribution(delegation, second.Bundle, now)
+	if err != nil || !added || collection.Complete {
+		t.Fatalf("first contribution: added=%v complete=%v err=%v", added, collection.Complete, err)
+	}
+	if _, added, err := collector.AddPrekeyContribution(delegation, second.Bundle, now); err != nil || added {
+		t.Fatalf("contribution retry: added=%v err=%v", added, err)
+	}
+	if _, _, err := collector.FinalizePrekeyCollection(delegation, publications, now); !errors.Is(err, ErrPrekeyCollectionIncomplete) {
+		t.Fatalf("partial collection finalized: %v", err)
+	}
+	collection, added, err = collector.AddPrekeyContribution(delegation, first.Bundle, now)
+	if err != nil || !added || !collection.Complete || collection.Contributions[0].DeviceID != deviceID(1) {
+		t.Fatalf("complete contribution: added=%v collection=%+v err=%v", added, collection, err)
+	}
+	publication, created, err := collector.FinalizePrekeyCollection(delegation, publications, now)
+	if err != nil || !created || publication.SetDigest == "" {
+		t.Fatalf("finalize: created=%v publication=%+v err=%v", created, publication, err)
+	}
+	raw, err := os.ReadFile(collector.path(delegation.EndpointID))
+	if err != nil || bytes.Contains(raw, []byte("private")) {
+		t.Fatalf("public collector retained private material: err=%v raw=%s", err, raw)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restored, _ := reopened.OpenPrekeyContributions()
+	restoredPublications, _ := reopened.OpenPrekeyPublications()
+	collection, found, err := restored.CurrentPrekeyCollection(delegation, now.Add(time.Second))
+	if err != nil || !found || !collection.Complete || collection.FinalizedSetDigest != publication.SetDigest {
+		t.Fatalf("restored collection=%+v found=%v err=%v", collection, found, err)
+	}
+	retry, created, err := restored.FinalizePrekeyCollection(delegation, restoredPublications, now.Add(time.Second))
+	if err != nil || created || retry.SetDigest != publication.SetDigest {
+		t.Fatalf("finalize retry: created=%v digest=%s err=%v", created, retry.SetDigest, err)
+	}
+}
+
+func TestPublicContributionCollectionRefusesSubstitutionAndForks(t *testing.T) {
+	delegation, key := prekeyFixture(t)
+	journal, devices, publications := openPrekeyLedgers(t, t.TempDir()+"/state")
+	defer journal.Close()
+	collector, _ := journal.OpenPrekeyContributions()
+	now := time.Unix(1_800_000_000, 0)
+	plan := coordinatedPlan(now)
+	suite := e2ee.NewDefaultSuite()
+	_, _, err := collector.BeginPrekeyCollection(delegation, PrekeyCollectionPlan{
+		DeviceIDs: []string{deviceID(1), deviceID(2)}, AlgorithmID: suite.AlgorithmID(),
+		IssuedAtUnix: uint64(plan.IssuedAt.Unix()), ExpiresAtUnix: uint64(plan.ExpiresAt.Unix()),
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collector.BeginPrekeyCollection(delegation, PrekeyCollectionPlan{
+		DeviceIDs: []string{deviceID(1)}, AlgorithmID: suite.AlgorithmID(),
+		IssuedAtUnix: uint64(plan.IssuedAt.Unix()), ExpiresAtUnix: uint64(plan.ExpiresAt.Unix()),
+	}, now); !errors.Is(err, ErrPrekeyEquivocation) {
+		t.Fatalf("same-time roster fork returned %v", err)
+	}
+	first, _, _ := devices.EnsureDevicePrekey(delegation, key, suite, deviceID(1), plan, now)
+	second, _, _ := devices.EnsureDevicePrekey(delegation, key, suite, deviceID(2), plan, now)
+	unplanned, _, _ := devices.EnsureDevicePrekey(delegation, key, suite, deviceID(3), plan, now)
+	if _, _, err := collector.AddPrekeyContribution(delegation, unplanned.Bundle, now); err == nil {
+		t.Fatal("unplanned device contribution was accepted")
+	}
+	tampered := first.Bundle
+	tampered.EndpointSignature = append([]byte(nil), tampered.EndpointSignature...)
+	tampered.EndpointSignature[0] ^= 0xff
+	if _, _, err := collector.AddPrekeyContribution(delegation, tampered, now); err == nil {
+		t.Fatal("invalid Endpoint signature was accepted")
+	}
+	if _, _, err := collector.AddPrekeyContribution(delegation, first.Bundle, now); err != nil {
+		t.Fatal(err)
+	}
+	liveNewer := PrekeyCollectionPlan{
+		DeviceIDs: []string{deviceID(1)}, AlgorithmID: suite.AlgorithmID(),
+		IssuedAtUnix: uint64(now.Add(time.Second).Unix()), ExpiresAtUnix: uint64(now.Add(101 * time.Second).Unix()),
+	}
+	if _, _, err := collector.BeginPrekeyCollection(delegation, liveNewer, now.Add(time.Second)); !errors.Is(err, ErrPrekeyCollectionUnfinalized) {
+		t.Fatalf("partial live generation was discarded: %v", err)
+	}
+	fork, err := e2ee.SignBundle(e2ee.Bundle{
+		Network: delegation.Network, AgentID: delegation.AgentID, EndpointID: delegation.EndpointID,
+		DeviceID: deviceID(1), AlgorithmID: suite.AlgorithmID(), Material: []byte("different public material"),
+		IssuedAtUnix: uint64(plan.IssuedAt.Unix()), ExpiresAtUnix: uint64(plan.ExpiresAt.Unix()),
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collector.AddPrekeyContribution(delegation, fork, now); !errors.Is(err, ErrPrekeyEquivocation) {
+		t.Fatalf("same-device fork returned %v", err)
+	}
+	if _, _, err := collector.AddPrekeyContribution(delegation, second.Bundle, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collector.BeginPrekeyCollection(delegation, liveNewer, now.Add(time.Second)); !errors.Is(err, ErrPrekeyCollectionUnfinalized) {
+		t.Fatalf("complete generation was discarded before finalization: %v", err)
+	}
+	foreignJournal, _, foreignPublications := openPrekeyLedgers(t, t.TempDir()+"/foreign")
+	defer foreignJournal.Close()
+	if _, _, err := collector.FinalizePrekeyCollection(delegation, foreignPublications, now); err == nil {
+		t.Fatal("collection finalized into another journal")
+	}
+	if _, _, err := collector.FinalizePrekeyCollection(delegation, publications, now); err != nil {
+		t.Fatal(err)
+	}
+	retirement := PrekeyCollectionPlan{
+		DeviceIDs: []string{deviceID(1)}, AlgorithmID: suite.AlgorithmID(),
+		IssuedAtUnix: uint64(plan.IssuedAt.Unix()), ExpiresAtUnix: uint64(plan.ExpiresAt.Unix()),
+	}
+	if _, created, err := collector.BeginPrekeyCollection(delegation, retirement, now); err != nil || !created {
+		t.Fatalf("pure retirement plan: created=%v err=%v", created, err)
+	}
+	if _, _, err := collector.AddPrekeyContribution(delegation, first.Bundle, now); err != nil {
+		t.Fatalf("retained contribution: %v", err)
+	}
+	if _, _, err := collector.FinalizePrekeyCollection(delegation, publications, now); err != nil {
+		t.Fatalf("pure retirement finalization: %v", err)
+	}
+	if _, _, err := collector.BeginPrekeyCollection(delegation, PrekeyCollectionPlan{
+		DeviceIDs: []string{deviceID(1), deviceID(2)}, AlgorithmID: suite.AlgorithmID(),
+		IssuedAtUnix: uint64(plan.IssuedAt.Unix()), ExpiresAtUnix: uint64(plan.ExpiresAt.Unix()),
+	}, now); !errors.Is(err, ErrPrekeyEquivocation) {
+		t.Fatalf("retired device reappeared at same watermark: %v", err)
+	}
+	if _, created, err := collector.BeginPrekeyCollection(delegation, liveNewer, now.Add(time.Second)); err != nil || !created {
+		t.Fatalf("new generation after finalization: created=%v err=%v", created, err)
+	}
+	if _, _, err := collector.BeginPrekeyCollection(delegation, PrekeyCollectionPlan{
+		DeviceIDs: []string{deviceID(1)}, AlgorithmID: suite.AlgorithmID(),
+		IssuedAtUnix: uint64(now.Unix()), ExpiresAtUnix: uint64(plan.ExpiresAt.Unix()),
+	}, now.Add(time.Second)); !errors.Is(err, e2ee.ErrSetRollback) {
+		t.Fatalf("collection rollback returned %v", err)
+	}
+}
+
+func TestPublicContributionCollectionFailsClosedOnDamagedState(t *testing.T) {
+	delegation, _ := prekeyFixture(t)
+	journal, _, _ := openPrekeyLedgers(t, t.TempDir()+"/state")
+	defer journal.Close()
+	collector, _ := journal.OpenPrekeyContributions()
+	now := time.Unix(1_800_000_000, 0)
+	plan := coordinatedPlan(now)
+	if _, _, err := collector.BeginPrekeyCollection(delegation, PrekeyCollectionPlan{
+		DeviceIDs: []string{deviceID(1)}, AlgorithmID: e2ee.NewDefaultSuite().AlgorithmID(),
+		IssuedAtUnix: uint64(plan.IssuedAt.Unix()), ExpiresAtUnix: uint64(plan.ExpiresAt.Unix()),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(collector.path(delegation.EndpointID), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collector.CurrentPrekeyCollection(delegation, now); err == nil {
+		t.Fatal("damaged contribution state was accepted")
+	}
+}

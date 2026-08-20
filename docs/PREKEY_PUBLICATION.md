@@ -10,10 +10,13 @@ An endpoint publishes the complete current device set at once. Every bundle in
 that set has the same `issued_at_unix`, `expires_at_unix`, network, Agent,
 Endpoint, and algorithm. The Endpoint coordinates that window; each device
 generates and retains only its own opaque private material, then contributes an
-Endpoint-signed public bundle. `eventlog.PrekeyPublicationLedger` aggregates
-those public contributions and contains no device secret. Device identifiers
-are sorted before publication so one digest has one accepted JSON object; the
-descriptor still commits the order-independent `e2ee.SetDigest`.
+Endpoint-signed public bundle. `eventlog.PrekeyContributionLedger` first fixes
+the sorted roster, suite, and issuance/expiry window, then durably accepts only
+matching signed public contributions. It advances
+`eventlog.PrekeyPublicationLedger` only after the exact roster is complete;
+neither ledger contains a device secret. Device identifiers are sorted before
+publication so one digest has one accepted JSON object; the descriptor still
+commits the order-independent `e2ee.SetDigest`.
 
 The issuance second is the generation watermark. A different non-retirement
 set at an already used watermark is an equivocation, not a value that can be
@@ -42,9 +45,12 @@ device journal's exclusive writer lock:
 
 A crash before step 3 exposes nothing. A crash after step 3 reloads the exact
 same signature and secret, so retry cannot create a competing contribution at
-the same generation. `PreparePrekeyPublication` verifies all public
-contributions under the delegation, enforces one coordinated generation and
-succession, then atomically records the exact public-only bundle set.
+the same generation. The contribution ledger verifies every bundle before
+storage, makes exact retries idempotent, rejects unplanned devices and
+same-device conflicts, and refuses to discard any live submitted generation
+before finalization. Finalization verifies the complete set again, advances
+`PreparePrekeyPublication`, then marks the staged generation finalized. A
+crash between those two durable writes is repaired by an exact retry.
 
 `directory.ActivateHTTPSPublication` signs and verifies the Descriptor and
 inner locator before mutation, then writes the immutable prekey object first
@@ -92,16 +98,16 @@ an old revocation.
 ## Deliberate boundary
 
 The route-neutral lifecycle now supplies device-local custody, public-only
-Endpoint aggregation, signer isolation, the production static HTTPS object
-sink, ordered Descriptor activation, replenishment, retired-secret selection,
-pruning, rollback refusal, and local/peer equivocation classification. Daemon
-wiring still needs a device-contribution collection boundary and publication
-scheduling. The production DHT adapter now keeps native key-description and
-value signing behind the selected `crypto.Signer`, including immediate
-signature verification before network use. Centralizing every device secret
-in the daemon is explicitly not an acceptable shortcut. Live independently
-operated publication and cross-observer fork exchange remain deployment
-evidence.
+Endpoint aggregation, durable fixed-roster public-contribution collection,
+signer isolation, the production static HTTPS object sink, ordered Descriptor
+activation, replenishment, retired-secret selection, pruning, rollback
+refusal, and local/peer equivocation classification. Daemon wiring still needs
+a narrow device-facing submission API plus generation/publication scheduling.
+The production DHT adapter keeps native key-description and value signing
+behind the selected `crypto.Signer`, including immediate signature
+verification before network use. Centralizing every device secret in the
+daemon is explicitly not an acceptable shortcut. Live independently operated
+publication and cross-observer fork exchange remain deployment evidence.
 
 No canonical preimage or wire schema changed. The existing bundle and
 bundle-set vectors remain the applicable interoperation artifacts.
