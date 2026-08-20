@@ -22,6 +22,7 @@ than silently forking two implementations.
 | Republish rule | a replacement must strictly extend the stored expiry, because the signature rule keeps whichever value has the greater time to live | `directory.Republish` |
 | DHT value size bound | 640 bytes encoded against a 768-byte network limit; retrieval reference at most 256 bytes | `directory.MaxLocatorBytes`, `directory.MaxDHTValueBytes` |
 | DHT wire format | compact canonical binary; JSON is for debugging and file exchange and is never published or signed | `directory.EncodeLocator` |
+| Production DHT boundary | `directory.TOSDHT` uses the pinned `tosutils-go` client and independently rechecks the exact native key, Ed25519 owner, signature update rule, key-description/value signatures, TTL, and inner locator signature. Publication requires the live delegated Endpoint key and verifies the returned native key/replica count | [`TOS_DHT_ADAPTER.md`](TOS_DHT_ADAPTER.md), `directory.TOSDHT` |
 | Locator lifetime | at most 24 hours from `issued_at`, now enforced rather than only declared | `directory.MaxLocatorLifetimeSeconds` |
 | Locator retrieval schemes | `https`, `adnl`, `rldp`, and `http` on loopback only, with user info, query strings, and fragments refused so no credential is published | `directory.validateDescriptorLocator` |
 | Envelope size bounds | advertised maximum between 4 KiB and 1 MiB; stored ciphertext at most 1 MiB | `directory.MinEnvelopeBytes`, `envelope.MaxCiphertextBytes` |
