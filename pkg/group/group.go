@@ -1,6 +1,6 @@
-// Package group is the pre-implementation contract a group-key-agreement
-// scheme must satisfy. MLS 1.0 is now the selected construction, but the
-// TOS-MLS wire profile is not frozen and this package still implements no
+// Package group contains the refutation floor and application-side TOS-MLS
+// candidate adapter. MLS 1.0 is the selected construction, but the TOS-MLS
+// wire profile is not frozen and this package implements no TreeKEM or MLS
 // cryptography. Selection does not substitute for the canonical profile,
 // vectors, independent review, or second-implementation evidence a freeze
 // requires.
@@ -8,11 +8,11 @@
 // What the package fixes is the shape of the agreement and the properties a
 // candidate is refuted against. A room's membership already advances in epochs
 // (see pkg/room): each add or remove produces a new epoch and a commitment over
-// the member set. The current interface models one key epoch per room epoch;
-// the selected MLS adaptation must split that into logical room and
-// cryptographic MLS clocks because device changes and recovery updates may
-// advance MLS without changing the Agent member set. Until that adapter lands,
-// this contract remains a refutation floor rather than the final MLS API.
+// the member set. The legacy Scheme interface models one key epoch per room
+// epoch and remains the construction-agnostic refutation floor. The MLS
+// application adapter in mls_profile.go splits logical room and cryptographic
+// MLS clocks; callers must not implement the selected construction through
+// Scheme.
 //
 // The refutation harness in the conformance subpackage establishes the absence
 // of these properties, never their presence. A scheme that lets a removed

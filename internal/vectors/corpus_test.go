@@ -14,6 +14,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
+	"github.com/tosnetwork/tos-messenger/pkg/group"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/mailbox"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
@@ -64,16 +65,17 @@ const (
 // decoders is the wire surface a second implementation has to match. Each
 // returns an error for input it refuses; the corpus asserts every entry does.
 var decoders = map[string]func([]byte) error{
-	"endpoint-delegation":  func(b []byte) error { _, err := identity.DecodeJSON(b); return err },
-	"contact-descriptor":   func(b []byte) error { _, err := directory.DecodeDescriptorJSON(b); return err },
-	"dht-locator":          func(b []byte) error { _, err := directory.DecodeLocator(b); return err },
-	"prekey-bundle":        func(b []byte) error { _, err := e2ee.DecodeBundleJSON(b); return err },
-	"messaging-event":      func(b []byte) error { _, err := envelope.DecodeEventJSON(b); return err },
-	"payload-text":         func(b []byte) error { _, err := payload.Decode("text", b); return err },
-	"negotiation-snapshot": func(b []byte) error { _, err := negotiation.DecodeSnapshotJSON(b); return err },
-	"reachability-trial":   func(b []byte) error { _, err := reachability.DecodeTrialJSON(b); return err },
-	"stored-ack":           func(b []byte) error { _, err := mailbox.DecodeAckJSON(b); return err },
-	"conformance-report":   func(b []byte) error { _, err := conformance.DecodeJSON(b); return err },
+	"endpoint-delegation":   func(b []byte) error { _, err := identity.DecodeJSON(b); return err },
+	"contact-descriptor":    func(b []byte) error { _, err := directory.DecodeDescriptorJSON(b); return err },
+	"dht-locator":           func(b []byte) error { _, err := directory.DecodeLocator(b); return err },
+	"prekey-bundle":         func(b []byte) error { _, err := e2ee.DecodeBundleJSON(b); return err },
+	"messaging-event":       func(b []byte) error { _, err := envelope.DecodeEventJSON(b); return err },
+	"payload-text":          func(b []byte) error { _, err := payload.Decode("text", b); return err },
+	"negotiation-snapshot":  func(b []byte) error { _, err := negotiation.DecodeSnapshotJSON(b); return err },
+	"reachability-trial":    func(b []byte) error { _, err := reachability.DecodeTrialJSON(b); return err },
+	"stored-ack":            func(b []byte) error { _, err := mailbox.DecodeAckJSON(b); return err },
+	"conformance-report":    func(b []byte) error { _, err := conformance.DecodeJSON(b); return err },
+	"mls-device-credential": func(b []byte) error { _, err := group.DecodeDeviceCredentialJSON(b); return err },
 }
 
 func TestAdversarialCorpus(t *testing.T) {
@@ -168,13 +170,14 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	// data must be refused, because a decoder that accepted them would let two
 	// documents mean one object.
 	jsonBaselines := map[string][]byte{
-		"endpoint-delegation":  validDelegationJSON(t),
-		"contact-descriptor":   validDescriptorJSON(t),
-		"prekey-bundle":        validBundleJSON(t),
-		"messaging-event":      validEventJSON(t),
-		"negotiation-snapshot": validSnapshotJSON(t),
-		"stored-ack":           validStoredAckJSON(t),
-		"conformance-report":   validConformanceReportJSON(t),
+		"endpoint-delegation":   validDelegationJSON(t),
+		"contact-descriptor":    validDescriptorJSON(t),
+		"prekey-bundle":         validBundleJSON(t),
+		"messaging-event":       validEventJSON(t),
+		"negotiation-snapshot":  validSnapshotJSON(t),
+		"stored-ack":            validStoredAckJSON(t),
+		"conformance-report":    validConformanceReportJSON(t),
+		"mls-device-credential": validMLSCredentialJSON(t),
 	}
 	baselineTargets := make([]string, 0, len(jsonBaselines))
 	for target := range jsonBaselines {
@@ -239,6 +242,7 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	// mutations prove nothing -- the same discipline the decode baselines get.
 	verifyBaselines := map[string][]byte{
 		"prekey-bundle-binding":    boundBundleJSON(t),
+		"mls-credential-binding":   boundMLSCredentialJSON(t),
 		"reachability-observation": validObservationJSON(t),
 		"reachability-trial":       validTrialJSON(t),
 	}
@@ -264,6 +268,12 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	addVerify("prekey-bundle-binding/foreign-agent", "prekey-bundle-binding",
 		bundleForeignAgentJSON(t),
 		"a validly signed bundle for another Agent is not authorised by this delegation")
+	addVerify("mls-credential-binding/tampered-signature", "mls-credential-binding",
+		tamperedMLSCredentialJSON(t),
+		"an MLS device credential must carry the delegated Endpoint's signature over the exact leaf key and KeyPackage")
+	addVerify("mls-credential-binding/stale-device-set", "mls-credential-binding",
+		staleMLSCredentialJSON(t),
+		"an MLS credential bound to an old device set cannot authorise a leaf after device succession")
 
 	// A local-only kind carries authority granted on the owner's own
 	// interface; arriving over the network it is refused before evaluation.

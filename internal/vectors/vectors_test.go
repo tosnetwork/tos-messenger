@@ -28,6 +28,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
+	"github.com/tosnetwork/tos-messenger/pkg/group"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/mailbox"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
@@ -275,6 +276,38 @@ func build(t *testing.T) []Vector {
 		t.Fatalf("set digest: %v", err)
 	}
 	vectors = append(vectors, Vector{Name: "prekey-bundle-set", Digest: setDigest})
+
+	// Endpoint-authorised MLS device credential and exact KeyPackage. This is
+	// a candidate-profile vector, not a claim that the MLS wire profile has
+	// passed its independent implementation freeze gate.
+	mlsLeafSeed := make([]byte, ed25519.SeedSize)
+	for index := range mlsLeafSeed {
+		mlsLeafSeed[index] = 0x33
+	}
+	mlsLeafKey := ed25519.NewKeyFromSeed(mlsLeafSeed)
+	mlsCredential, err := group.SignDeviceCredential(group.DeviceCredential{
+		Network: del.Network, AgentID: del.AgentID, EndpointID: del.EndpointID,
+		DeviceID: deviceOne, DeviceSetDigest: setDigest,
+		LeafSignaturePublicKey: mlsLeafKey.Public().(ed25519.PublicKey),
+		KeyPackage:             []byte("fixed RFC 9420 KeyPackage candidate bytes"),
+		IssuedAtUnix:           baseUnix, ExpiresAtUnix: baseUnix + 3600,
+	}, key)
+	if err != nil {
+		t.Fatalf("sign MLS credential: %v", err)
+	}
+	mlsWire, err := group.EncodeDeviceCredentialJSON(mlsCredential)
+	if err != nil {
+		t.Fatalf("MLS credential wire: %v", err)
+	}
+	mlsCanonical, err := group.CredentialSigningBytes(mlsCredential)
+	if err != nil {
+		t.Fatalf("MLS credential canonical: %v", err)
+	}
+	mlsRef, err := group.KeyPackageRef(mlsCredential)
+	if err != nil {
+		t.Fatalf("MLS KeyPackage ref: %v", err)
+	}
+	add("mls-device-credential-candidate", mlsWire, mlsCanonical, mlsRef)
 
 	// Ciphertext binding.
 	binding := e2ee.Binding{

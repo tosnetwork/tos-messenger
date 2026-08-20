@@ -105,7 +105,7 @@ than silently forking two implementations.
 | Multi-device fan-out | one logical event, one content-addressed identity, one sealed copy to every live device of the recipient and of the sender; an expired bundle bootstraps nothing but does not close an established session | `e2ee.FanOut` |
 | Room membership epoch | membership is a sorted Agent set; every add or remove advances a monotonic epoch by exactly one and commits a domain-separated digest over the room, epoch, count, and members. The epoch inside the preimage is what stops an old membership being replayed as a current one. A removed member is absent, not revoked — an Agent legitimately returns, unlike a device key, so re-adding is an ordinary add at a fresh epoch | `pkg/room`, `eventlog.RoomLedger` |
 | Room succession scope | the ledger accepts only strict single-step succession (epoch *n*+1 derived from the members of epoch *n*), because it holds only the current member set and each successor is derived from it; a gapped or peer-observed commit carries no member set to verify. Reconciling membership a peer drove independently is deferred to the room-authority decision below | `eventlog.RoomLedger.Advance` |
-| Private-room construction choice | MLS 1.0 / RFC 9420 (TreeKEM) is selected instead of a TOS-specific group ratchet. The TOS-MLS v1 adaptation is not a frozen wire profile: its per-device LeafNode signing-key authority, BasicCredential and group-id canonical encodings, two-clock adapter, vectors, implementation, independent review, and second-implementation evidence remain open | [`ROADMAP.md`](ROADMAP.md), `pkg/group` |
+| Private-room construction choice | MLS 1.0 / RFC 9420 (TreeKEM) is selected instead of a TOS-specific group ratchet. The application-side candidate now implements two clocks, endpoint-authorised per-device Leaf/KeyPackage publication with candidate vectors, succession planning, and durable opaque state/receipt ancestry. The TOS-MLS wire profile is still not frozen: a reviewed RFC 9420 Driver, BasicCredential/group-id canonical bytes, cryptographic MLS vectors, real Relay catch-up, independent review, and second-implementation evidence remain open | [`ROADMAP.md`](ROADMAP.md), [`TOS_MLS_CANDIDATE.md`](TOS_MLS_CANDIDATE.md), `pkg/group` |
 | Account binding | the account a finalized Agent record came from is recomputed from the network, object identifier, registry code and workchain, and compared; a chain policy without a locator cannot validate | `identity.ChainPolicy.Locator`, `tosaddr.Locator` |
 | Addressing rules | called through the protocol SDK rather than reimplemented, because a second implementation of an addressing rule can drift and a drifted check refuses correct state | `tosaddr` |
 | Pending queue bounds | what may wait on an owner is bounded in count, per sender, in bytes and in age; a full queue refuses the sender rather than dropping the event, and expired questions are recorded as refused rather than deleted | `eventlog.Quota`, `eventlog.ExpirePendingAdmissions` |
@@ -171,13 +171,13 @@ implementation of them:
   default candidate in [`E2EE_SUITE_DECISION.md`](E2EE_SUITE_DECISION.md), but
   its identifier remains a proposal until the owner ratifies it; the hybrid
   successor and downgrade rules remain open;
-- the TOS-MLS v1 group-key implementation and wire freeze. MLS 1.0 / RFC 9420
-  is now the selected construction, while `pkg/group` remains the pre-selection
-  contract and refutation floor. The selected profile candidate still needs a
-  distinct Ed25519 LeafNode key authorised for each device, an endpoint-signed
-  MLS credential/KeyPackage publication path, BasicCredential and group-id
-  canonical bytes after the genesis-hash representation decision, a two-clock
-  adapter, durable implementation, positive and adversarial vectors,
+- the TOS-MLS v1 cryptographic implementation and wire freeze. MLS 1.0 / RFC
+  9420 is selected, and `pkg/group` now supplies the application-side two-clock
+  adapter, distinct endpoint-authorised device leaf credentials/KeyPackages,
+  candidate vectors and succession plan; `eventlog.MLSLedger` durably records
+  opaque state, globally consumed KeyPackages, Welcomes and commit ancestry.
+  Still open are a reviewed RFC 9420 Driver, BasicCredential and group-id bytes
+  after the genesis-hash decision, real cryptographic/Relay acceptance vectors,
   independent review, and second-implementation evidence;
 - the room-authority model — whether a room's membership is driven by a single
   owner or by member consensus — which decides how a participant reconciles a

@@ -11,6 +11,7 @@ import (
 
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
+	"github.com/tosnetwork/tos-messenger/pkg/group"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 )
@@ -99,6 +100,14 @@ func buildVerifiers(t *testing.T) map[string]func([]byte) error {
 			}
 			return e2ee.BindBundle(del, bundle, now)
 		},
+		"mls-credential-binding": func(b []byte) error {
+			credential, err := group.DecodeDeviceCredentialJSON(b)
+			if err != nil {
+				return err
+			}
+			set := e2ee.SetSummary{EndpointID: del.EndpointID, Digest: "sha256:" + strings.Repeat("8c", 32), DeviceIDs: []string{deviceOne}}
+			return group.BindDeviceCredential(del, credential, set, now)
+		},
 		"messaging-event-network-route": func(b []byte) error {
 			event, err := envelope.DecodeEventJSON(b)
 			if err != nil {
@@ -140,6 +149,7 @@ func buildVerifiers(t *testing.T) map[string]func([]byte) error {
 func verifyDecoders() map[string]func([]byte) error {
 	return map[string]func([]byte) error{
 		"prekey-bundle-binding":         func(b []byte) error { _, err := e2ee.DecodeBundleJSON(b); return err },
+		"mls-credential-binding":        func(b []byte) error { _, err := group.DecodeDeviceCredentialJSON(b); return err },
 		"messaging-event-network-route": func(b []byte) error { _, err := envelope.DecodeEventJSON(b); return err },
 		"reachability-observation": func(b []byte) error {
 			var observation reachability.Observation
@@ -186,6 +196,34 @@ func encodeBundle(t *testing.T, bundle e2ee.Bundle) string {
 func boundBundleJSON(t *testing.T) []byte {
 	t.Helper()
 	return []byte(encodeBundle(t, signedBundle(t, nil)))
+}
+
+func boundMLSCredentialJSON(t *testing.T) []byte { return validMLSCredentialJSON(t) }
+
+func tamperedMLSCredentialJSON(t *testing.T) string {
+	t.Helper()
+	c := validMLSCredential(t)
+	c.EndpointSignature[0] ^= 0xff
+	raw, err := group.EncodeDeviceCredentialJSON(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func staleMLSCredentialJSON(t *testing.T) string {
+	t.Helper()
+	c := validMLSCredential(t)
+	c.DeviceSetDigest = "sha256:" + strings.Repeat("9d", 32)
+	c, err := group.SignDeviceCredential(c, endpointKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := group.EncodeDeviceCredentialJSON(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 // tamperedBundleSignatureJSON keeps a valid-length signature that is not the

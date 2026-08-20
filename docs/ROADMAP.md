@@ -24,7 +24,7 @@ gate status: this repository carries none and consumes no gate capacity.
 | M2-T technical offline Mailbox and multi-Relay failover | 🟡 | `pkg/mailbox` implements the route-neutral durable store, signed StoredAck, quotas/retention, exact retrieval deletion, and independently verified multi-Relay fan-out. A descriptor can publish a relay set. Network listener, mailbox retrieval authentication, transport binding, live failover, and operator evidence remain open |
 | M2-C commercial Relay lease | 🔒 | Expansion Gate locked |
 | M3 OpenFox and conversation-to-commerce integration | 🟡 | Foundations only: typed commerce, mandates, budgets, durable negotiations and the verification contract exist. No transport, no concrete finalized-state resolver wired, no wallet, no execution integration |
-| M4 multi-device and private rooms | 🟡 | Device set succession, session fan-out, room membership epochs, and a group-key contract + refutation harness exist (`pkg/e2ee`, `pkg/room`, `pkg/group`, `pkg/eventlog`). **Group construction selected:** MLS 1.0 (RFC 9420 / TreeKEM); the TOS-MLS v1 profile candidate uses cipher suite `0x0001` (`MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`) and one MLS leaf per authorised device. Still missing: a reviewed library/profile adapter, a per-device MLS signing-key authorisation and KeyPackage publication format, canonical profile vectors, durable KeyPackage/Welcome/commit recovery, device succession → MLS leaf wiring, and the room-authority / authorised-committer rule for peer-observed membership changes |
+| M4 multi-device and private rooms | 🟡 | Device succession/fan-out, room epochs, and the TOS-MLS application adapter exist (`pkg/e2ee`, `pkg/room`, `pkg/group`, `pkg/eventlog`). The adapter implements separate room/MLS clocks, endpoint-signed per-device leaf/KeyPackage authority with candidate vectors, succession → leaf operations, and durable KeyPackage/Welcome/commit/state recovery. **Still missing:** a reviewed RFC 9420 `group.Driver`, BasicCredential/group-id freeze after the genesis decision, cryptographic MLS vectors, independent review/second implementation, real Relay catch-up, and the room-authority / authorised-committer rule |
 
 ## Components
 
@@ -41,7 +41,7 @@ gate status: this repository carries none and consumes no gate capacity.
 | Optional ReadAck wire profile | ⬜ | — | Local `ReadAtUnix` is UI state, not a cross-Agent wire profile |
 | Encrypted offline Mailbox Relay | 🟡 | `pkg/mailbox` | Route-neutral crash-safe opaque storage, dedupe/conflict detection, retention, quotas, list/delete and recovery tests exist; retrieval authentication, listener, and transport binding remain after M0-R |
 | Multi-Relay redundancy and failover | 🟡 | `pkg/mailbox.StoreRedundant` | Distinct pinned Relay identities and exact signed ACKs are required to meet a redundancy threshold; live independently operated Relay failover evidence is missing |
-| Private group encryption and membership epochs | 🟡 | `pkg/room` (membership state machine), `pkg/eventlog` (durable room ledger), `pkg/group` (+ `conformance`) (group-key contract and refutation harness), `pkg/admission` (membership overlay), `room.*` payload shapes | Membership epochs are closed and end-to-end tested: the state machine advances one epoch per logical Agent membership change, commits a domain-separated digest over the sorted member set, and the ledger enforces monotonic progression across restart. Membership is **enforced** at the admission gate. MLS 1.0 / TreeKEM is now the selected construction; the TOS-MLS v1 adaptation below remains a profile candidate pending implementation and freeze evidence. The current `pkg/group` one-room-epoch/one-key-epoch contract must be adapted to the two-clock model because device add/remove/update and PCS refresh must be able to advance the MLS epoch without pretending the Agent-level room membership changed. **Named gaps:** per-device MLS signing-key authority and KeyPackage publication; MLS library/profile integration; canonical encoding and vectors; KeyPackage/Welcome persistence and offline delivery; device succession → leaf Add/Remove/Update; deterministic/authorised commit serialization over multiple Relays; room authority remains a separate application-policy decision |
+| Private group encryption and membership epochs | 🟡 | `pkg/room` (membership), `pkg/group` (refutation floor + TOS-MLS application adapter), `pkg/eventlog` (room and opaque MLS ledgers), `pkg/admission` (membership overlay), `room.*` payload shapes | Logical membership is enforced and durable. The candidate adapter now has two clocks; strict endpoint-signed device/leaf/KeyPackage authority; deterministic device succession → Add/Remove/Update; and crash-safe opaque state, globally consumed KeyPackages, Welcome receipts and single-parent commit ancestry. These are application invariants, **not MLS cryptography**. **Named gaps:** reviewed RFC 9420 Driver; BasicCredential/group-id freeze; cryptographic conformance/PCS vectors; authenticated real Relay delivery and catch-up; independent review/implementation; authorised commit serialization and room authority |
 | Public Agent channels over Overlay with history synchronization | ⬜ | — | Nothing |
 | Messenger-specific encrypted attachment protocol | ⬜ | `artifact.*` payload shapes | References by digest only |
 | OpenFox `tos-messenger` channel adapter | ⬜ | — | Nothing; needs a transport first |
@@ -97,13 +97,13 @@ TOS does **not** delegate room authority to MLS. MLS answers “which cryptograp
 
 TOS-MLS v1 remains 🟡 until all of these are true:
 
-- adapt `pkg/group` to explicit `room_epoch` + `mls_epoch` without weakening founding/join/removal refutation properties;
+- ✅ application adapter uses explicit `room_epoch` + `mls_epoch`; the legacy construction contract remains as the founding/join/removal refutation floor;
 - integrate a reviewed RFC 9420 implementation instead of implementing TreeKEM/HPKE from scratch, behind the Messenger group contract;
-- define an endpoint-signed per-device MLS credential and KeyPackage publication/rotation path; every leaf gets its own Ed25519 signing key, and no device shares the delegated Endpoint private key as its MLS leaf key;
+- ✅ endpoint-signed per-device MLS credential and strict KeyPackage publication codec exist; every leaf key is distinct and Endpoint-key reuse is refused;
 - after the genesis-hash representation decision, specify the BasicCredential identity and group-id canonical bytes, register every new domain/schema version, and commit positive plus adversarial vectors before calling any wire value frozen;
-- bind KeyPackage/LeafNode credentials to current TOS Agent → Endpoint → Device authority and reject revoked, stale, expired, foreign-network and foreign-Agent leaves;
-- wire device succession to MLS Add/Remove/Update, including a test where one device is revoked while the Agent's other device stays in the room;
-- persist KeyPackages, Welcome, commit ancestry and MLS state across crash/restart, with replay, duplicate-Welcome, epoch-gap, rollback and concurrent-commit tests;
+- ✅ bind credentials to current TOS Agent → Endpoint → Device authority and reject revoked/absent, stale, expired, foreign-network, foreign-Agent and wrong-key leaves;
+- ✅ convert device succession to MLS Add/Remove/Update, including revoking one device while retaining the Agent's other device;
+- ✅ persist opaque MLS state, globally consumed KeyPackages, Welcome receipts and commit ancestry across restart; replay, duplicate-Welcome, state tamper, epoch-gap, rollback and concurrent-commit cases fail closed;
 - run `pkg/group/conformance` plus MLS-specific vectors for founding agreement, joiner-no-past, removed-member-no-future, forged commit, stale membership digest, wrong network/device set, exporter/secret separation and PCS after an update;
 - demonstrate one encrypted application event delivered through multiple untrusted Relays to all current devices, including offline catch-up over several MLS epochs, without any Relay learning group secrets or deciding membership;
 - cross-check the selected TOS-MLS profile against a second independent MLS implementation before the group wire profile is called frozen.
@@ -152,10 +152,11 @@ repository, and one ✅ or one 🟡 would misstate both halves.
 5. **Implement the TOS-MLS v1 private-room profile candidate.** The construction
    decision is closed: MLS 1.0 / RFC 9420. Cipher suite `0x0001`, one device per
    leaf, two clocks (`room_epoch` and `mls_epoch`), untrusted Relay carriage,
-   and TOS identity/device validation are selected profile details awaiting
-   implementation and freeze evidence. Adapt `pkg/group`, define device leaf-key
-   authority, integrate a reviewed MLS library, persist/recover the state machine,
-   wire device succession, and run the acceptance plan above. The **room-authority / authorised-committer
+   and TOS identity/device validation are selected profile details. The
+   application adapter, device leaf-key authority, candidate vectors, durable
+   recovery, and device succession wiring are implemented. Integrate a reviewed
+   MLS library and run the remaining cryptographic/Relay acceptance plan above.
+   The **room-authority / authorised-committer
    rule remains a separate decision** in [`OPEN_DECISIONS.md`](OPEN_DECISIONS.md);
    MLS must not accidentally settle it by trusting Relay order.
 

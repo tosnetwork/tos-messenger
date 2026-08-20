@@ -1,6 +1,8 @@
 package vectors
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -8,6 +10,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
+	"github.com/tosnetwork/tos-messenger/pkg/group"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
@@ -81,6 +84,32 @@ func validBundleJSON(t *testing.T) []byte {
 		t.Fatalf("bundle: %v", err)
 	}
 	return encoded
+}
+
+func validMLSCredential(t *testing.T) group.DeviceCredential {
+	t.Helper()
+	del := delegation(t)
+	leaf := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x33}, ed25519.SeedSize))
+	credential, err := group.SignDeviceCredential(group.DeviceCredential{
+		Network: del.Network, AgentID: del.AgentID, EndpointID: del.EndpointID,
+		DeviceID: deviceOne, DeviceSetDigest: "sha256:" + strings.Repeat("8c", 32),
+		LeafSignaturePublicKey: leaf.Public().(ed25519.PublicKey),
+		KeyPackage:             []byte("fixed RFC 9420 KeyPackage candidate bytes"),
+		IssuedAtUnix:           baseUnix, ExpiresAtUnix: baseUnix + 3600,
+	}, endpointKey())
+	if err != nil {
+		t.Fatalf("MLS credential: %v", err)
+	}
+	return credential
+}
+
+func validMLSCredentialJSON(t *testing.T) []byte {
+	t.Helper()
+	raw, err := group.EncodeDeviceCredentialJSON(validMLSCredential(t))
+	if err != nil {
+		t.Fatalf("MLS credential wire: %v", err)
+	}
+	return raw
 }
 
 func validEventJSON(t *testing.T) []byte {

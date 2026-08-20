@@ -42,6 +42,8 @@ decision:
 | `pkg/e2ee` | The pure-state suite contract, message bindings and published prekeys, plus the implemented default candidate awaiting owner ratification |
 | `pkg/e2ee/conformance` | Refutes a candidate suite against fourteen black-box properties, including peer-prekey possession |
 | `pkg/e2ee` (devices) | The multi-device model: device-set succession with rollback and revocation defences, deterministic per-pair session identifiers, and the per-event fan-out to every live device of both parties |
+| `pkg/group` | TOS-MLS candidate application adapter: explicit room/MLS clocks, endpoint-authorised per-device leaf credentials, device succession planning, and the boundary for a reviewed RFC 9420 library; no home-grown MLS cryptography |
+| `pkg/eventlog` (MLS) | Crash-safe opaque MLS state, commit ancestry, Welcome replay refusal, and installation-wide one-time KeyPackage consumption |
 | `pkg/reachability` | M0-R study records, predeclared acceptance policy, aggregation, and the route decision |
 | `pkg/probe` | M0-R measurement transport: rendezvous coordinator with cold-source filter probing, the UDP and ADNL collectors with their post-establishment phases, and the tunnel relay the proxy-fallback phase measures against |
 | `pkg/evidence` | Deterministic, self-verifying M0 review bundles containing verify logs, dual-arch binaries/build logs, collector manifests, and frozen vectors |

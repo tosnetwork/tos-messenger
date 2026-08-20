@@ -127,6 +127,9 @@ const (
 	// DomainConformanceReport namespaces an implementation's signed claim that
 	// it consumed the committed positive and adversarial vector artifacts.
 	DomainConformanceReport = "tos.messaging.conformance-report.v1\x00"
+	// DomainMLSDeviceCredential namespaces the endpoint signature authorising
+	// one device's distinct MLS leaf key and exact KeyPackage.
+	DomainMLSDeviceCredential = "tos.messaging.mls-device-credential.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -156,6 +159,7 @@ var Domains = []string{
 	DomainRoomMembership,
 	DomainStoredAck,
 	DomainConformanceReport,
+	DomainMLSDeviceCredential,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainNegotiationRecord,
