@@ -369,11 +369,13 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 		return refuse(fault.CodeInternal, err)
 	}
 	var decision firewall.Decision
+	var mandate negotiation.Mandate
 	if action.Effect == firewall.EffectSpend {
-		mandate, resolveErr := s.spendMandate(request, now)
+		resolved, resolveErr := s.spendMandate(request, now)
 		if resolveErr != nil {
 			return refuse(fault.CodeInternal, resolveErr)
 		}
+		mandate = resolved
 		decision, err = firewall.EvaluateSpend(s.config.Policy, mandate, action, now)
 	} else {
 		decision, err = firewall.Evaluate(s.config.Policy, action)
@@ -415,6 +417,49 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 				return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
 					Decision: string(firewall.Refuse),
 					Detail:   "this purchase is already authorised under another action"}
+			}
+			// Bound the sum of distinct purchases under this mandate against its
+			// MaxTotal. The per-spend ceiling the firewall already applied stops
+			// one oversized purchase; without a durable cross-action total,
+			// several purchases each inside that ceiling could still commit more
+			// than the mandate allows. The reservation is keyed by the economic
+			// execution, so it is idempotent across a re-described same purchase
+			// and accumulates once per distinct purchase.
+			ledger, err := s.config.Journal.OpenMandateBudgetLedger(request.MandateID, mandate.MaxTotal.Asset)
+			if err != nil {
+				return refuse(fault.CodeInternal, err)
+			}
+			budget, err := negotiation.OpenBudget(mandate.MaxTotal, ledger)
+			if err != nil {
+				return refuse(fault.CodeInternal, err)
+			}
+			// The reservation is written durably BEFORE the auto-authorization is
+			// recorded, so a crash between the two can only leave a reservation
+			// with no authorization -- which over-counts the budget, the safe
+			// direction -- and never an authorization the budget never counted.
+			// This is a conservative, fail-closed enforcement: reservations only
+			// accumulate here, never released or committed, so MaxTotal is never
+			// exceeded across distinct auto-authorized purchases. The
+			// commit-on-spend / release-on-deny lifecycle is a documented
+			// follow-up: it needs the approval record to carry the mandate and
+			// execution across handlers, which is out of scope here.
+			if err := budget.Reserve(executionID, action.Terms.Price); err != nil {
+				// The purchase does not fit the mandate's durable total (or the
+				// budget could not be held), so it is not auto-authorised. The
+				// owner may still decide, so this escalates rather than refusing.
+				approval, requestErr := s.config.Journal.RequestApproval(eventlog.ApprovalRequest{
+					ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
+					Reason:  "would exceed the mandate's remaining budget: " + err.Error(),
+					Origins: toApprovalOrigins(decision.Provenance), Terms: action.Terms,
+					AskedAt: uint64(now.Unix()),
+				})
+				if requestErr != nil {
+					return refuse(fault.CodeInternal, requestErr)
+				}
+				return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
+					Decision: string(firewall.RequireOwnerApproval),
+					Detail:   "would exceed the mandate's remaining budget",
+					State:    string(approval.State)}
 			}
 			approval, err := s.config.Journal.RecordAutoAuthorization(eventlog.ApprovalRequest{
 				ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,

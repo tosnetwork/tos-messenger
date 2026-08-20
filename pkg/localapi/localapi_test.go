@@ -829,16 +829,38 @@ func testPurchase(units uint64) *PurchaseTerms {
 // The owner places a standing authorisation. The runtime never supplies one.
 func (h *harness) placeMandate(t *testing.T) string {
 	t.Helper()
+	return h.placeMandateWithTotal(t, "1000", "500")
+}
+
+// placeMandateWithTotal places a mandate with a chosen ceiling, so a test can
+// make the sum of a few purchases cross MaxTotal without needing large amounts.
+func (h *harness) placeMandateWithTotal(t *testing.T, maxTotal, approvalAbove string) string {
+	t.Helper()
+	return h.placeMandateNamed(t, "buy transcription", maxTotal, approvalAbove)
+}
+
+// placeMandateNamed places a mandate under a chosen objective, so two calls
+// produce two distinct mandate identifiers rather than the same one.
+func (h *harness) placeMandateNamed(t *testing.T, objective, maxTotal, approvalAbove string) string {
+	t.Helper()
 	placed := h.owner(t, Request{Op: OpPlaceMandate, Mandate: &MandateTerms{
-		Objective: "buy transcription", Authority: "commit",
+		Objective: objective, Authority: "commit",
 		CapabilityClass: "transcription.audio", Asset: testAssetIdentity(),
-		MaxTotalAtomic: "1000", ApprovalAboveAtomic: "500", MaxCounteroffers: 4,
+		MaxTotalAtomic: maxTotal, ApprovalAboveAtomic: approvalAbove, MaxCounteroffers: 4,
 		ExpiresAtUnix: baseUnix + 86_400,
 	}})
 	if !placed.OK || placed.MandateID == "" {
 		t.Fatalf("place mandate: %+v", placed)
 	}
 	return placed.MandateID
+}
+
+// testPurchaseCap builds a purchase whose capability identifier is distinct, so
+// two calls describe two different economic executions even at the same price.
+func testPurchaseCap(capSeed string, units uint64) *PurchaseTerms {
+	terms := testPurchase(units)
+	terms.CapabilityID = "cap_" + strings.Repeat(capSeed, 64)
+	return terms
 }
 
 func testProposal(effect string, origins ...ActionOrigin) *ProposedAction {
@@ -927,6 +949,62 @@ func TestReDescribedPurchaseIsNotAuthorisedTwice(t *testing.T) {
 	}
 	if b.Decision != string(firewall.Refuse) {
 		t.Fatalf("a re-described purchase was authorised a second time: %+v", b)
+	}
+}
+
+// Distinct purchases under one mandate are auto-authorised until their running
+// sum would cross the mandate's MaxTotal, at which point the next is sent to the
+// owner rather than auto-authorised. The per-spend ceiling alone would let three
+// 90s through under a 250 ceiling; the durable per-mandate budget does not.
+func TestDistinctPurchasesAreBoundedByTheMandateTotal(t *testing.T) {
+	h := newHarnessWithPolicy(t, firewall.Policy{
+		UnattendedCeiling: firewall.EffectSpend, OwnInitiativeCeiling: firewall.EffectSpend,
+	})
+	mandateID := h.placeMandateWithTotal(t, "250", "250")
+
+	// 90 fits (90 <= 250).
+	first := &ProposedAction{Effect: "spend", Summary: "first transcription", Terms: testPurchaseCap("1", 90)}
+	a := h.call(t, Request{Op: OpRequestAction, Action: first, MandateID: mandateID})
+	if a.Decision != string(firewall.Allow) {
+		t.Fatalf("the first purchase was not auto-authorised: %+v", a)
+	}
+
+	// 90 + 90 = 180 still fits.
+	second := &ProposedAction{Effect: "spend", Summary: "second transcription", Terms: testPurchaseCap("2", 90)}
+	b := h.call(t, Request{Op: OpRequestAction, Action: second, MandateID: mandateID})
+	if b.Decision != string(firewall.Allow) {
+		t.Fatalf("the second purchase was not auto-authorised: %+v", b)
+	}
+	if b.ActionID == a.ActionID {
+		t.Fatal("two distinct purchases shared an action identifier")
+	}
+
+	// 180 + 90 = 270 crosses the 250 ceiling: the owner has to decide.
+	third := &ProposedAction{Effect: "spend", Summary: "third transcription", Terms: testPurchaseCap("3", 90)}
+	c := h.call(t, Request{Op: OpRequestAction, Action: third, MandateID: mandateID})
+	if c.Decision != string(firewall.RequireOwnerApproval) {
+		t.Fatalf("a purchase past the mandate's total was auto-authorised: %+v", c)
+	}
+	if c.State != "pending" {
+		t.Fatalf("the escalated purchase was not put to the owner: %+v", c)
+	}
+	// It cannot be claimed unattended -- it is waiting for a person.
+	if claimed := h.call(t, Request{Op: OpClaimAction, ActionID: c.ActionID}); claimed.Authorised {
+		t.Fatal("a purchase past the mandate's total was executed without the owner")
+	}
+	// The owner is the one holding the question.
+	waiting := h.owner(t, Request{Op: OpPendingActions})
+	if len(waiting.Actions) != 1 || waiting.Actions[0].ActionID != c.ActionID {
+		t.Fatalf("the owner was not asked about the over-budget purchase: %+v", waiting)
+	}
+
+	// A second mandate over the same asset has its own untouched budget: the
+	// first mandate's spending did not draw it down.
+	other := h.placeMandateNamed(t, "a separate objective", "250", "250")
+	fresh := &ProposedAction{Effect: "spend", Summary: "under a fresh mandate", Terms: testPurchaseCap("1", 90)}
+	d := h.call(t, Request{Op: OpRequestAction, Action: fresh, MandateID: other})
+	if d.Decision != string(firewall.Allow) {
+		t.Fatalf("a fresh mandate's budget was drawn down by another mandate: %+v", d)
 	}
 }
 

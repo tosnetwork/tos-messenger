@@ -15,6 +15,12 @@ import (
 
 const (
 	budgetDir = "budgets"
+	// mandateBudgetDir keeps per-mandate budgets apart from the per-asset ones.
+	// The two are reconciled by different rules -- a per-asset budget's holds are
+	// keyed by the negotiation that took them, a per-mandate budget's by the
+	// economic execution -- so they must never share a directory a single
+	// reconciler would sweep.
+	mandateBudgetDir = "mandate-budgets"
 
 	// BudgetSchema is the on-disk schema of one budget ledger.
 	BudgetSchema = "tos.messaging.budget-ledger.v1"
@@ -46,11 +52,15 @@ type StoredAsset struct {
 	Decimals       uint32 `json:"decimals"`
 }
 
-// BudgetID derives the identifier of the budget for one asset.
+// BudgetID derives the identifier of the optional global budget for one asset.
 //
-// One installation holds one budget per asset. Deriving the identifier from
-// the asset rather than letting a caller choose it means two callers cannot
-// open two budgets over the same money and each believe they hold all of it.
+// This budget is the optional global asset-risk ceiling. It no longer carries a
+// mandate's MaxTotal: a mandate's durable total lives in the per-mandate budget
+// (see MandateBudgetID), because one asset serves many mandates and a shared
+// per-asset total would let distinct mandates draw each other's ceiling down.
+// Deriving the identifier from the asset rather than letting a caller choose it
+// means two callers cannot open two budgets over the same money and each believe
+// they hold all of it.
 func BudgetID(asset negotiation.Asset) (string, error) {
 	if err := asset.Validate(); err != nil {
 		return "", err
@@ -65,14 +75,49 @@ func BudgetID(asset negotiation.Asset) (string, error) {
 	return "bgt_" + digest[len("sha256:"):], nil
 }
 
+// MandateBudgetID derives the identifier of one mandate's budget.
+//
+// The mandate scopes it: the preimage folds in the mandate the ceiling belongs
+// to as well as the asset, so two mandates over the same asset derive two
+// budgets and neither can spend the other's total down. This is the budget that
+// carries a mandate's MaxTotal; the per-asset BudgetID is a separate, optional
+// global ceiling.
+func MandateBudgetID(mandateID string, asset negotiation.Asset) (string, error) {
+	if mandateID == "" || len(mandateID) > 128 {
+		return "", errors.New("a mandate budget needs the mandate that bounds it")
+	}
+	if err := asset.Validate(); err != nil {
+		return "", err
+	}
+	buffer := bytes.NewBufferString(canon.DomainMandateBudget)
+	canon.Text(buffer, mandateID)
+	canon.Uint32(buffer, uint32(asset.Workchain))
+	canon.Text(buffer, asset.AccountID)
+	canon.Text(buffer, asset.MasterCodeHash)
+	canon.Text(buffer, asset.WalletCodeHash)
+	canon.Uint32(buffer, asset.Decimals)
+	digest := canon.Digest(buffer.Bytes())
+	return "mbg_" + digest[len("sha256:"):], nil
+}
+
 // BudgetLedger is the durable half of one budget.
+//
+// dir names the directory the record lives under and stem names the file within
+// it, so the per-asset and per-mandate budgets reuse this same machinery while
+// keeping their records in separate directories with separate reconciliation
+// rules.
 type BudgetLedger struct {
 	journal  *Journal
 	budgetID string
+	dir      string
+	stem     string
 	asset    negotiation.Asset
 }
 
-// OpenBudgetLedger returns the ledger for one asset's budget.
+// OpenBudgetLedger returns the ledger for one asset's optional global budget.
+//
+// This is the optional global asset-risk ceiling, not the carrier of any
+// mandate's MaxTotal. Use OpenMandateBudgetLedger to bound one mandate's total.
 func (j *Journal) OpenBudgetLedger(asset negotiation.Asset) (*BudgetLedger, error) {
 	if err := j.usable(); err != nil {
 		return nil, err
@@ -81,7 +126,28 @@ func (j *Journal) OpenBudgetLedger(asset negotiation.Asset) (*BudgetLedger, erro
 	if err != nil {
 		return nil, err
 	}
-	return &BudgetLedger{journal: j, budgetID: budgetID, asset: asset}, nil
+	return &BudgetLedger{
+		journal: j, budgetID: budgetID, dir: budgetDir,
+		stem: budgetID[len("bgt_"):], asset: asset,
+	}, nil
+}
+
+// OpenMandateBudgetLedger returns the ledger for one mandate's budget.
+//
+// The durable identity and path fold in the mandate, so two mandates never
+// share one budget. This is the budget that carries a mandate's MaxTotal.
+func (j *Journal) OpenMandateBudgetLedger(mandateID string, asset negotiation.Asset) (*BudgetLedger, error) {
+	if err := j.usable(); err != nil {
+		return nil, err
+	}
+	budgetID, err := MandateBudgetID(mandateID, asset)
+	if err != nil {
+		return nil, err
+	}
+	return &BudgetLedger{
+		journal: j, budgetID: budgetID, dir: mandateBudgetDir,
+		stem: budgetID[len("mbg_"):], asset: asset,
+	}, nil
 }
 
 // Load implements negotiation.Ledger.
@@ -178,7 +244,7 @@ func (l *BudgetLedger) Record(state negotiation.BudgetState) error {
 }
 
 func (l *BudgetLedger) path() string {
-	return filepath.Join(l.journal.root, budgetDir, l.budgetID[len("bgt_"):]+".json")
+	return filepath.Join(l.journal.root, l.dir, l.stem+".json")
 }
 
 // reconcileCommerce repairs the seam between budgets and negotiations after a

@@ -18,8 +18,15 @@ const (
 	// DomainNegotiationRecord namespaces the on-disk name of one negotiation,
 	// so an identifier a caller chose cannot name a path.
 	DomainNegotiationRecord = "tos.messaging.negotiation-record.v1\x00"
-	// DomainBudget namespaces the identifier of one asset's budget.
+	// DomainBudget namespaces the identifier of one asset's budget. This is the
+	// optional global asset-risk ceiling; the per-mandate budget that carries a
+	// mandate's MaxTotal has its own separator below.
 	DomainBudget = "tos.messaging.budget.v1\x00"
+	// DomainMandateBudget namespaces the identifier of one mandate's budget. It
+	// is separate from DomainBudget because a mandate budget's preimage folds in
+	// the mandate the ceiling belongs to, so two mandates over the same asset
+	// derive different budgets and cannot draw on each other's total.
+	DomainMandateBudget = "tos.messaging.mandate-budget.v1\x00"
 	// DomainNegotiationTerms namespaces one set of agreed terms.
 	DomainNegotiationTerms = "tos.messaging.negotiation-terms.v1\x00"
 	// DomainOwnerDecision namespaces what an owner signs to authorise one
@@ -118,6 +125,7 @@ var Domains = []string{
 	DomainInboxPolicy,
 	DomainNegotiationRecord,
 	DomainBudget,
+	DomainMandateBudget,
 	DomainNegotiationTerms,
 	DomainOwnerDecision,
 	DomainMandate,
