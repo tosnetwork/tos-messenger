@@ -38,6 +38,14 @@ type pairResult struct {
 	// as a pair's.
 	survival         uint64
 	survivalMeasured bool
+	// initiatorFiltering and responderFiltering are the filtering classes
+	// derived from each half's coordinator-signed cold-source receipts.
+	// Filtering is a property of each end, not of the pair, so each side gets
+	// its own class rather than the two being folded into one label. A half
+	// that carried no receipts derives undetermined, which is that word's
+	// documented meaning: silence is not evidence.
+	initiatorFiltering FilteringBehavior
+	responderFiltering FilteringBehavior
 }
 
 // combine folds the two halves of a measurement into one sample.
@@ -104,6 +112,11 @@ func combine(halves []Trial) (pairResult, error) {
 		outcome:   a.Outcome,
 		establish: maxOf(a.EstablishMillis, b.EstablishMillis),
 		reconnect: maxOf(a.ReconnectMillis, b.ReconnectMillis),
+		// The receipts were already verified: only trials that passed VerifyTrial
+		// reach pairing, so a forged or misattributed receipt never gets here. The
+		// derivation itself is evidence-only -- see DeriveFiltering.
+		initiatorFiltering: DeriveFiltering(a.FilteringObservations),
+		responderFiltering: DeriveFiltering(b.FilteringObservations),
 	}
 	if a.Failure != FailureNone {
 		result.failures = append(result.failures, a.Failure)

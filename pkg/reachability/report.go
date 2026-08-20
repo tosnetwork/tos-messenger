@@ -90,6 +90,28 @@ type wirePolicy struct {
 	Policy
 }
 
+// FilteringCounts is one cell's aggregate of derived filtering classes, one
+// count per class per side of the ordered pair. Filtering is a property of
+// each end, so the initiating and responding halves are counted separately
+// rather than folded into a joint label neither endpoint could evidence.
+//
+// This is surfaced evidence, not an input to the decision. The counts exist
+// for the humans reading the report and for policies that may one day
+// predeclare something about them; nothing in decide or summarize reads them,
+// no threshold consumes them, and Qualifying does not depend on them. Wiring
+// the filtering class into the route decision would change what the study
+// commits to, so it would require a new predeclared, content-addressed policy
+// field -- it must never happen by this aggregate quietly growing a meaning.
+//
+// Every kept pair contributes exactly one count per side. A half that carried
+// no receipts counts as undetermined, because a dropped probe and a lost probe
+// are the same silence; the receipts of an unverifiable trial contribute
+// nothing, because the whole trial was already dropped before pairing.
+type FilteringCounts struct {
+	Initiator map[FilteringBehavior]int `json:"initiator"`
+	Responder map[FilteringBehavior]int `json:"responder"`
+}
+
 // CellReport is the aggregate for one scenario.
 //
 // The rates are means over operators rather than over trials. Pooling trials
@@ -126,7 +148,11 @@ type CellReport struct {
 	// not the pair's.
 	SurvivalSamples int                  `json:"survival_samples"`
 	FailureCounts   map[FailureClass]int `json:"failure_counts"`
-	Qualifying      bool                 `json:"qualifying"`
+	// Filtering counts the filtering class derived from each half's
+	// coordinator-signed cold-source receipts. Evidence only: no threshold
+	// reads it (see FilteringCounts).
+	Filtering  FilteringCounts `json:"filtering"`
+	Qualifying bool            `json:"qualifying"`
 }
 
 // Report is the published study result.
@@ -469,6 +495,10 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 		ScenarioKey:      key,
 		PairReachability: scenario.PairReachability(),
 		FailureCounts:    map[FailureClass]int{},
+		Filtering: FilteringCounts{
+			Initiator: map[FilteringBehavior]int{},
+			Responder: map[FilteringBehavior]int{},
+		},
 	}
 
 	// The cap is applied in digest order, not arrival order, so the same set of
@@ -510,6 +540,10 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 		for _, failure := range pair.failures {
 			cell.FailureCounts[failure]++
 		}
+		// Counted over the kept pairs, exactly as the failure classes are, so
+		// the same cap that bounds an operator's samples bounds their receipts.
+		cell.Filtering.Initiator[pair.initiatorFiltering]++
+		cell.Filtering.Responder[pair.responderFiltering]++
 		switch pair.outcome {
 		case OutcomeDirect:
 			establish = append(establish, pair.establish)

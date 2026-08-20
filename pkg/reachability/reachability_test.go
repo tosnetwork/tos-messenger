@@ -1754,6 +1754,107 @@ func TestTrialFilteringReceiptsAreVerified(t *testing.T) {
 	}
 }
 
+// The report surfaces each half's derived filtering class as per-cell counts
+// and reads nothing from them: halves with receipts count under the class the
+// receipts derive, halves without count as undetermined, a forged receipt
+// takes its whole trial out before pairing, and the finding is identical with
+// and without the evidence, because no threshold consumes it.
+func TestReportSurfacesDerivedFilteringWithoutDeciding(t *testing.T) {
+	policy := testPolicy()
+	policy.Coordinators = append(policy.Coordinators, secondCoordinatorID())
+
+	var plain []Trial
+	for _, required := range policy.RequiredScenarios {
+		plain = fillCell(plain, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+	baseline, err := Aggregate(policy, plain, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate baseline: %v", err)
+	}
+	// Halves without receipts are undetermined -- silence is not evidence, and
+	// the report says so per side rather than omitting the pairs.
+	for _, cell := range baseline.Cells {
+		if cell.Filtering.Initiator[FilteringUndetermined] != cell.Samples ||
+			cell.Filtering.Responder[FilteringUndetermined] != cell.Samples {
+			t.Fatalf("receipt-free halves were not counted undetermined: %+v", cell.Filtering)
+		}
+	}
+
+	// The same measurements, now carrying receipts: every initiating half was
+	// demonstrably reached from a cold address, every responding half from a
+	// cold port on a contacted address.
+	evidenced := make([]Trial, 0, len(plain))
+	for _, trial := range plain {
+		source := FilterSourceOtherAddress
+		coordinator := secondCoordinatorKey()
+		if trial.Role == RoleB {
+			source = FilterSourceOtherPort
+			coordinator = testCoordinatorKey()
+		}
+		trial.FilteringObservations = []FilteringObservation{signFilter(
+			trial.SessionID, trial.Role, trial.OperatorID, coordinator,
+			source, observedFor(trial.Local.Family))}
+		evidenced = append(evidenced, resign(trial))
+	}
+	report, err := Aggregate(policy, evidenced, ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate evidenced: %v", err)
+	}
+	if report.UnverifiedTrials != 0 || report.IncompletePairs != 0 {
+		t.Fatalf("honest filtering receipts were dropped: %+v", report)
+	}
+	for _, cell := range report.Cells {
+		if cell.Filtering.Initiator[FilteringEndpointIndependent] != cell.Samples {
+			t.Fatalf("cold-address receipts were miscounted: %+v", cell.Filtering)
+		}
+		if cell.Filtering.Responder[FilteringAddressDependent] != cell.Samples {
+			t.Fatalf("cold-port receipts were miscounted: %+v", cell.Filtering)
+		}
+	}
+	// Decision-neutral: the receipts changed the counts and nothing else.
+	if report.Finding != baseline.Finding {
+		t.Fatalf("filtering evidence moved the finding: %q became %q", baseline.Finding, report.Finding)
+	}
+	for index, cell := range report.Cells {
+		before := baseline.Cells[index]
+		if cell.ScenarioKey != before.ScenarioKey || cell.DirectRate != before.DirectRate ||
+			cell.Qualifying != before.Qualifying || cell.Samples != before.Samples {
+			t.Fatalf("filtering evidence moved a cell aggregate: %+v vs %+v", cell, before)
+		}
+	}
+
+	// A forged receipt is not weaker filtering evidence; it takes its trial out
+	// entirely, so the pair is incomplete and contributes nothing anywhere.
+	forgedScenario := scenario(CarrierConsumerISP, ClassEdgeRISC)
+	forged := measurement(forgedScenario, opA, OutcomeDirect, FailureNone, 100)
+	receipt := signFilter(forged[0].SessionID, forged[0].Role, forged[0].OperatorID,
+		testCoordinatorKey(), FilterSourceOtherAddress, observedFor(forged[0].Local.Family))
+	signature, err := hex.DecodeString(receipt.SignatureHex)
+	if err != nil || len(signature) == 0 {
+		t.Fatalf("decode signature: %v", err)
+	}
+	signature[0] ^= 0xff
+	receipt.SignatureHex = hex.EncodeToString(signature)
+	forged[0].FilteringObservations = []FilteringObservation{receipt}
+	forged[0] = resign(forged[0])
+	report, err = Aggregate(policy, append(evidenced, forged...), ProbeUDP)
+	if err != nil {
+		t.Fatalf("aggregate with forged receipt: %v", err)
+	}
+	if report.UnverifiedTrials != 1 || report.IncompletePairs != 1 {
+		t.Fatalf("a forged receipt was not dropped with its trial: unverified=%d incomplete=%d",
+			report.UnverifiedTrials, report.IncompletePairs)
+	}
+	for _, cell := range report.Cells {
+		if cell.ScenarioKey == forgedScenario.Key() {
+			t.Fatalf("a forged receipt's pair produced a cell: %+v", cell)
+		}
+	}
+	if report.Finding != baseline.Finding {
+		t.Fatalf("a forged receipt moved the finding: %q became %q", baseline.Finding, report.Finding)
+	}
+}
+
 // The no-NAT declaration is consistent with all-equal reflections -- a public
 // host produces exactly what an endpoint-independent NAT produces, so it lands
 // in the same evidentiary bucket -- and refuted by differing ones, exactly as
