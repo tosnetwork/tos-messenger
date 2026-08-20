@@ -2,6 +2,8 @@ package evidence
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +15,9 @@ import (
 func evidenceTree(t *testing.T) string {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "input")
-	manifest, err := reachability.EncodeManifestJSON(reachability.CollectorManifest{OrchestratorRepository: "github.com/tosnetwork/tos-messenger", OrchestratorCommit: strings.Repeat("a", 40), ADNLImplementation: "tosutils-go", ADNLImplementationCommit: "v1.18.1", DependencyVersion: "v1.18.1", BinarySHA256: strings.Repeat("b", 64), Target: "linux/amd64", Toolchain: "go1.26.5", WireProfile: "tos-adnl"})
+	collectorBinary := "collector-binary"
+	collectorHash := sha256.Sum256([]byte(collectorBinary))
+	manifest, err := reachability.EncodeManifestJSON(reachability.CollectorManifest{OrchestratorRepository: "github.com/tosnetwork/tos-messenger", OrchestratorCommit: strings.Repeat("a", 40), ADNLImplementation: "tosutils-go", ADNLImplementationCommit: "v1.18.1", DependencyVersion: "v1.18.1", BinarySHA256: hex.EncodeToString(collectorHash[:]), Target: "linux/amd64", Toolchain: "go1.26.5", WireProfile: "tos-adnl"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,6 +25,7 @@ func evidenceTree(t *testing.T) string {
 		"verify.log": "verify passed\n", "build/linux-amd64.log": "amd64 passed\n", "build/linux-arm64.log": "arm64 passed\n",
 		"bin/linux-amd64/tos-messengerd": "amd64-binary", "bin/linux-arm64/tos-messengerd": "arm64-binary",
 		"collectors/lab-a.json": string(manifest), "vectors/objects.json": "[]\n", "vectors/adversarial.json": "[]\n", "vectors/e2ee.json": "{}\n",
+		"collectors/lab-a.binary": collectorBinary,
 	}
 	for name, body := range files {
 		path := filepath.Join(root, filepath.FromSlash(name))
@@ -84,6 +89,16 @@ func TestPackRefusesSymlinkedArtifact(t *testing.T) {
 	}
 	if _, err := Pack(root, filepath.Join(t.TempDir(), "bundle.zip"), strings.Repeat("c", 40), "go1.26.5"); err == nil {
 		t.Fatal("symlinked artifact packed")
+	}
+}
+
+func TestPackRefusesCollectorBinaryMismatch(t *testing.T) {
+	root := evidenceTree(t)
+	if err := os.WriteFile(filepath.Join(root, "collectors", "lab-a.binary"), []byte("another binary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Pack(root, filepath.Join(t.TempDir(), "bundle.zip"), strings.Repeat("f", 40), "go1.26.5"); err == nil {
+		t.Fatal("collector manifest accepted another binary")
 	}
 }
 

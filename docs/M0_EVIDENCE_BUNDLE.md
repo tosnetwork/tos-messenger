@@ -11,13 +11,15 @@ manifests used by the measurement tooling:
 
 ```sh
 scripts/assemble-m0-evidence.sh /absolute/path/m0-evidence.zip \
-  /absolute/path/collector-a.json /absolute/path/collector-b.json
+  /absolute/path/collector-a.json /absolute/path/collector-a-binary \
+  /absolute/path/collector-b.json /absolute/path/collector-b-binary
 ```
 
 The script runs `make verify`, cross-builds every command for Linux amd64 and
 arm64 with `CGO_ENABLED=0` and `-trimpath`, copies the committed object,
 adversarial, and E2EE vector artifacts, packages the supplied collector
-manifests, verifies the resulting archive, and prints its SHA-256.
+manifests together with the exact binaries whose hashes they name, verifies the
+resulting archive, and prints its SHA-256.
 
 `tos-m0-evidence verify -in bundle.zip` independently reopens every archive
 entry and refuses missing classes, uncommitted files, duplicate/traversing

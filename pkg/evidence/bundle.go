@@ -166,6 +166,10 @@ func Verify(path string) (Manifest, error) {
 	if len(entries) != len(manifest.Artifacts)+1 {
 		return Manifest{}, errors.New("evidence bundle contains uncommitted files")
 	}
+	artifactByPath := make(map[string]Artifact, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		artifactByPath[artifact.Path] = artifact
+	}
 	for _, artifact := range manifest.Artifacts {
 		file, found := entries[artifact.Path]
 		if !found {
@@ -179,9 +183,14 @@ func Verify(path string) (Manifest, error) {
 		if artifact.Size != int64(len(raw)) || artifact.SHA256 != hex.EncodeToString(sum[:]) {
 			return Manifest{}, errors.New("evidence artifact digest mismatch")
 		}
-		if strings.HasPrefix(artifact.Path, "collectors/") {
-			if _, err := reachability.DecodeManifestJSON(raw); err != nil {
+		if strings.HasPrefix(artifact.Path, "collectors/") && strings.HasSuffix(artifact.Path, ".json") {
+			collector, err := reachability.DecodeManifestJSON(raw)
+			if err != nil {
 				return Manifest{}, errors.New("invalid collector manifest in evidence bundle")
+			}
+			binary, found := artifactByPath[strings.TrimSuffix(artifact.Path, ".json")+".binary"]
+			if !found || binary.SHA256 != collector.BinarySHA256 {
+				return Manifest{}, errors.New("collector manifest does not match its bundled binary")
 			}
 		}
 	}
@@ -227,19 +236,33 @@ func collect(root, commit, toolchain string) ([]string, Manifest, error) {
 		return filepath.ToSlash(first) < filepath.ToSlash(second)
 	})
 	manifest := Manifest{Schema: Schema, Commit: commit, Toolchain: toolchain}
+	collectorClaims := make(map[string]string)
 	for _, path := range paths {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return nil, Manifest{}, err
 		}
 		relative, _ := filepath.Rel(root, path)
-		if strings.HasPrefix(filepath.ToSlash(relative), "collectors/") {
-			if _, err := reachability.DecodeManifestJSON(raw); err != nil {
+		relativeSlash := filepath.ToSlash(relative)
+		if strings.HasPrefix(relativeSlash, "collectors/") && strings.HasSuffix(relativeSlash, ".json") {
+			collector, err := reachability.DecodeManifestJSON(raw)
+			if err != nil {
 				return nil, Manifest{}, errors.New("invalid collector manifest in evidence input")
 			}
+			collectorClaims[strings.TrimSuffix(relativeSlash, ".json")+".binary"] = collector.BinarySHA256
 		}
 		sum := sha256.Sum256(raw)
 		manifest.Artifacts = append(manifest.Artifacts, Artifact{Path: filepath.ToSlash(relative), SHA256: hex.EncodeToString(sum[:]), Size: int64(len(raw))})
+	}
+	artifactByPath := make(map[string]Artifact, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		artifactByPath[artifact.Path] = artifact
+	}
+	for binaryPath, claimed := range collectorClaims {
+		binary, found := artifactByPath[binaryPath]
+		if !found || binary.SHA256 != claimed {
+			return nil, Manifest{}, errors.New("collector manifest does not match its input binary")
+		}
 	}
 	return paths, manifest, nil
 }
@@ -295,6 +318,11 @@ func validateRequired(manifest Manifest) error {
 	}
 	if collectors == 0 {
 		return errors.New("evidence bundle has no collector manifest")
+	}
+	for path := range seen {
+		if strings.HasPrefix(path, "collectors/") && strings.HasSuffix(path, ".json") && !seen[strings.TrimSuffix(path, ".json")+".binary"] {
+			return errors.New("collector manifest has no bundled binary")
+		}
 	}
 	return nil
 }
