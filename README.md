@@ -25,8 +25,9 @@ decision:
 | Package | Responsibility |
 |---|---|
 | `pkg/identity` | Messaging Endpoint delegation: canonical bytes, digest, strict codec, and the verifier that resolves it against finalized Agent state |
-| `pkg/directory` | Signed Messaging Contact Descriptor, the DHT locator and its TOS DHT key mapping, and the discovery half of the resolution algorithm |
+| `pkg/directory` | Signed Messaging Contact Descriptor, DHT locator/key mapping, and the route-neutral automatic refresh chain with finalized revocation and durable device-set admission |
 | `pkg/envelope` | Outer Relay Envelope and inner typed Messaging Event, including content-addressed Event IDs |
+| `pkg/mailbox` | Route-neutral offline storage state machine: crash-safe opaque envelope storage, signed StoredAck, quotas, expiry, retrieval deletion, and independently verified multi-Relay fan-out |
 | `pkg/eventlog` | Single-writer durable journal: stored inbound events with pending recovery and application leases, outbound delivery state, retry schedule, and pruning |
 | `pkg/fault` | Typed failures, retry dispositions, and what a peer may be told |
 | `pkg/admission` | The lower half of the context firewall: authority, scope, window, inbox policy, and the durable claim |
@@ -71,7 +72,9 @@ Deliberately absent, with the reason:
 - **any transport** — direct, tunnel, Relay, and HTTPS ordering is frozen only
   after the reachability study, which is why the study tooling is here and the
   transport is not;
-- **Mailbox Relay, rooms, channels, clients** — later milestones;
+- **a network-bound Mailbox Relay service, rooms, channels, clients** — the
+  route-neutral Mailbox store and redundancy contract exist, while listener,
+  retrieval authentication, and transport binding wait for the route decision;
 - **Relay lease, inbox bond, and any other commercial profile** — locked behind
   the Expansion Gate in the governing roadmap.
 

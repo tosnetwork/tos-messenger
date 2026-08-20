@@ -28,6 +28,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
+	"github.com/tosnetwork/tos-messenger/pkg/mailbox"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
@@ -335,6 +336,25 @@ func build(t *testing.T) []Vector {
 		t.Fatalf("relay envelope: %v", err)
 	}
 	add("relay-envelope", relayWire, relayWire, "")
+
+	// Relay durable-storage acknowledgement.
+	ack, err := mailbox.SignAck(mailbox.StoredAck{
+		MailboxID: relayEnvelope.OpaqueMailboxID, MessageID: relayEnvelope.MessageID,
+		CiphertextDigest: canon.Digest(relayEnvelope.Ciphertext), StoredAtUnix: baseUnix + 11,
+		ExpiresAtUnix: relayEnvelope.ExpiresAtUnix,
+	}, key)
+	if err != nil {
+		t.Fatalf("StoredAck: %v", err)
+	}
+	ackWire, err := mailbox.EncodeAckJSON(ack)
+	if err != nil {
+		t.Fatalf("StoredAck wire: %v", err)
+	}
+	ackCanonical, err := mailbox.CanonicalBytes(ack)
+	if err != nil {
+		t.Fatalf("StoredAck canonical: %v", err)
+	}
+	add("stored-ack", ackWire, ackCanonical, "")
 
 	// Typed fault response.
 	responseWire, err := fault.EncodeResponseJSON(fault.PeerCode(fault.CodeRateLimited, 30))

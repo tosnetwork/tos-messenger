@@ -302,5 +302,33 @@
     "target": "reachability-trial",
     "wire": "{\"schema\":\"tos.messaging.reachability-trial.v2\",\"endpoint\":{\"address_family\":\"ipv4\",\"public_reachability\":\"behind-nat\",\"nat_behavior\":\"endpoint-independent\",\"carrier\":\"consumer-isp\",\"udp_policy\":\"allowed\",\"mobility\":\"stationary\",\"endpoint_class\":\"desktop\",\"mapping_assistance\":\"none\"},\"pair_id\":\"pair_0f87dbc147f30f511a9482f461767259\",\"site_id\":\"site_69eda36f1ebe8798\",\"operator_id\":\"op_c2b1ad60c273381d\",\"session_id\":\"ses-trial-1\",\"role\":\"a\",\"observation\":{\"coordinator_id\":\"srv_390a5952762cbee4\",\"session_id\":\"ses-trial-1\",\"role\":\"a\",\"endpoint_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"probe\":\"udp\",\"observed\":\"203.0.113.7:41234\",\"peer_public\":\"no\",\"at_unix\":1800000000,\"coordinator_public_key_hex\":\"3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\",\"coordinator_signature_hex\":\"29927bebe37c399586f983386cc94d8f15b715e5ba20985d6ff559fb721b144988f0804bbaba5f9d9335211add863fecc5c6960a435a705a034fc38ce9ead905\"},\"endpoint_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"endpoint_signature_hex\":\"b66d18f2eae225581a583863c059e9072d17363214d7f2a9b0a97ed942b8bcdebec60a995296174dc76ec481d62fd79f66003ad96fce835392dcfa3bf95a1603\",\"probe\":\"udp\",\"outcome\":\"direct-established\",\"failure_class\":\"none\",\"establish_millis\":42,\"tunnel_hold_attempted\":true,\"started_at_unix\":1800000000,\"local_commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"peer_commit\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"local_collector_manifest_digest\":\"sha256:20f004c711189c14ba9513de9d5316f1f90be6e7ef1e5231828f2086cd975641\",\"peer_collector_manifest_digest\":\"sha256:b63aa51fe37b5a0be80759ea0fc3c536c2db97f62824313bf34191a1842262d1\"}",
     "reason": "a tunnel hold belongs to a proxy fallback; on a direct outcome there was no tunneled session to hold"
+  },
+  {
+    "name": "stored-ack/empty",
+    "layer": "decode",
+    "target": "stored-ack",
+    "wire": "",
+    "reason": "an empty document is not an object"
+  },
+  {
+    "name": "stored-ack/trailing-json",
+    "layer": "decode",
+    "target": "stored-ack",
+    "wire": "{\"schema\":\"tos.messaging.stored-ack.v1\",\"opaque_mailbox_id\":\"mbx_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"message_id\":\"msg_6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b\",\"ciphertext_digest\":\"sha256:7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c\",\"stored_at_unix\":1800000001,\"expires_at_unix\":1800003600,\"relay_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"relay_signature_hex\":\"96072c7e89a2741ac8016946a7af1e2c3293d7dc404ecf77c0e380717efbba03d4f701785ee91ce18c9d68642455f99825073141230b809ba442f6f9117c7904\"}{\"x\":1}",
+    "reason": "trailing data lets two byte streams decode to one object"
+  },
+  {
+    "name": "stored-ack/truncated",
+    "layer": "decode",
+    "target": "stored-ack",
+    "wire": "{\"schema\":\"tos.messaging.stored-ack.v1\",\"opaque_mailbox_id\":\"mbx_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"message_id\":\"msg_6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b\",\"ciphertext_digest\":\"sha256:7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c\",\"stored_at_unix\":1800000001,\"expires_at_unix\":1800003600,\"relay_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"relay_signature_hex\":\"96072c7e89a2741ac8016946a7af1e2c3293d7dc404ecf77c0e380717efbba03d4f701785ee91ce18c9d68642455f99825073141230b809ba442f6f9117c7904\"",
+    "reason": "a truncated document is not the object it was cut from"
+  },
+  {
+    "name": "stored-ack/unknown-field",
+    "layer": "decode",
+    "target": "stored-ack",
+    "wire": "{\"unknown_field\":1,\"schema\":\"tos.messaging.stored-ack.v1\",\"opaque_mailbox_id\":\"mbx_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"message_id\":\"msg_6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b\",\"ciphertext_digest\":\"sha256:7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c\",\"stored_at_unix\":1800000001,\"expires_at_unix\":1800003600,\"relay_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"relay_signature_hex\":\"96072c7e89a2741ac8016946a7af1e2c3293d7dc404ecf77c0e380717efbba03d4f701785ee91ce18c9d68642455f99825073141230b809ba442f6f9117c7904\"}",
+    "reason": "an unknown field means the sender and receiver disagree about the object's shape"
   }
 ]

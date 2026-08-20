@@ -57,6 +57,11 @@
     "canonical_sha256": "sha256:48dc40554b826d27199b5ad4405fe21b08fde8368644a71d5a9ee8cb129eebc9"
   },
   {
+    "name": "stored-ack",
+    "wire": "{\"schema\":\"tos.messaging.stored-ack.v1\",\"opaque_mailbox_id\":\"mbx_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\",\"message_id\":\"msg_6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b\",\"ciphertext_digest\":\"sha256:1a77b7fec89866d1b530d5fd4d0e4fdfdd42bfdbc5c25d26f31e530d9ee72a02\",\"stored_at_unix\":1800000011,\"expires_at_unix\":1800003600,\"relay_public_key_hex\":\"d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737\",\"relay_signature_hex\":\"5860de18009e2d715d173563fa7626929fbf7e7e1319ede45b84a02c337ad4da6b18f5690fc523823f064c145c6cf228ff8cf2b837d80fa2194c267dc21b6602\"}",
+    "canonical_sha256": "sha256:465ec6e1c3061c251e6ce3a79eb40832dfdda63d3f9b92a359676de5a0088633"
+  },
+  {
     "name": "fault-response",
     "wire": "{\"schema\":\"tos.messaging.fault-response.v1\",\"code\":\"rate-limited\",\"retry_after_seconds\":30}",
     "canonical_sha256": "sha256:627a40a5aab6232c569d70635d7445449a647392960a41299bbec16c8a321d57"

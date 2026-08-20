@@ -120,6 +120,10 @@ const (
 	// same member set commit different digests and cannot be mistaken for each
 	// other.
 	DomainRoomMembership = "tos.messaging.room-membership.v1\x00"
+	// DomainStoredAck namespaces a Relay's durable-storage acknowledgement.
+	// It is deliberately distinct from delivery and application ACK payloads:
+	// a Relay storing ciphertext proves neither recipient nor runtime action.
+	DomainStoredAck = "tos.messaging.stored-ack.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -147,6 +151,7 @@ var Domains = []string{
 	DomainReachabilityObservation,
 	DomainEconomicExecution,
 	DomainRoomMembership,
+	DomainStoredAck,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainNegotiationRecord,

@@ -14,6 +14,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
+	"github.com/tosnetwork/tos-messenger/pkg/mailbox"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/reachability"
@@ -70,6 +71,7 @@ var decoders = map[string]func([]byte) error{
 	"payload-text":         func(b []byte) error { _, err := payload.Decode("text", b); return err },
 	"negotiation-snapshot": func(b []byte) error { _, err := negotiation.DecodeSnapshotJSON(b); return err },
 	"reachability-trial":   func(b []byte) error { _, err := reachability.DecodeTrialJSON(b); return err },
+	"stored-ack":           func(b []byte) error { _, err := mailbox.DecodeAckJSON(b); return err },
 }
 
 func TestAdversarialCorpus(t *testing.T) {
@@ -169,6 +171,7 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 		"prekey-bundle":        validBundleJSON(t),
 		"messaging-event":      validEventJSON(t),
 		"negotiation-snapshot": validSnapshotJSON(t),
+		"stored-ack":           validStoredAckJSON(t),
 	}
 	baselineTargets := make([]string, 0, len(jsonBaselines))
 	for target := range jsonBaselines {
@@ -338,4 +341,21 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 
 	sort.Slice(corpus, func(i, j int) bool { return corpus[i].Name < corpus[j].Name })
 	return corpus
+}
+
+func validStoredAckJSON(t *testing.T) []byte {
+	t.Helper()
+	ack, err := mailbox.SignAck(mailbox.StoredAck{
+		MailboxID: "mbx_" + strings.Repeat("5a", 32), MessageID: "msg_" + strings.Repeat("6b", 32),
+		CiphertextDigest: "sha256:" + strings.Repeat("7c", 32), StoredAtUnix: baseUnix + 1,
+		ExpiresAtUnix: baseUnix + 3600,
+	}, endpointKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := mailbox.EncodeAckJSON(ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
