@@ -295,6 +295,28 @@ func observationJSON(t *testing.T, tamper bool) string {
 	return string(encoded)
 }
 
+// corpusManifestDigest is the digest of a fixed collector manifest, varied by
+// seed so the baseline trial's two halves name two different builds the way
+// two real endpoints do.
+func corpusManifestDigest(t *testing.T, seed string) string {
+	t.Helper()
+	digest, err := reachability.CollectorManifest{
+		OrchestratorRepository:   "github.com/tosnetwork/tos-messenger",
+		OrchestratorCommit:       strings.Repeat("a", 40),
+		ADNLImplementation:       "tonutils-go",
+		ADNLImplementationCommit: "v1.0.0-" + seed,
+		DependencyVersion:        "v1.0.0-" + seed,
+		BinarySHA256:             strings.Repeat("ab", 32),
+		Target:                   "linux/amd64",
+		Toolchain:                "go1.26.5",
+		WireProfile:              "ton-adnl",
+	}.Digest()
+	if err != nil {
+		t.Fatalf("manifest digest: %v", err)
+	}
+	return digest
+}
+
 // signedTrial builds a complete measurement half signed by the endpoint that
 // produced it, with a coordinator attestation over the same session, role,
 // endpoint key, and probe. The coordinator key is a parameter so a baseline can
@@ -338,19 +360,21 @@ func signedTrial(t *testing.T, coordinatorKey ed25519.PrivateKey) reachability.T
 			UDPPolicy: reachability.UDPAllowed, Mobility: reachability.MobilityStationary,
 			EndpointClass: reachability.ClassDesktop, Assistance: reachability.AssistanceNone,
 		},
-		PairID:          pairID,
-		SiteID:          siteID,
-		OperatorID:      operatorID,
-		SessionID:       session,
-		Role:            reachability.RoleA,
-		Observation:     observation,
-		Probe:           reachability.ProbeUDP,
-		Outcome:         reachability.OutcomeDirect,
-		Failure:         reachability.FailureNone,
-		EstablishMillis: 42,
-		StartedAtUnix:   baseUnix,
-		LocalCommit:     strings.Repeat("a", 40),
-		PeerCommit:      strings.Repeat("b", 40),
+		PairID:              pairID,
+		SiteID:              siteID,
+		OperatorID:          operatorID,
+		SessionID:           session,
+		Role:                reachability.RoleA,
+		Observation:         observation,
+		Probe:               reachability.ProbeUDP,
+		Outcome:             reachability.OutcomeDirect,
+		Failure:             reachability.FailureNone,
+		EstablishMillis:     42,
+		StartedAtUnix:       baseUnix,
+		LocalCommit:         strings.Repeat("a", 40),
+		PeerCommit:          strings.Repeat("b", 40),
+		LocalManifestDigest: corpusManifestDigest(t, "local"),
+		PeerManifestDigest:  corpusManifestDigest(t, "peer"),
 	}
 	signed, err := reachability.SignTrial(trial, endpointKey())
 	if err != nil {
@@ -499,7 +523,7 @@ func trialDuplicateFilteringCoordinatorJSON(t *testing.T) string {
 	document, err := json.Marshal(struct {
 		Schema string `json:"schema"`
 		reachability.Trial
-	}{Schema: "tos.messaging.reachability-trial.v1", Trial: trial})
+	}{Schema: reachability.TrialSchema, Trial: trial})
 	if err != nil {
 		t.Fatalf("encode trial: %v", err)
 	}

@@ -304,6 +304,17 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 		trialDuplicateFilteringCoordinatorJSON(t),
 		"one coordinator attesting the same cold source twice could pad the set or hide two conflicting receipts under one name")
 
+	// The collector-manifest digests are required: a trial that cannot name
+	// which collector build produced each half cannot be filed under a
+	// per-implementation report, so the field is refused missing or malformed
+	// rather than defaulted.
+	add("reachability-trial/missing-manifest-digest", "reachability-trial",
+		setField(string(validTrialJSON(t)), "local_collector_manifest_digest", ""),
+		"a trial without its own collector manifest digest cannot say which build produced it")
+	add("reachability-trial/short-manifest-digest", "reachability-trial",
+		setField(string(validTrialJSON(t)), "peer_collector_manifest_digest", "sha256:abc"),
+		"a truncated manifest digest is not a commitment to any build")
+
 	sort.Slice(corpus, func(i, j int) bool { return corpus[i].Name < corpus[j].Name })
 	return corpus
 }

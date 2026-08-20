@@ -277,6 +277,7 @@ func (r *runner) punchBurst(peers []netip.AddrPort) {
 		message, err := Encode(Message{
 			Kind: KindPunch, SessionID: r.config.SessionID, Role: r.config.Role,
 			Nonce: nonce, Sequence: uint32(round), Commit: r.config.Commit,
+			ManifestDigest: r.config.ManifestDigest,
 		})
 		if err != nil {
 			return

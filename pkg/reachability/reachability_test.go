@@ -31,6 +31,38 @@ func nextSession() string {
 	return fmt.Sprintf("ses_%012d", sessionCounter)
 }
 
+// testManifest is a complete collector manifest whose identity varies with the
+// seed, so the two halves of a constructed pair can name two different builds
+// the way two real endpoints do.
+func testManifest(seed string) CollectorManifest {
+	return CollectorManifest{
+		OrchestratorRepository:   "github.com/tosnetwork/tos-messenger",
+		OrchestratorCommit:       commitA,
+		ADNLImplementation:       "tonutils-go",
+		ADNLImplementationCommit: "v1.0.0-" + seed,
+		DependencyVersion:        "v1.0.0-" + seed,
+		BinarySHA256:             strings.Repeat("ab", 32),
+		Target:                   "linux/amd64",
+		Toolchain:                "go1.26.5",
+		WireProfile:              "ton-adnl",
+	}
+}
+
+func testManifestDigest(seed string) string {
+	digest, err := testManifest(seed).Digest()
+	if err != nil {
+		panic(err)
+	}
+	return digest
+}
+
+// manifestA and manifestB are the digests every constructed pair uses, mirrored
+// between the halves the way the commits are.
+var (
+	manifestA = testManifestDigest("collector-a")
+	manifestB = testManifestDigest("collector-b")
+)
+
 func mapped(carrier Carrier, class EndpointClass) EndpointStratum {
 	return EndpointStratum{
 		Family:        FamilyIPv4,
@@ -191,23 +223,27 @@ func rawTrial(s Scenario, session string, role Role, operator string,
 		panic(err)
 	}
 	local, peer := commitA, commitB
+	localManifest, peerManifest := manifestA, manifestB
 	if role == RoleB {
 		local, peer = commitB, commitA
+		localManifest, peerManifest = manifestB, manifestA
 	}
 	return Trial{
-		Local:           localOf(s, role),
-		PairID:          pair,
-		SiteID:          siteFor(operator),
-		OperatorID:      operator,
-		SessionID:       session,
-		Role:            role,
-		Probe:           ProbeUDP,
-		Outcome:         outcome,
-		Failure:         failure,
-		EstablishMillis: millis,
-		StartedAtUnix:   1_800_000_000,
-		LocalCommit:     local,
-		PeerCommit:      peer,
+		Local:               localOf(s, role),
+		PairID:              pair,
+		SiteID:              siteFor(operator),
+		OperatorID:          operator,
+		SessionID:           session,
+		Role:                role,
+		Probe:               ProbeUDP,
+		Outcome:             outcome,
+		Failure:             failure,
+		EstablishMillis:     millis,
+		StartedAtUnix:       1_800_000_000,
+		LocalCommit:         local,
+		PeerCommit:          peer,
+		LocalManifestDigest: localManifest,
+		PeerManifestDigest:  peerManifest,
 	}
 }
 
@@ -579,11 +615,16 @@ func TestTrialValidationRejectsIncoherentRecords(t *testing.T) {
 			t.EstablishMillis = 0
 			t.SurvivalSeconds = 5
 		},
-		"bad operator":        func(t *Trial) { t.OperatorID = "operator-1" },
-		"bad probe":           func(t *Trial) { t.Probe = "quic" },
-		"no start time":       func(t *Trial) { t.StartedAtUnix = 0 },
-		"short commit":        func(t *Trial) { t.LocalCommit = "abc" },
-		"missing peer commit": func(t *Trial) { t.PeerCommit = "" },
+		"bad operator":                  func(t *Trial) { t.OperatorID = "operator-1" },
+		"bad probe":                     func(t *Trial) { t.Probe = "quic" },
+		"no start time":                 func(t *Trial) { t.StartedAtUnix = 0 },
+		"short commit":                  func(t *Trial) { t.LocalCommit = "abc" },
+		"missing peer commit":           func(t *Trial) { t.PeerCommit = "" },
+		"missing local manifest digest": func(t *Trial) { t.LocalManifestDigest = "" },
+		"short peer manifest digest":    func(t *Trial) { t.PeerManifestDigest = "sha256:abc" },
+		"zero manifest digest": func(t *Trial) {
+			t.LocalManifestDigest = "sha256:" + strings.Repeat("0", 64)
+		},
 		"nat on a public endpoint": func(t *Trial) {
 			t.Local.Reachability = PublicAddress
 		},
@@ -988,6 +1029,15 @@ func TestContradictingHalvesAreDiscarded(t *testing.T) {
 		},
 		"commits": func(pair []Trial) []Trial {
 			pair[1].PeerCommit = "3333333333333333333333333333333333333333"
+			pair[1] = resign(pair[1])
+			return pair
+		},
+		// Same discipline for the collector manifests: one half claiming its
+		// peer ran a build the peer never named is a contradiction, not a
+		// sample, because which implementation measured is part of what was
+		// measured.
+		"manifests": func(pair []Trial) []Trial {
+			pair[1].PeerManifestDigest = testManifestDigest("collector-somebody-else")
 			pair[1] = resign(pair[1])
 			return pair
 		},

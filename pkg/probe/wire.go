@@ -31,9 +31,12 @@ const (
 	Schema = "tos.messaging.reachability-probe.v1"
 
 	// MinRequestBytes is the padded floor every client request must reach. It
-	// is what makes a response strictly smaller than its request, and it rose
-	// when responses began carrying a signed attestation.
-	MinRequestBytes = 768
+	// is what makes a response strictly smaller than its request. It rose when
+	// responses began carrying a signed attestation, and again when a pairing
+	// answer began relaying the peer's collector-manifest digest: a floor the
+	// answer can exceed is a pairing the anti-amplification rule silently
+	// drops.
+	MinRequestBytes = 896
 	// MaxMessageBytes bounds one datagram this package will parse.
 	MaxMessageBytes = 1400
 	// MaxCandidates bounds one advertised candidate set.
@@ -106,6 +109,7 @@ var (
 	serverPattern       = regexp.MustCompile(`^srv_[0-9a-f]{16}$`)
 	paddingPattern      = regexp.MustCompile(`^p*$`)
 	commitPattern       = regexp.MustCompile(`^[0-9a-f]{40}$|^[0-9a-f]{64}$`)
+	manifestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	hexKeyPattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	hexSignaturePattern = regexp.MustCompile(`^[0-9a-f]{128}$`)
 	kinds               = map[Kind]struct{}{
@@ -133,7 +137,16 @@ type Message struct {
 	ServerID   string   `json:"server_id,omitempty"`
 	Commit     string   `json:"commit,omitempty"`
 	PeerCommit string   `json:"peer_commit,omitempty"`
-	PeerPublic string   `json:"peer_public,omitempty"`
+	// ManifestDigest is the digest of the sender's collector manifest,
+	// presented wherever the commit is: a commit names a repository revision,
+	// while the manifest names the build that actually spoke on the wire, and
+	// with per-implementation collectors the two halves of a pair have to learn
+	// each other's build the same way they learn each other's commit.
+	ManifestDigest string `json:"manifest_digest,omitempty"`
+	// PeerManifestDigest relays, in a pairing answer, the manifest digest the
+	// peer presented, exactly as PeerCommit does.
+	PeerManifestDigest string `json:"peer_manifest_digest,omitempty"`
+	PeerPublic         string `json:"peer_public,omitempty"`
 	// EndpointKey is the key the endpoint will sign its trial with, presented
 	// so the coordinator can attest to a party rather than only to a session.
 	EndpointKey string `json:"endpoint_key,omitempty"`
@@ -330,6 +343,12 @@ func Validate(message Message) error {
 	}
 	if message.Commit != "" && !commitPattern.MatchString(message.Commit) {
 		return errors.New("invalid probe commit")
+	}
+	if message.ManifestDigest != "" && !manifestPattern.MatchString(message.ManifestDigest) {
+		return errors.New("invalid probe manifest digest")
+	}
+	if message.PeerManifestDigest != "" && !manifestPattern.MatchString(message.PeerManifestDigest) {
+		return errors.New("invalid probe peer manifest digest")
 	}
 	if message.SignerKey != "" && !hexKeyPattern.MatchString(message.SignerKey) {
 		return errors.New("invalid coordinator public key")

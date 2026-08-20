@@ -32,23 +32,23 @@ func TestMeasureRefusesUnusableInput(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	session := "ses_0123456789abcdef0123456789abcdef"
 
-	if _, err := measure(ctx, "", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, labels); err == nil {
+	if _, _, err := measure(ctx, "", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, labels); err == nil {
 		t.Fatal("expected a missing coordinator to be refused")
 	}
 	blank := labels
 	blank.operator = ""
-	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, blank); err == nil {
+	if _, _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, blank); err == nil {
 		t.Fatal("expected a missing operator to be refused")
 	}
 	noSite := labels
 	noSite.site = ""
-	if _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, noSite); err == nil {
+	if _, _, err := measure(ctx, "127.0.0.1:1", session, "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, noSite); err == nil {
 		t.Fatal("expected a missing site to be refused")
 	}
-	if _, err := measure(ctx, "127.0.0.1:1", "ses_short", "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, labels); err == nil {
+	if _, _, err := measure(ctx, "127.0.0.1:1", "ses_short", "a", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, labels); err == nil {
 		t.Fatal("expected an invalid session to be refused")
 	}
-	if _, err := measure(ctx, "127.0.0.1:1", session, "c", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, labels); err == nil {
+	if _, _, err := measure(ctx, "127.0.0.1:1", session, "c", ":0", commit, identityFile(t), reachability.ProbeUDP, time.Second, time.Second, sessionPhases{}, labels); err == nil {
 		t.Fatal("expected an invalid role to be refused")
 	}
 }
@@ -58,7 +58,7 @@ func TestMeasureRefusesUnusableInput(t *testing.T) {
 func TestMeasureRefusesToRecordAnUnclassifiedTrial(t *testing.T) {
 	labels := declared{operator: "lab", site: "uplink", carrier: "consumer-isp", udpPolicy: "allowed",
 		mobility: "stationary", class: "desktop", assistance: "none"}
-	_, err := measure(context.Background(), "127.0.0.1:9",
+	_, _, err := measure(context.Background(), "127.0.0.1:9",
 		"ses_0123456789abcdef0123456789abcdef", "a", "127.0.0.1:0",
 		strings.Repeat("a", 40), identityFile(t), reachability.ProbeUDP,
 		200*time.Millisecond, 200*time.Millisecond, sessionPhases{}, labels)
@@ -122,13 +122,13 @@ func TestADNLTrialEndToEnd(t *testing.T) {
 	}
 	results := make(chan outcome, 2)
 	go func() {
-		trial, err := measure(ctx, coordinatorAddress, session, "a", "127.0.0.1:0",
+		trial, _, err := measure(ctx, coordinatorAddress, session, "a", "127.0.0.1:0",
 			strings.Repeat("a", 40), identityFile(t), reachability.ProbeADNL,
 			8*time.Second, 10*time.Second, sessionPhases{}, labels)
 		results <- outcome{trial: trial, err: err}
 	}()
 	go func() {
-		trial, err := measure(ctx, coordinatorAddress, session, "b", "127.0.0.1:0",
+		trial, _, err := measure(ctx, coordinatorAddress, session, "b", "127.0.0.1:0",
 			strings.Repeat("b", 40), identityFile(t), reachability.ProbeADNL,
 			8*time.Second, 10*time.Second, sessionPhases{}, peerLabels)
 		results <- outcome{trial: trial, err: err}

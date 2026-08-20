@@ -66,6 +66,11 @@ type Config struct {
 	// which is being collected.
 	TunnelAddr string
 	Commit     string
+	// ManifestDigest is the digest of this endpoint's collector manifest,
+	// presented to the peer wherever the commit is. The commit names a
+	// repository revision; the manifest names the build that spoke on the wire,
+	// which is the provenance a per-implementation study report is split by.
+	ManifestDigest string
 	// EndpointKeyHex is the public key this endpoint will sign its trial with.
 	// It is presented to the coordinator so the attestation names a party, not
 	// only a session.
@@ -102,6 +107,11 @@ type Result struct {
 	PeerAddress       netip.AddrPort
 	Failure           reachability.FailureClass
 	PeerCommit        string
+	// PeerManifestDigest is the collector-manifest digest the peer presented,
+	// learned during pairing exactly as PeerCommit is. A trial cannot be
+	// emitted without it, because pair joining cross-checks what each side
+	// claims the other ran.
+	PeerManifestDigest string
 	// PeerTransportKey is the key the peer will run its measured transport
 	// under, learned during pairing.
 	PeerTransportKey string
@@ -180,9 +190,13 @@ func (r *runner) observe(message Message, from netip.AddrPort) {
 	if r.result.PeerCommit == "" && message.Commit != "" {
 		r.result.PeerCommit = message.Commit
 	}
+	if r.result.PeerManifestDigest == "" && message.ManifestDigest != "" {
+		r.result.PeerManifestDigest = message.ManifestDigest
+	}
 	acknowledgement, err := Encode(Message{
 		Kind: KindPunchAck, SessionID: r.config.SessionID, Role: r.config.Role,
 		Nonce: message.Nonce, Sequence: message.Sequence, Commit: r.config.Commit,
+		ManifestDigest: r.config.ManifestDigest,
 	})
 	if err != nil {
 		return
@@ -315,6 +329,9 @@ func validateConfig(config *Config) error {
 	}
 	if config.Commit != "" && !commitPattern.MatchString(config.Commit) {
 		return errors.New("invalid probe commit")
+	}
+	if config.ManifestDigest != "" && !manifestPattern.MatchString(config.ManifestDigest) {
+		return errors.New("invalid probe manifest digest")
 	}
 	if config.BindTimeout < 0 || config.PairTimeout < 0 || config.PunchTimeout < 0 || config.PollInterval <= 0 {
 		return errors.New("invalid probe timeouts")
@@ -594,7 +611,8 @@ func (r *runner) exchange(ctx context.Context) ([]netip.AddrPort, error) {
 		request, err := EncodeRequest(Message{
 			Kind: KindPair, SessionID: r.config.SessionID, Role: r.config.Role,
 			Nonce: nonce, Candidates: candidates, Commit: r.config.Commit,
-			EndpointKey: r.config.EndpointKeyHex, Probe: string(r.config.Probe),
+			ManifestDigest: r.config.ManifestDigest,
+			EndpointKey:    r.config.EndpointKeyHex, Probe: string(r.config.Probe),
 			TransportKey: r.transportKeyHex,
 		})
 		if err != nil {
@@ -616,6 +634,7 @@ func (r *runner) exchange(ctx context.Context) ([]netip.AddrPort, error) {
 			if reply.Kind == KindPairOK && reply.Nonce == nonce && len(reply.Candidates) > 0 {
 				r.classifySelf()
 				r.result.PeerCommit = reply.PeerCommit
+				r.result.PeerManifestDigest = reply.PeerManifestDigest
 				r.result.PeerTransportKey = reply.PeerTransportKey
 				r.recordObservation(reply)
 				peers := make([]netip.AddrPort, 0, len(reply.Candidates)+len(r.learned))
@@ -677,6 +696,7 @@ func (r *runner) punch(ctx context.Context, peers []netip.AddrPort) {
 		request, err := Encode(Message{
 			Kind: KindPunch, SessionID: r.config.SessionID, Role: r.config.Role,
 			Nonce: nonce, Sequence: sequence, Commit: r.config.Commit,
+			ManifestDigest: r.config.ManifestDigest,
 		})
 		if err != nil {
 			r.result.Failure = reachability.FailureInternal
@@ -700,6 +720,9 @@ func (r *runner) punch(ctx context.Context, peers []netip.AddrPort) {
 			case KindPunchAck:
 				if r.result.PeerCommit == "" && reply.Commit != "" {
 					r.result.PeerCommit = reply.Commit
+				}
+				if r.result.PeerManifestDigest == "" && reply.ManifestDigest != "" {
+					r.result.PeerManifestDigest = reply.ManifestDigest
 				}
 				if reply.Nonce != nonce || r.result.Established {
 					continue

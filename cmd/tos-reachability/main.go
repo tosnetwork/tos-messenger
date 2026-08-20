@@ -16,17 +16,33 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/probe"
 	"github.com/tosnetwork/tos-messenger/pkg/reachability"
+)
+
+const (
+	// orchestratorRepository is what this binary is: the process that runs the
+	// rendezvous, drives the ADNL implementation, and signs the trial.
+	orchestratorRepository = "github.com/tosnetwork/tos-messenger"
+	// adnlModulePath is the module that actually speaks ADNL on the wire for
+	// this collector. The manifest pins its resolved version, because two
+	// binaries at one orchestrator commit can still have compiled different
+	// implementation code.
+	adnlModulePath = "github.com/xssnick/tonutils-go"
+	// wireProfile names the ADNL lineage this collector speaks, so its
+	// evidence cannot be silently pooled with a dialect it never exercised.
+	wireProfile = "ton-adnl"
 )
 
 type declared struct {
@@ -51,6 +67,7 @@ func main() {
 		"udp for datagram feasibility, adnl for the session establishment a route decision needs")
 	pairTimeout := flag.Duration("pair-timeout", probe.DefaultPairTimeout, "how long to wait for the peer")
 	punchTimeout := flag.Duration("punch-timeout", probe.DefaultPunchTimeout, "how long to attempt a direct path")
+	manifestOut := flag.String("manifest-out", "", "also write this collector's manifest JSON to a file; the evidence bundle needs the document, not only its digest")
 
 	var phases sessionPhases
 	flag.DurationVar(&phases.hold, "hold", 0, "how long past establishment to keep the adnl session alive and measure survival, 0 for establishment only")
@@ -68,7 +85,7 @@ func main() {
 	flag.StringVar(&labels.assistance, "mapping-assistance", string(reachability.AssistanceNone), "none, static-port-mapping, or discovery-assisted")
 	flag.Parse()
 
-	trial, err := measure(context.Background(), *coordinators, *session, *role, *listen, *commit, *identity,
+	trial, manifest, err := measure(context.Background(), *coordinators, *session, *role, *listen, *commit, *identity,
 		reachability.ProbeKind(*probeKind), *pairTimeout, *punchTimeout, phases, labels)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tos-reachability:", err)
@@ -83,8 +100,27 @@ func main() {
 		fmt.Fprintln(os.Stderr, "tos-reachability:", err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "outcome=%s failure=%s establish_ms=%d survival_s=%d reconnect_ms=%d\n",
-		trial.Outcome, trial.Failure, trial.EstablishMillis, trial.SurvivalSeconds, trial.ReconnectMillis)
+	if *manifestOut != "" {
+		if err := writeManifest(*manifestOut, manifest); err != nil {
+			fmt.Fprintln(os.Stderr, "tos-reachability:", err)
+			os.Exit(1)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "outcome=%s failure=%s establish_ms=%d survival_s=%d reconnect_ms=%d manifest=%s\n",
+		trial.Outcome, trial.Failure, trial.EstablishMillis, trial.SurvivalSeconds, trial.ReconnectMillis,
+		trial.LocalManifestDigest)
+}
+
+// writeManifest writes the manifest document the trial's local digest names.
+func writeManifest(path string, manifest reachability.CollectorManifest) error {
+	encoded, err := reachability.EncodeManifestJSON(manifest)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		return errors.New("write manifest file")
+	}
+	return nil
 }
 
 // sessionPhases carries the measurement phases that run beyond the direct
@@ -100,39 +136,50 @@ type sessionPhases struct {
 
 func measure(ctx context.Context, coordinators, session, role, listen, commit, identity string,
 	probeKind reachability.ProbeKind, pairTimeout, punchTimeout time.Duration,
-	phases sessionPhases, labels declared) (reachability.Trial, error) {
+	phases sessionPhases, labels declared) (reachability.Trial, reachability.CollectorManifest, error) {
 	addresses := splitAddresses(coordinators)
 	if len(addresses) == 0 {
-		return reachability.Trial{}, errors.New("at least one coordinator is required")
+		return reachability.Trial{}, reachability.CollectorManifest{}, errors.New("at least one coordinator is required")
 	}
 	if commit == "" {
 		commit = buildCommit()
 	}
 	if commit == "" {
-		return reachability.Trial{}, errors.New("the exact commit is required and could not be read from build information")
+		return reachability.Trial{}, reachability.CollectorManifest{}, errors.New("the exact commit is required and could not be read from build information")
+	}
+	// The manifest describes the build that is about to measure, so it is
+	// constructed before anything runs and fails closed: a record whose
+	// provenance cannot be stated is a record that must not be written.
+	manifest, err := collectorManifest(commit)
+	if err != nil {
+		return reachability.Trial{}, reachability.CollectorManifest{}, err
+	}
+	manifestDigest, err := manifest.Digest()
+	if err != nil {
+		return reachability.Trial{}, reachability.CollectorManifest{}, err
 	}
 	operator, err := reachability.OperatorID(labels.operator)
 	if err != nil {
-		return reachability.Trial{}, err
+		return reachability.Trial{}, manifest, err
 	}
 	site, err := reachability.SiteID(labels.site)
 	if err != nil {
-		return reachability.Trial{}, err
+		return reachability.Trial{}, manifest, err
 	}
 	// Both endpoints of one attempt derive the same pair identifier from the
 	// session they shared, so the two halves are recognisable as one
 	// measurement rather than two independent successes.
 	pair, err := reachability.PairID(session)
 	if err != nil {
-		return reachability.Trial{}, err
+		return reachability.Trial{}, manifest, err
 	}
 	endpointKey, err := loadOrCreateKey(identity)
 	if err != nil {
-		return reachability.Trial{}, err
+		return reachability.Trial{}, manifest, err
 	}
 	endpointPublic, ok := endpointKey.Public().(ed25519.PublicKey)
 	if !ok {
-		return reachability.Trial{}, errors.New("unexpected endpoint key type")
+		return reachability.Trial{}, manifest, errors.New("unexpected endpoint key type")
 	}
 	endpointPublicHex := hex.EncodeToString(endpointPublic)
 	configuration := probe.Config{
@@ -147,6 +194,7 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		MeasureReconnect:  phases.reconnect,
 		TunnelAddr:        phases.tunnel,
 		Commit:            commit,
+		ManifestDigest:    manifestDigest,
 		EndpointKeyHex:    endpointPublicHex,
 		Probe:             probeKind,
 	}
@@ -161,22 +209,29 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 	case reachability.ProbeADNL:
 		result, err = probe.RunADNL(ctx, configuration)
 	default:
-		return reachability.Trial{}, errors.New("probe must be udp or adnl")
+		return reachability.Trial{}, manifest, errors.New("probe must be udp or adnl")
 	}
 	if err != nil {
-		return reachability.Trial{}, err
+		return reachability.Trial{}, manifest, err
 	}
 	if result.PeerCommit == "" {
-		return reachability.Trial{}, errors.New("the peer's commit was never learned, so the trial cannot name what it measured")
+		return reachability.Trial{}, manifest, errors.New("the peer's commit was never learned, so the trial cannot name what it measured")
+	}
+	// The peer's manifest digest is learned during pairing exactly as its
+	// commit is, and a trial without it cannot say which collector build the
+	// far side ran -- which is the provenance a per-implementation report is
+	// split by, so no record is written.
+	if result.PeerManifestDigest == "" {
+		return reachability.Trial{}, manifest, errors.New("the peer's collector manifest was never learned, so the trial cannot name what it measured against")
 	}
 	if result.Reachability == "" {
-		return reachability.Trial{}, errors.New("this endpoint's own public reachability was never established")
+		return reachability.Trial{}, manifest, errors.New("this endpoint's own public reachability was never established")
 	}
 	// Without a verified attestation the endpoint's declared situation would be
 	// its own unchecked claim about where its result counts, so no record is
 	// written.
 	if result.Observation.SignatureHex == "" {
-		return reachability.Trial{}, errors.New("no coordinator attested to this measurement")
+		return reachability.Trial{}, manifest, errors.New("no coordinator attested to this measurement")
 	}
 
 	trial := reachability.Trial{
@@ -206,21 +261,92 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		StartedAtUnix:         uint64(time.Now().Unix()),
 		LocalCommit:           commit,
 		PeerCommit:            result.PeerCommit,
+		LocalManifestDigest:   manifestDigest,
+		PeerManifestDigest:    result.PeerManifestDigest,
 		TxBytes:               result.TxBytes,
 		RxBytes:               result.RxBytes,
 		EstablishMillis:       result.EstablishMillis,
 	}
 	if err := classify(&trial, result); err != nil {
-		return reachability.Trial{}, err
+		return reachability.Trial{}, manifest, err
 	}
 	signed, err := reachability.SignTrial(trial, endpointKey)
 	if err != nil {
-		return reachability.Trial{}, err
+		return reachability.Trial{}, manifest, err
 	}
 	if err := signed.Validate(); err != nil {
-		return reachability.Trial{}, err
+		return reachability.Trial{}, manifest, err
 	}
-	return signed, nil
+	return signed, manifest, nil
+}
+
+// collectorManifest describes this build: which orchestrator at which commit,
+// driving which ADNL implementation at which resolved version, compiled by
+// which toolchain for which target, hashed as the exact binary that ran. Every
+// field fails closed, because a manifest that guessed any of them would be
+// provenance the evidence bundle cannot check.
+func collectorManifest(commit string) (reachability.CollectorManifest, error) {
+	version, err := adnlModuleVersion()
+	if err != nil {
+		return reachability.CollectorManifest{}, err
+	}
+	binaryHash, err := executableSHA256()
+	if err != nil {
+		return reachability.CollectorManifest{}, err
+	}
+	return reachability.CollectorManifest{
+		OrchestratorRepository: orchestratorRepository,
+		OrchestratorCommit:     commit,
+		ADNLImplementation:     "tonutils-go",
+		// The module version is both the implementation pin and the dependency
+		// version for a collector whose ADNL code arrives as a Go module: the
+		// version is the identity the build actually resolved.
+		ADNLImplementationCommit: version,
+		DependencyVersion:        version,
+		BinarySHA256:             binaryHash,
+		Target:                   runtime.GOOS + "/" + runtime.GOARCH,
+		Toolchain:                runtime.Version(),
+		WireProfile:              wireProfile,
+	}, nil
+}
+
+// adnlModuleVersion reads the resolved version of the ADNL module from build
+// information, honouring a replace directive because the replacement is what
+// was compiled.
+func adnlModuleVersion() (string, error) {
+	info, available := debug.ReadBuildInfo()
+	if !available {
+		return "", errors.New("build information is unavailable, so the adnl implementation version cannot be stated")
+	}
+	for _, dependency := range info.Deps {
+		if dependency.Path != adnlModulePath {
+			continue
+		}
+		if dependency.Replace != nil {
+			dependency = dependency.Replace
+		}
+		if dependency.Version == "" {
+			break
+		}
+		return dependency.Version, nil
+	}
+	return "", errors.New("the adnl implementation does not appear in build information")
+}
+
+// executableSHA256 hashes the running binary, failing closed if it cannot be
+// read: a manifest is about the build that ran, and a hash of anything else
+// would be a checkable-looking field that checks nothing.
+func executableSHA256() (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", errors.New("the running binary could not be located for hashing")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", errors.New("the running binary could not be read for hashing")
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // classify translates what the probe measured into the trial's outcome

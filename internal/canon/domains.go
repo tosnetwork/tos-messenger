@@ -73,8 +73,19 @@ const (
 	DomainDeviceSession = "tos.messaging.device-session.v1\x00"
 	// DomainE2EEBinding namespaces the associated data of a ciphertext.
 	DomainE2EEBinding = "tos.messaging.e2ee-binding.v1\x00"
-	// DomainReachabilityTrial namespaces one measured trial record.
-	DomainReachabilityTrial = "tos.messaging.reachability-trial.v1\x00"
+	// DomainReachabilityTrial namespaces one measured trial record. v2 folds the
+	// collector-manifest digests of both endpoints into the preimage, so a trial
+	// commits to exactly which collector builds produced each half rather than
+	// only to two repository commits -- a sidecar collector is a different
+	// implementation at the same orchestrator commit, and the commit alone
+	// cannot tell them apart.
+	DomainReachabilityTrial = "tos.messaging.reachability-trial.v2\x00"
+	// DomainReachabilityCollectorManifest namespaces the content-addressed
+	// description of one collector build: orchestrator, ADNL implementation,
+	// dependency version, binary hash, target, toolchain, and wire profile. The
+	// digest over it is what a trial commits and what the two halves of a pair
+	// cross-check about each other.
+	DomainReachabilityCollectorManifest = "tos.messaging.reachability-collector-manifest.v1\x00"
 	// DomainReachabilityPolicy namespaces a predeclared acceptance policy.
 	DomainReachabilityPolicy = "tos.messaging.reachability-policy.v1\x00"
 	// DomainReachabilityOperator namespaces the opaque operator derivation.
@@ -121,6 +132,7 @@ var Domains = []string{
 	DomainDeviceSession,
 	DomainE2EEBinding,
 	DomainReachabilityTrial,
+	DomainReachabilityCollectorManifest,
 	DomainReachabilityPolicy,
 	DomainReachabilityOperator,
 	DomainReachabilitySite,

@@ -27,8 +27,11 @@ import (
 )
 
 const (
-	// TrialSchema is the strict record schema identifier.
-	TrialSchema = "tos.messaging.reachability-trial.v1"
+	// TrialSchema is the strict record schema identifier. v2 requires both
+	// endpoints' collector-manifest digests and folds them into the canonical
+	// preimage: this repository is pre-launch, so the break is loud rather than
+	// compatible, and a v1 record simply does not decode.
+	TrialSchema = "tos.messaging.reachability-trial.v2"
 	// PolicySchema is the strict acceptance-policy schema identifier.
 	PolicySchema = "tos.messaging.reachability-policy.v1"
 
@@ -378,9 +381,21 @@ type Trial struct {
 	StartedAtUnix   uint64       `json:"started_at_unix"`
 	LocalCommit     string       `json:"local_commit"`
 	PeerCommit      string       `json:"peer_commit"`
-	TxBytes         uint64       `json:"tx_bytes,omitempty"`
-	RxBytes         uint64       `json:"rx_bytes,omitempty"`
-	PeakRSSBytes    uint64       `json:"peak_rss_bytes,omitempty"`
+	// LocalManifestDigest is the digest of this endpoint's own CollectorManifest.
+	// The commit names a repository revision; the manifest names the build --
+	// which ADNL implementation at which version, compiled by what for what,
+	// speaking which wire profile -- and with per-implementation collectors the
+	// build is the provenance a study report is split by.
+	LocalManifestDigest string `json:"local_collector_manifest_digest"`
+	// PeerManifestDigest is the manifest digest the peer presented during
+	// pairing, learned exactly as the peer's commit is. Pair joining
+	// cross-checks each half's local digest against the other half's peer
+	// digest, so two halves that disagree about what was measured against are a
+	// contradiction, not a sample.
+	PeerManifestDigest string `json:"peer_collector_manifest_digest"`
+	TxBytes            uint64 `json:"tx_bytes,omitempty"`
+	RxBytes            uint64 `json:"rx_bytes,omitempty"`
+	PeakRSSBytes       uint64 `json:"peak_rss_bytes,omitempty"`
 }
 
 type wireTrial struct {
@@ -430,6 +445,13 @@ func (t Trial) Validate() error {
 	}
 	if !commitPattern.MatchString(t.LocalCommit) || !commitPattern.MatchString(t.PeerCommit) {
 		return errors.New("trial must name the exact commits it measured")
+	}
+	// The manifest digests are required, not optional: a trial that cannot say
+	// which collector build produced each half cannot be filed under a
+	// per-implementation report, and an all-zero digest is an uninitialised
+	// field wearing the shape of a commitment.
+	if !canon.ValidDigest(t.LocalManifestDigest) || !canon.ValidDigest(t.PeerManifestDigest) {
+		return errors.New("trial must name both endpoints' collector manifest digests")
 	}
 	if t.Outcome == OutcomeDirect {
 		if t.Failure != FailureNone {
@@ -517,6 +539,12 @@ func (t Trial) CanonicalBytes() ([]byte, error) {
 	canon.Uint64(buffer, t.StartedAtUnix)
 	canon.Text(buffer, t.LocalCommit)
 	canon.Text(buffer, t.PeerCommit)
+	// The manifest digests are inside the signed preimage for the same reason
+	// the commits are: a signed record whose provenance could be rewritten
+	// after signing would carry evidence for whichever implementation an editor
+	// preferred.
+	canon.Text(buffer, t.LocalManifestDigest)
+	canon.Text(buffer, t.PeerManifestDigest)
 	canon.Uint64(buffer, t.TxBytes)
 	canon.Uint64(buffer, t.RxBytes)
 	canon.Uint64(buffer, t.PeakRSSBytes)

@@ -157,8 +157,11 @@ a small tooling offset that is identical across scenarios; comparisons between
 cells are unaffected. And the collector speaks the TON lineage of ADNL through
 `tonutils-go`; before a route decision frozen on this evidence is acted on,
 the trials should be cross-checked against the TOS node's own adnl stack —
-every trial records the commit of the collector that produced it, so the
-provenance survives.
+every trial records the commit and the content-addressed collector manifest
+(orchestrator repository and commit, ADNL implementation and version, binary
+hash, toolchain, target, wire profile) of both endpoints, so the provenance
+survives and evidence from different collector implementations can be told
+apart.
 
 ## What is measured and what is declared
 

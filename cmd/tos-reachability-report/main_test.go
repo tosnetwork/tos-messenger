@@ -29,6 +29,28 @@ func TestExamplePolicyIsValid(t *testing.T) {
 	}
 }
 
+// manifestDigestFor is a fixed collector-manifest digest, varied by seed so a
+// constructed trial can name a different build for each end the way a real one
+// does.
+func manifestDigestFor(t *testing.T, seed string) string {
+	t.Helper()
+	digest, err := reachability.CollectorManifest{
+		OrchestratorRepository:   "github.com/tosnetwork/tos-messenger",
+		OrchestratorCommit:       strings.Repeat("a", 40),
+		ADNLImplementation:       "tonutils-go",
+		ADNLImplementationCommit: "v1.0.0-" + seed,
+		DependencyVersion:        "v1.0.0-" + seed,
+		BinarySHA256:             strings.Repeat("ab", 32),
+		Target:                   "linux/amd64",
+		Toolchain:                "go1.26.5",
+		WireProfile:              "ton-adnl",
+	}.Digest()
+	if err != nil {
+		t.Fatalf("manifest digest: %v", err)
+	}
+	return digest
+}
+
 func pairFor(t *testing.T, session string) string {
 	t.Helper()
 	pair, err := reachability.PairID(session)
@@ -141,6 +163,8 @@ func TestBuildReportsInsufficientEvidence(t *testing.T) {
 		Outcome: reachability.OutcomeDirect, Failure: reachability.FailureNone,
 		EstablishMillis: 12, StartedAtUnix: 1_800_000_000,
 		LocalCommit: strings.Repeat("a", 40), PeerCommit: strings.Repeat("b", 40),
+		LocalManifestDigest: manifestDigestFor(t, "local"),
+		PeerManifestDigest:  manifestDigestFor(t, "peer"),
 	}
 	signed, err := reachability.SignTrial(trial, endpointKey)
 	if err != nil {

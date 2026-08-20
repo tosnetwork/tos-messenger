@@ -81,6 +81,13 @@ func combine(halves []Trial) (pairResult, error) {
 	if a.LocalCommit != b.PeerCommit || a.PeerCommit != b.LocalCommit {
 		return pairResult{}, errors.New("the halves disagree about which commits were measured")
 	}
+	// The collector-manifest digests cross the same way, and for the same
+	// reason: with per-implementation collectors, which build each side ran is
+	// part of what was measured, and two halves that disagree about it are a
+	// contradiction to drop and count, not a sample.
+	if a.LocalManifestDigest != b.PeerManifestDigest || a.PeerManifestDigest != b.LocalManifestDigest {
+		return pairResult{}, errors.New("the halves disagree about which collector manifests were measured")
+	}
 	// The coordinator signs, about each endpoint, whether that endpoint's peer
 	// was publicly addressable -- the one reachability fact an endpoint cannot
 	// observe about itself. Each half's signed peer observation is cross-checked

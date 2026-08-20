@@ -74,11 +74,24 @@ type pairing struct {
 }
 
 type endpointState struct {
-	observed     netip.AddrPort
-	candidates   []string
-	commit       string
-	probe        string
-	transportKey string
+	observed   netip.AddrPort
+	candidates []string
+	commit     string
+	// manifestDigest is the collector-manifest digest the endpoint presented,
+	// relayed to its peer exactly as the commit is, so both halves of a trial
+	// can name which build the other side ran.
+	manifestDigest string
+	probe          string
+	transportKey   string
+}
+
+// peerAnswer is what a completed pairing tells one endpoint about the other.
+type peerAnswer struct {
+	candidates     []string
+	peerPublic     string
+	commit         string
+	manifestDigest string
+	transportKey   string
 }
 
 // CoordinatorOptions configures a coordinator.
@@ -210,7 +223,7 @@ func (c *Coordinator) Handle(request []byte, from netip.AddrPort) []byte {
 			response.Signature = attested.SignatureHex
 		}
 	case KindPair:
-		peer, peerPublic, peerCommit, peerTransportKey, reason := c.pair(message, from)
+		peer, reason := c.pair(message, from)
 		if reason != "" {
 			response = Message{
 				Kind: KindError, SessionID: message.SessionID, Role: message.Role,
@@ -221,15 +234,16 @@ func (c *Coordinator) Handle(request []byte, from netip.AddrPort) []byte {
 		response = Message{
 			Kind: KindPairOK, SessionID: message.SessionID, Role: message.Role,
 			Nonce: message.Nonce, Observed: from.String(), ServerID: c.serverID,
-			Candidates: peer, PeerPublic: peerPublic, PeerCommit: peerCommit,
-			PeerTransportKey: peerTransportKey,
+			Candidates: peer.candidates, PeerPublic: peer.peerPublic,
+			PeerCommit: peer.commit, PeerManifestDigest: peer.manifestDigest,
+			PeerTransportKey: peer.transportKey,
 		}
 		// The address observed here and whether the peer is publicly
 		// addressable are the two facts that place a trial in its stratum, and
 		// an endpoint cannot check either about itself. Attesting to them is
 		// what stops a stratum label from being the operator's own claim.
-		if peerPublic != "" {
-			attested, err := c.attest(message, from, peerPublic)
+		if peer.peerPublic != "" {
+			attested, err := c.attest(message, from, peer.peerPublic)
 			if err != nil {
 				return nil
 			}
@@ -324,7 +338,7 @@ func (c *Coordinator) attestBind(message Message, from netip.AddrPort) (reachabi
 // second question. An endpoint that had to guess it would be labelling its own
 // stratum from an assumption, and the stratum is what the decision is computed
 // over.
-func (c *Coordinator) pair(message Message, from netip.AddrPort) ([]string, string, string, string, string) {
+func (c *Coordinator) pair(message Message, from netip.AddrPort) (peerAnswer, string) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	now := c.now()
@@ -333,7 +347,7 @@ func (c *Coordinator) pair(message Message, from netip.AddrPort) ([]string, stri
 	session, found := c.sessions[message.SessionID]
 	if !found {
 		if len(c.sessions) >= c.capacity {
-			return nil, "", "", "", "coordinator is at capacity"
+			return peerAnswer{}, "coordinator is at capacity"
 		}
 		session = &pairing{endpoints: make(map[Role]*endpointState, 2), done: make(map[Role]bool, 2)}
 		c.sessions[message.SessionID] = session
@@ -341,18 +355,19 @@ func (c *Coordinator) pair(message Message, from netip.AddrPort) ([]string, stri
 	session.touchedAt = now
 	session.endpoints[message.Role] = &endpointState{
 		observed: from, candidates: message.Candidates, commit: message.Commit,
-		probe: message.Probe, transportKey: message.TransportKey,
+		manifestDigest: message.ManifestDigest,
+		probe:          message.Probe, transportKey: message.TransportKey,
 	}
 
 	peer, present := session.endpoints[message.Role.Peer()]
 	if !present {
-		return nil, "", "", "", ""
+		return peerAnswer{}, ""
 	}
 	// Two halves measuring different probes are not one measurement, and the
 	// aggregation would discard the pair anyway. Refusing here tells the
 	// operators at pairing time rather than at report time.
 	if peer.probe != message.Probe {
-		return nil, "", "", "", "the two endpoints are measuring different probes"
+		return peerAnswer{}, "the two endpoints are measuring different probes"
 	}
 	peerPublic := PeerPublicNo
 	for _, candidate := range peer.candidates {
@@ -373,7 +388,10 @@ func (c *Coordinator) pair(message Message, from netip.AddrPort) ([]string, stri
 			break
 		}
 	}
-	return candidates, peerPublic, peer.commit, peer.transportKey, ""
+	return peerAnswer{
+		candidates: candidates, peerPublic: peerPublic, commit: peer.commit,
+		manifestDigest: peer.manifestDigest, transportKey: peer.transportKey,
+	}, ""
 }
 
 func (c *Coordinator) expireLocked(now time.Time) {
