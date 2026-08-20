@@ -3,6 +3,7 @@ package eventlog
 import (
 	"bytes"
 	"crypto/ed25519"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -161,6 +162,25 @@ func TestReacceptingTheSameSetIsIdempotent(t *testing.T) {
 	}
 	if len(succession.Removed) != 0 {
 		t.Fatalf("an unchanged set removed devices: %v", succession.Removed)
+	}
+}
+
+func TestDeviceLedgerReturnsEquivocationEvidence(t *testing.T) {
+	ledger := deviceLedger(t)
+	now := time.Unix(1_800_000_000, 0)
+	current := bundleSet(t, map[string]uint64{deviceID(1): 1_800_000_000})
+	if _, err := ledger.AcceptSet(deviceEndpoint, current, now); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	candidate := bundleSet(t, map[string]uint64{deviceID(2): 1_800_000_000})
+	_, err := ledger.AcceptSet(deviceEndpoint, candidate, now)
+	if !errors.Is(err, ErrDeviceEquivocation) {
+		t.Fatalf("equal-time fork was not classified: %v", err)
+	}
+	var evidence *e2ee.SetEquivocationError
+	if !errors.As(err, &evidence) || evidence.CurrentDigest == evidence.CandidateDigest ||
+		evidence.IssuedAtUnix != uint64(now.Unix()) {
+		t.Fatalf("equivocation evidence is incomplete: %+v", evidence)
 	}
 }
 

@@ -2,7 +2,9 @@ package e2ee
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -218,12 +220,37 @@ func SignBundle(bundle Bundle, endpointKey ed25519.PrivateKey) (Bundle, error) {
 	if len(endpointKey) != ed25519.PrivateKeySize {
 		return Bundle{}, errors.New("invalid bundle signing key")
 	}
+	return SignBundleWith(bundle, endpointKey)
+}
+
+// SignBundleWith signs through a narrow crypto.Signer boundary. An endpoint
+// may keep its online identity key in an HSM or another isolated process; the
+// prekey publisher needs signatures, not possession of the key bytes.
+//
+// The returned signature is verified before it leaves this function. A remote
+// signer that selected the wrong key or returned malformed output therefore
+// cannot create a publication that only fails after the descriptor changes.
+func SignBundleWith(bundle Bundle, signer crypto.Signer) (Bundle, error) {
+	if signer == nil {
+		return Bundle{}, errors.New("no bundle signer")
+	}
+	public, ok := signer.Public().(ed25519.PublicKey)
+	if !ok || len(public) != ed25519.PublicKeySize {
+		return Bundle{}, errors.New("bundle signer is not Ed25519")
+	}
 	bundle.EndpointSignature = nil
 	preimage, err := BundleSigningBytes(bundle)
 	if err != nil {
 		return Bundle{}, err
 	}
-	bundle.EndpointSignature = ed25519.Sign(endpointKey, preimage)
+	signature, err := signer.Sign(rand.Reader, preimage, crypto.Hash(0))
+	if err != nil {
+		return Bundle{}, errors.New("sign prekey bundle")
+	}
+	if len(signature) != ed25519.SignatureSize || !ed25519.Verify(public, preimage, signature) {
+		return Bundle{}, errors.New("bundle signer returned an invalid signature")
+	}
+	bundle.EndpointSignature = append([]byte(nil), signature...)
 	return bundle, nil
 }
 

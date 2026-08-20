@@ -10,6 +10,30 @@ import (
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 )
 
+var (
+	// ErrSetRollback reports an observed publication older than the accepted
+	// freshness watermark.
+	ErrSetRollback = errors.New("prekey device set rolled back")
+	// ErrSetEquivocation reports different non-retirement content at the same
+	// freshness watermark. The two digests are intentionally not tie-broken:
+	// arrival order is not endpoint authority.
+	ErrSetEquivocation = errors.New("prekey device set equivocated")
+)
+
+// SetEquivocationError identifies the two conflicting commitments. The
+// caller already holds the signed candidate set and can export this summary
+// alongside it; errors.Is(err, ErrSetEquivocation) classifies the refusal.
+type SetEquivocationError struct {
+	CurrentDigest   string
+	CandidateDigest string
+	IssuedAtUnix    uint64
+}
+
+func (e *SetEquivocationError) Error() string { return ErrSetEquivocation.Error() }
+
+// Unwrap supports errors.Is without discarding the conflicting digests.
+func (e *SetEquivocationError) Unwrap() error { return ErrSetEquivocation }
+
 // SetSummary is what a receiver remembers about a peer's device set.
 //
 // It is the anchor for two protections a single set cannot provide. Rollback:
@@ -112,7 +136,7 @@ func Succeed(current SetSummary, tombstones map[string]struct{}, next []Bundle) 
 	// retire the single newest-keyed device, the owner re-keys some other
 	// device in the same publication, which publishing already re-signs.
 	if summary.NewestIssuedAtUnix < current.NewestIssuedAtUnix {
-		return Succession{}, errors.New("a successor set cannot lower the freshness of the one it replaces")
+		return Succession{}, ErrSetRollback
 	}
 	if isSubset(summary.BundleDigests, current.BundleDigests) {
 		// A pure retirement: nothing new was issued, devices only left, and
@@ -125,7 +149,10 @@ func Succeed(current SetSummary, tombstones map[string]struct{}, next []Bundle) 
 	if summary.NewestIssuedAtUnix == current.NewestIssuedAtUnix {
 		// Same freshness, content that is not a pure retirement: two sets
 		// claiming the same moment, orderable only by who spoke last.
-		return Succession{}, errors.New("a successor set at equal freshness must be a pure retirement")
+		return Succession{}, &SetEquivocationError{
+			CurrentDigest: current.Digest, CandidateDigest: summary.Digest,
+			IssuedAtUnix: summary.NewestIssuedAtUnix,
+		}
 	}
 	return Succession{Accepted: summary, Removed: removed}, nil
 }

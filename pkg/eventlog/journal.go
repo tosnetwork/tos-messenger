@@ -295,7 +295,7 @@ func openJournalAt(root string, quota Quota) (*Journal, error) {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return nil, errors.New("event journal root must be a private directory")
 	}
-	for _, name := range []string{inboundDir, outboundDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, escrowLocatorDir, agentPacketDir} {
+	for _, name := range []string{inboundDir, outboundDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, localPrekeyDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, escrowLocatorDir, agentPacketDir} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			return nil, errors.New("create event journal directory")
 		}

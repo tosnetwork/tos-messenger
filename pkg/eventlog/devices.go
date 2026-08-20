@@ -26,7 +26,12 @@ const (
 )
 
 // ErrDeviceRollback reports a set older than the one on record.
-var ErrDeviceRollback = errors.New("the peer's device set regressed")
+var ErrDeviceRollback = e2ee.ErrSetRollback
+
+// ErrDeviceEquivocation reports two non-retirement sets at the same freshness
+// watermark. It aliases the protocol-level refusal so callers can classify it
+// at either layer and inspect e2ee.SetEquivocationError for both digests.
+var ErrDeviceEquivocation = e2ee.ErrSetEquivocation
 
 // ErrRevokedDevice reports a device that was removed and came back.
 var ErrRevokedDevice = errors.New("a revoked device reappeared")
