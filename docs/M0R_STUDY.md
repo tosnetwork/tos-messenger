@@ -15,11 +15,15 @@ Three properties are enforced by the code rather than by convention.
 **Thresholds are predeclared.** The acceptance policy is content-addressed and
 every report names the policy digest it was judged against. Thresholds invented
 after seeing the data produce a different digest, which is visible in the
-report.
+report. The session gates are predeclared the same way: the policy names the
+minimum direct- and tunnel-survival rates, the reconnect success rate, and the
+attempted-sample floors behind them, all folded into the digest.
 
 **A weak study yields no finding.** If any required stratum was never measured,
 or was measured with too few samples, too few distinct operator identifiers, or from
-too few independent networks, the report's finding is `insufficient-evidence`
+too few independent networks — or a survival or reconnect gate the finding
+depends on lacks its predeclared minimum of attempted samples — the report's
+finding is `insufficient-evidence`
 and the tool exits non-zero. It never degrades into a weak preference, because
 a weak preference is what the implementation would then be built on.
 
@@ -284,7 +288,15 @@ NAT, or whether a session recovers after a network change.
 **M0-R2, route decision.** An ADNL probe exercises the real handshake and
 session establishment, keepalive survival, and reconnect, and only its
 evidence produces `direct-first`, `tunnel-first`, `hybrid-by-network-class`,
-or `relay-required`. Reliable transfer is not yet measured -- every phase is
+or `relay-required`. The session phases are decisive, not merely surfaced:
+`direct-first` additionally requires every required cell to clear the
+predeclared direct-survival gate (and every cell exercising a mobility event
+the reconnect gate), `tunnel-first` requires the tunnel-survival gate, and a
+cell that cannot show the predeclared minimum of attempted pair samples for a
+gate its finding depends on makes the finding `insufficient-evidence`, with the
+missing gate named. A study where every session establishes and then dies, or
+where no reconnect ever succeeds, therefore cannot freeze direct-first.
+Reliable transfer is not yet measured -- every phase is
 ping-based -- and is planned as a bounded ADNL echo-query cross-check first,
 with RLDP acceptance belonging to the transport milestone.
 

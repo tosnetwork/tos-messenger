@@ -102,7 +102,10 @@ replace the `coordinators` array with your real `srv_` identifier(s).
 Do not shrink the thresholds to make the pilot "pass". The example policy's
 minimums are the point; a policy weak enough for one operator to satisfy is
 refused by the tooling anyway, and editing thresholds after seeing data is
-the failure mode the content-addressed policy digest exists to prevent.
+the failure mode the content-addressed policy digest exists to prevent. The
+same goes for the session gates the v2 policy predeclares — the survival and
+reconnect rates and their attempted-sample floors — which the route decision
+reads alongside the establishment rates.
 
 ## 4. One UDP pair
 

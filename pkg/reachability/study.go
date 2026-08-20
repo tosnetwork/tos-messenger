@@ -34,8 +34,13 @@ const (
 	// folded into the canonical preimage, and a v1 record simply does not
 	// decode.
 	TrialSchema = "tos.messaging.reachability-trial.v2"
-	// PolicySchema is the strict acceptance-policy schema identifier.
-	PolicySchema = "tos.messaging.reachability-policy.v1"
+	// PolicySchema is the strict acceptance-policy schema identifier. v2 is a
+	// loud pre-launch break adding the session gates: the survival and
+	// reconnect thresholds a route decision reads, and the attempted-sample
+	// minimums under them. They change the policy digest deliberately --
+	// thresholds invented after seeing the data must show -- and a v1 policy
+	// simply does not decode.
+	PolicySchema = "tos.messaging.reachability-policy.v2"
 
 	// MaxScenariosPerPolicy bounds a predeclared scenario set.
 	MaxScenariosPerPolicy = 128
@@ -333,6 +338,14 @@ func (s Scenario) PairReachability() string {
 // is actually about.
 func (s Scenario) Asymmetric() bool {
 	return s.Initiator.Key() != s.Responder.Key()
+}
+
+// ExercisesMobility reports whether either endpoint declared a non-stationary
+// mobility event. The reconnect gate a route decision reads applies exactly to
+// these cells: a stationary pair's reconnect says nothing about whether a
+// session survives the network changes the mobility vocabulary names.
+func (s Scenario) ExercisesMobility() bool {
+	return s.Initiator.Mobility != MobilityStationary || s.Responder.Mobility != MobilityStationary
 }
 
 func member[T ~string](membership map[T]struct{}, value T) bool {

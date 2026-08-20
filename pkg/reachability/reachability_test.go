@@ -295,19 +295,65 @@ func fallbackTrial(s Scenario, operator string, outcome Outcome, failure Failure
 
 func testPolicy() Policy {
 	return Policy{
-		MinSamplesPerCell:           4,
-		MinOperatorsPerCell:         2,
-		MinSitesPerCell:             2,
-		MaxTrialsPerOperatorPerCell: 8,
-		DirectViableRate:            0.75,
-		TunnelViableRate:            0.9,
-		Coordinators:                []string{testCoordinatorID()},
+		MinSamplesPerCell:                  4,
+		MinOperatorsPerCell:                2,
+		MinSitesPerCell:                    2,
+		MaxTrialsPerOperatorPerCell:        8,
+		DirectViableRate:                   0.75,
+		TunnelViableRate:                   0.9,
+		MinDirectSurvivalRate:              0.75,
+		MinTunnelSurvivalRate:              0.75,
+		MinReconnectSuccessRate:            0.75,
+		MinSurvivalSamplesPerCell:          2,
+		MinReconnectSamplesPerMobilityCell: 2,
+		Coordinators:                       []string{testCoordinatorID()},
 		RequiredScenarios: []Scenario{
 			scenario(CarrierConsumerISP, ClassDesktop),
 			scenario(CarrierCarrierGrade, ClassEdgeARM),
 			mobileScenario(),
 		},
 	}
+}
+
+// withHealthyDirectPhases marks one ADNL direct half with the healthy
+// post-establishment story: the hold ran and survived the full window, and on
+// the initiating half the deliberate reconnect ran and succeeded. The
+// responder never dials, so its half truthfully carries no reconnect flags --
+// the pair join takes the initiator's.
+func withHealthyDirectPhases(trial Trial) Trial {
+	trial.HoldAttempted, trial.HoldCompleted = true, true
+	trial.SurvivalSeconds = 60
+	if trial.Role == RoleA {
+		trial.ReconnectAttempted, trial.ReconnectSucceeded = true, true
+		trial.ReconnectMillis = 40
+	}
+	return resign(trial)
+}
+
+// withHealthyTunnelPhases marks one ADNL proxy-fallback half as having held
+// the tunneled session for the full window.
+func withHealthyTunnelPhases(trial Trial) Trial {
+	trial.TunnelHoldAttempted, trial.TunnelHoldCompleted = true, true
+	return resign(trial)
+}
+
+// adnlStudy moves a constructed UDP study to the ADNL probe and gives every
+// half the healthy phase story its outcome supports, so a fixture that used to
+// exercise only establishment keeps deciding what it decided before the
+// survival and reconnect gates existed.
+func adnlStudy(trials []Trial) []Trial {
+	moved := make([]Trial, len(trials))
+	for index, trial := range trials {
+		trial = switchProbe(trial, ProbeADNL)
+		switch trial.Outcome {
+		case OutcomeDirect:
+			trial = withHealthyDirectPhases(trial)
+		case OutcomeProxyFallback:
+			trial = withHealthyTunnelPhases(trial)
+		}
+		moved[index] = trial
+	}
+	return moved
 }
 
 func fillCell(trials []Trial, s Scenario, direct int, outcome Outcome, failure FailureClass, other int) []Trial {
@@ -331,7 +377,14 @@ func TestPolicyRejectsSmokeTests(t *testing.T) {
 			p.DirectViableRate = 0.9
 			p.TunnelViableRate = 0.5
 		},
-		"no scenarios": func(p *Policy) { p.RequiredScenarios = nil },
+		"zero survival rate": func(p *Policy) { p.MinDirectSurvivalRate = 0 },
+		"survival rate above one": func(p *Policy) {
+			p.MinTunnelSurvivalRate = 1.5
+		},
+		"zero reconnect rate":         func(p *Policy) { p.MinReconnectSuccessRate = 0 },
+		"no survival sample minimum":  func(p *Policy) { p.MinSurvivalSamplesPerCell = 0 },
+		"no reconnect sample minimum": func(p *Policy) { p.MinReconnectSamplesPerMobilityCell = 0 },
+		"no scenarios":                func(p *Policy) { p.RequiredScenarios = nil },
 		"public pairs only": func(p *Policy) {
 			p.RequiredScenarios = []Scenario{publicScenario()}
 		},
@@ -398,8 +451,15 @@ func TestPolicyDigestIsOrderIndependentAndThresholdSensitive(t *testing.T) {
 		"coordinators": func(p *Policy) {
 			p.Coordinators = append(p.Coordinators, "srv_9999999999999999")
 		},
-		"direct rate": func(p *Policy) { p.DirectViableRate = 0.74 },
-		"tunnel rate": func(p *Policy) { p.TunnelViableRate = 0.95 },
+		"direct rate":             func(p *Policy) { p.DirectViableRate = 0.74 },
+		"tunnel rate":             func(p *Policy) { p.TunnelViableRate = 0.95 },
+		"direct survival rate":    func(p *Policy) { p.MinDirectSurvivalRate = 0.8 },
+		"tunnel survival rate":    func(p *Policy) { p.MinTunnelSurvivalRate = 0.8 },
+		"reconnect success rate":  func(p *Policy) { p.MinReconnectSuccessRate = 0.8 },
+		"survival sample minimum": func(p *Policy) { p.MinSurvivalSamplesPerCell = 3 },
+		"reconnect sample minimum": func(p *Policy) {
+			p.MinReconnectSamplesPerMobilityCell = 3
+		},
 		"scenarios": func(p *Policy) {
 			p.RequiredScenarios = append(p.RequiredScenarios, scenario(CarrierMobile, ClassEdgeRISC))
 		},
@@ -486,9 +546,7 @@ func TestDecisionFollowsMeasurement(t *testing.T) {
 					trials = fillCell(trials, required, 0, OutcomeRelayFallback, FailurePeerUnreachable, remaining)
 				}
 			}
-			for index := range trials {
-				trials[index] = switchProbe(trials[index], ProbeADNL)
-			}
+			trials = adnlStudy(trials)
 			report, err := Aggregate(policy, trials, ProbeADNL)
 			if err != nil {
 				t.Fatalf("aggregate: %v", err)
@@ -1290,6 +1348,279 @@ func TestInitiatingDirectionIsPartOfTheCell(t *testing.T) {
 	}
 }
 
+// The phase booleans join at the pair the way each phase works: a hold was
+// attempted by the pair only when both halves ran it and completed only when
+// both survived the window, while reconnect -- initiator-only by design -- is
+// the OR across halves. Halves that disagree about completion are describing
+// per-phase outcomes (one side's keepalives die first), not contradicting each
+// other, so the pair is kept and joined rather than dropped.
+func TestPhaseBooleansJoinAcrossHalves(t *testing.T) {
+	policy := testPolicy()
+	target := policy.RequiredScenarios[0]
+
+	var trials []Trial
+	makePair := func(operator string, shapeA, shapeB func(*Trial)) {
+		pair := directPair(target, operator, 100)
+		for index := range pair {
+			pair[index] = switchProbe(pair[index], ProbeADNL)
+		}
+		shapeA(&pair[0])
+		pair[0] = resign(pair[0])
+		shapeB(&pair[1])
+		pair[1] = resign(pair[1])
+		trials = append(trials, pair...)
+	}
+	held := func(completed bool, span uint64) func(*Trial) {
+		return func(trial *Trial) {
+			trial.HoldAttempted, trial.HoldCompleted = true, completed
+			trial.SurvivalSeconds = span
+		}
+	}
+	nothing := func(*Trial) {}
+	heldAndReconnected := func(trial *Trial) {
+		held(true, 60)(trial)
+		trial.ReconnectAttempted, trial.ReconnectSucceeded = true, true
+		trial.ReconnectMillis = 40
+	}
+
+	// One pair whose halves disagree about completion, one whose responder
+	// never held, two that held cleanly. Only the first initiator reconnected.
+	makePair(opA, heldAndReconnected, held(false, 30))
+	makePair(opB, held(true, 60), nothing)
+	makePair(opC, held(true, 60), held(true, 45))
+	makePair(opA, held(true, 60), held(true, 50))
+	for _, required := range policy.RequiredScenarios[1:] {
+		trials = append(trials, adnlStudy(fillCell(nil, required, 4, OutcomeFailed, FailureHandshake, 0))...)
+	}
+
+	report, err := Aggregate(policy, trials, ProbeADNL)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	// Disagreeing about completion is a measurement, never a contradiction.
+	if report.IncompletePairs != 0 {
+		t.Fatalf("a completion disagreement was dropped as a contradiction: %+v", report)
+	}
+	var cell CellReport
+	for _, candidate := range report.Cells {
+		if candidate.ScenarioKey == target.Key() {
+			cell = candidate
+		}
+	}
+	// The one-sided hold does not count as attempted; the disagreeing pair
+	// counts as attempted and not completed.
+	if cell.HoldAttemptedSamples != 3 {
+		t.Fatalf("expected three hold-attempted pairs, got %d", cell.HoldAttemptedSamples)
+	}
+	// Operator means: opA completed one of two attempted, opC one of one, opB
+	// attempted nothing and contributes no invented rate.
+	if cell.DirectSurvivalRate == nil || *cell.DirectSurvivalRate != 0.75 {
+		t.Fatalf("unexpected direct survival rate: %+v", cell.DirectSurvivalRate)
+	}
+	// The initiator's reconnect speaks for the pair.
+	if cell.ReconnectAttemptedSamples != 1 {
+		t.Fatalf("expected one reconnect-attempted pair, got %d", cell.ReconnectAttemptedSamples)
+	}
+	if cell.ReconnectSuccessRate == nil || *cell.ReconnectSuccessRate != 1 {
+		t.Fatalf("unexpected reconnect success rate: %+v", cell.ReconnectSuccessRate)
+	}
+}
+
+func reasonNaming(reasons []string, fragment string) bool {
+	for _, reason := range reasons {
+		if strings.Contains(reason, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+// A study whose sessions all establish and then die passes every
+// establishment threshold and must still not freeze direct-first: the
+// survival gate is what the route decision now reads.
+func TestDyingSessionsBlockDirectFirst(t *testing.T) {
+	policy := testPolicy()
+	var trials []Trial
+	for _, required := range policy.RequiredScenarios {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+	for index := range trials {
+		trial := switchProbe(trials[index], ProbeADNL)
+		// Both halves ran the hold and neither survived the window. The span
+		// each did survive stays recorded: attempted-and-not-completed, which
+		// is exactly what the booleans exist to say.
+		trial.HoldAttempted = true
+		trial.SurvivalSeconds = 10
+		if trial.Role == RoleA {
+			trial.ReconnectAttempted, trial.ReconnectSucceeded = true, true
+			trial.ReconnectMillis = 40
+		}
+		trials[index] = resign(trial)
+	}
+	report, err := Aggregate(policy, trials, ProbeADNL)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.Finding == FindingDirectFirst {
+		t.Fatalf("dying sessions froze direct-first: %+v", report.Reasons)
+	}
+	// The tunnel was never exercised, so nothing supports tunnel-first either:
+	// the honest answer is no finding, with the survival failure named.
+	if report.Finding != FindingInsufficient {
+		t.Fatalf("expected no finding, got %q (reasons %v)", report.Finding, report.Reasons)
+	}
+	if !reasonNaming(report.Reasons, "did not survive the hold window") {
+		t.Fatalf("the survival failure was not named: %v", report.Reasons)
+	}
+	// The cell shows why: every pair attempted, none completed.
+	for _, cell := range report.Cells {
+		if cell.HoldAttemptedSamples != 4 || cell.DirectSurvivalRate == nil || *cell.DirectSurvivalRate != 0 {
+			t.Fatalf("the cell does not show the failed gate: %+v", cell)
+		}
+	}
+}
+
+// Reconnect failures in a cell that exercises a mobility event disqualify
+// direct-first there, whatever the establishment and survival rates say.
+func TestFailedReconnectsBlockDirectFirst(t *testing.T) {
+	policy := testPolicy()
+	var trials []Trial
+	for _, required := range policy.RequiredScenarios {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+	for index := range trials {
+		trial := switchProbe(trials[index], ProbeADNL)
+		trial.HoldAttempted, trial.HoldCompleted = true, true
+		trial.SurvivalSeconds = 60
+		if trial.Role == RoleA {
+			trial.ReconnectAttempted = true
+			// Every reconnect in the mobility cell ran and failed; elsewhere
+			// they succeeded.
+			if trial.Local.Mobility == MobilityStationary {
+				trial.ReconnectSucceeded = true
+				trial.ReconnectMillis = 40
+			}
+		}
+		trials[index] = resign(trial)
+	}
+	report, err := Aggregate(policy, trials, ProbeADNL)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.Finding == FindingDirectFirst {
+		t.Fatalf("failed reconnects froze direct-first: %+v", report.Reasons)
+	}
+	if report.Finding != FindingHybrid {
+		t.Fatalf("expected the mobility cell alone to disqualify, got %q (reasons %v)", report.Finding, report.Reasons)
+	}
+	if !reasonNaming(report.Reasons, "reconnects did not succeed") {
+		t.Fatalf("the reconnect failure was not named: %v", report.Reasons)
+	}
+}
+
+// Tunnel-first is a claim that tunneled sessions hold up. A study where every
+// tunneled hold dies establishes tunnels and still must not freeze
+// tunnel-first.
+func TestTunnelSurvivalBlocksTunnelFirst(t *testing.T) {
+	policy := testPolicy()
+	var trials []Trial
+	for _, required := range policy.RequiredScenarios {
+		trials = fillCell(trials, required, 0, OutcomeProxyFallback, FailureHandshake, 4)
+	}
+	for index := range trials {
+		trial := switchProbe(trials[index], ProbeADNL)
+		// The hold ran over every tunneled session and none survived.
+		trial.TunnelHoldAttempted = true
+		trials[index] = resign(trial)
+	}
+	report, err := Aggregate(policy, trials, ProbeADNL)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.Finding != FindingRelayRequired {
+		t.Fatalf("dying tunnels yielded %q (reasons %v)", report.Finding, report.Reasons)
+	}
+	if !reasonNaming(report.Reasons, "tunneled sessions did not survive") {
+		t.Fatalf("the tunnel survival failure was not named: %v", report.Reasons)
+	}
+	for _, cell := range report.Cells {
+		if cell.TunnelHoldAttemptedSamples != 4 || cell.TunnelSurvivalRate == nil || *cell.TunnelSurvivalRate != 0 {
+			t.Fatalf("the cell does not show the failed gate: %+v", cell)
+		}
+	}
+}
+
+// A cell that cannot show the predeclared minimum of hold-attempted samples
+// has an unmeasured survival rate, and an unmeasured gate the finding depends
+// on is missing evidence -- named, never silently passed or failed.
+func TestUnderSampledSurvivalGateRefusesAFinding(t *testing.T) {
+	policy := testPolicy()
+	target := policy.RequiredScenarios[0]
+	var trials []Trial
+	for index, required := range policy.RequiredScenarios {
+		cell := adnlStudy(fillCell(nil, required, 4, OutcomeFailed, FailureHandshake, 0))
+		if index == 0 {
+			// Establishment evidence stays complete, but only the first pair
+			// (halves 0 and 1) ran the hold: one attempted sample, below the
+			// predeclared minimum of two.
+			for half := 2; half < len(cell); half++ {
+				trial := cell[half]
+				trial.HoldAttempted, trial.HoldCompleted = false, false
+				trial.SurvivalSeconds = 0
+				trial.ReconnectAttempted, trial.ReconnectSucceeded = false, false
+				trial.ReconnectMillis = 0
+				cell[half] = resign(trial)
+			}
+		}
+		trials = append(trials, cell...)
+	}
+	report, err := Aggregate(policy, trials, ProbeADNL)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.Finding != FindingInsufficient {
+		t.Fatalf("an under-sampled survival gate produced %q", report.Finding)
+	}
+	if !reasonNaming(report.Reasons, "direct survival gate is under-sampled: "+target.Key()) {
+		t.Fatalf("the missing gate was not named: %v", report.Reasons)
+	}
+	if len(report.Missing) != 1 || report.Missing[0] != target.Key() {
+		t.Fatalf("the under-sampled cell was not reported missing: %v", report.Missing)
+	}
+}
+
+// The same refusal for the reconnect gate: a mobility cell where no reconnect
+// was ever attempted has an unmeasured recovery story, not a passing one.
+func TestUnderSampledReconnectGateRefusesAFinding(t *testing.T) {
+	policy := testPolicy()
+	mobile := mobileScenario()
+	var trials []Trial
+	for _, required := range policy.RequiredScenarios {
+		trials = fillCell(trials, required, 4, OutcomeFailed, FailureHandshake, 0)
+	}
+	for index := range trials {
+		trial := switchProbe(trials[index], ProbeADNL)
+		trial.HoldAttempted, trial.HoldCompleted = true, true
+		trial.SurvivalSeconds = 60
+		// Reconnects ran only outside the mobility cell.
+		if trial.Role == RoleA && trial.Local.Mobility == MobilityStationary {
+			trial.ReconnectAttempted, trial.ReconnectSucceeded = true, true
+			trial.ReconnectMillis = 40
+		}
+		trials[index] = resign(trial)
+	}
+	report, err := Aggregate(policy, trials, ProbeADNL)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if report.Finding != FindingInsufficient {
+		t.Fatalf("an unmeasured mobility reconnect produced %q", report.Finding)
+	}
+	if !reasonNaming(report.Reasons, "reconnect gate is under-sampled in a mobility cell: "+mobile.Key()) {
+		t.Fatalf("the missing gate was not named: %v", report.Reasons)
+	}
+}
+
 // An attestation names the endpoint it is about. A bystander who copied a
 // published one cannot wear it, so they cannot add a third half to somebody
 // else's pair and have the pair discarded as malformed.
@@ -1701,9 +2032,7 @@ func TestConsistentEvidenceStillDecides(t *testing.T) {
 	for _, required := range policy.RequiredScenarios {
 		trials = fillCell(trials, required, 4, OutcomeDirect, FailureNone, 0)
 	}
-	for index := range trials {
-		trials[index] = switchProbe(trials[index], ProbeADNL)
-	}
+	trials = adnlStudy(trials)
 	report, err := Aggregate(policy, trials, ProbeADNL)
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)

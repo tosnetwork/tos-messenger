@@ -1,11 +1,16 @@
 {
-  "schema": "tos.messaging.reachability-policy.v1",
+  "schema": "tos.messaging.reachability-policy.v2",
   "min_samples_per_cell": 30,
   "min_operators_per_cell": 3,
   "min_sites_per_cell": 3,
   "max_trials_per_operator_per_cell": 20,
   "direct_viable_rate": 0.8,
   "tunnel_viable_rate": 0.95,
+  "min_direct_survival_rate": 0.9,
+  "min_tunnel_survival_rate": 0.9,
+  "min_reconnect_success_rate": 0.9,
+  "min_survival_samples_per_cell": 10,
+  "min_reconnect_samples_per_mobility_cell": 10,
   "coordinators": [
     "srv_0a21b88b9a269533"
   ],

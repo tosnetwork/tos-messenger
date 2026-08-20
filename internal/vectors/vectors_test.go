@@ -356,6 +356,8 @@ func build(t *testing.T) []Vector {
 	policy := reachability.Policy{
 		MinSamplesPerCell: 30, MinOperatorsPerCell: 3, MinSitesPerCell: 3,
 		MaxTrialsPerOperatorPerCell: 20, DirectViableRate: 0.8, TunnelViableRate: 0.95,
+		MinDirectSurvivalRate: 0.9, MinTunnelSurvivalRate: 0.9, MinReconnectSuccessRate: 0.9,
+		MinSurvivalSamplesPerCell: 10, MinReconnectSamplesPerMobilityCell: 10,
 		Coordinators: []string{coordinatorID},
 		RequiredScenarios: []reachability.Scenario{
 			{

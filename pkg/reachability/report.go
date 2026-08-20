@@ -78,6 +78,29 @@ type Policy struct {
 	MaxTrialsPerOperatorPerCell int     `json:"max_trials_per_operator_per_cell"`
 	DirectViableRate            float64 `json:"direct_viable_rate"`
 	TunnelViableRate            float64 `json:"tunnel_viable_rate"`
+	// MinDirectSurvivalRate is the share of hold-attempted direct pairs that
+	// must survive the full hold window before direct-first can be found. A
+	// study where every session establishes and then dies after ten seconds
+	// passes every establishment threshold, and this gate is what stops it
+	// from freezing direct-first anyway.
+	MinDirectSurvivalRate float64 `json:"min_direct_survival_rate"`
+	// MinTunnelSurvivalRate is the same bar over the tunnel holds of
+	// proxy-fallback pairs: tunnel-first is a claim that tunneled sessions
+	// hold up, not only that they establish.
+	MinTunnelSurvivalRate float64 `json:"min_tunnel_survival_rate"`
+	// MinReconnectSuccessRate is the share of reconnect-attempted direct pairs
+	// whose deliberate drop-and-redial succeeded, read in cells that exercise
+	// a mobility event. A phone whose session never recovers from a network
+	// change has no direct path worth freezing.
+	MinReconnectSuccessRate float64 `json:"min_reconnect_success_rate"`
+	// MinSurvivalSamplesPerCell is how many hold-attempted pair samples a cell
+	// needs before its survival rate means anything. Below it the rate is
+	// missing evidence, never a pass or a fail.
+	MinSurvivalSamplesPerCell int `json:"min_survival_samples_per_cell"`
+	// MinReconnectSamplesPerMobilityCell is the same floor for the reconnect
+	// gate, per cell whose either endpoint declares a non-stationary mobility
+	// event.
+	MinReconnectSamplesPerMobilityCell int `json:"min_reconnect_samples_per_mobility_cell"`
 	// Coordinators predeclares whose attestations count. Without it a signed
 	// observation proves only that somebody signed something, since anyone can
 	// run a coordinator and attest to whatever an operator wants.
@@ -146,8 +169,22 @@ type CellReport struct {
 	// SurvivalSamples counts the pairs where both halves measured survival. A
 	// percentile over one-sided data would describe one endpoint's session,
 	// not the pair's.
-	SurvivalSamples int                  `json:"survival_samples"`
-	FailureCounts   map[FailureClass]int `json:"failure_counts"`
+	SurvivalSamples int `json:"survival_samples"`
+	// The session-phase rates below are decision inputs, unlike the filtering
+	// counts: decide reads them against the policy's predeclared survival and
+	// reconnect gates. Each is a mean over operators, exactly as DirectRate
+	// is, computed over the pairs that attempted the phase. A nil rate means
+	// the phase was never attempted in this cell -- unmeasured, which is
+	// neither 0 (every session died) nor 1 (every session held), and the JSON
+	// omits it rather than inventing a number. The raw attempted counts are
+	// alongside so a reader can see why a sample gate passed or failed.
+	DirectSurvivalRate         *float64             `json:"direct_survival_rate,omitempty"`
+	TunnelSurvivalRate         *float64             `json:"tunnel_survival_rate,omitempty"`
+	ReconnectSuccessRate       *float64             `json:"reconnect_success_rate,omitempty"`
+	HoldAttemptedSamples       int                  `json:"hold_attempted_samples"`
+	TunnelHoldAttemptedSamples int                  `json:"tunnel_hold_attempted_samples"`
+	ReconnectAttemptedSamples  int                  `json:"reconnect_attempted_samples"`
+	FailureCounts              map[FailureClass]int `json:"failure_counts"`
 	// Filtering counts the filtering class derived from each half's
 	// coordinator-signed cold-source receipts. Evidence only: no threshold
 	// reads it (see FilteringCounts).
@@ -226,6 +263,17 @@ func (p Policy) Validate() error {
 	}
 	if p.TunnelViableRate < p.DirectViableRate {
 		return errors.New("the tunnel bar cannot be lower than the direct bar")
+	}
+	if p.MinDirectSurvivalRate <= 0 || p.MinDirectSurvivalRate > 1 ||
+		p.MinTunnelSurvivalRate <= 0 || p.MinTunnelSurvivalRate > 1 ||
+		p.MinReconnectSuccessRate <= 0 || p.MinReconnectSuccessRate > 1 {
+		return errors.New("survival and reconnect rates must fall in (0,1]")
+	}
+	if p.MinSurvivalSamplesPerCell < 1 {
+		return errors.New("a policy must require at least one hold-attempted sample per cell")
+	}
+	if p.MinReconnectSamplesPerMobilityCell < 1 {
+		return errors.New("a policy must require at least one reconnect-attempted sample per mobility cell")
 	}
 	if len(p.RequiredScenarios) == 0 || len(p.RequiredScenarios) > MaxScenariosPerPolicy {
 		return errors.New("a policy must predeclare its required scenarios")
@@ -319,6 +367,14 @@ func (p Policy) CanonicalBytes() ([]byte, error) {
 	canon.Uint64(buffer, uint64(p.MaxTrialsPerOperatorPerCell))
 	canon.Uint64(buffer, ratePoints(p.DirectViableRate))
 	canon.Uint64(buffer, ratePoints(p.TunnelViableRate))
+	// The session gates are part of the policy identity for the same reason the
+	// establishment rates are: a survival threshold chosen after watching the
+	// sessions die is a different policy, and the digest has to say so.
+	canon.Uint64(buffer, ratePoints(p.MinDirectSurvivalRate))
+	canon.Uint64(buffer, ratePoints(p.MinTunnelSurvivalRate))
+	canon.Uint64(buffer, ratePoints(p.MinReconnectSuccessRate))
+	canon.Uint64(buffer, uint64(p.MinSurvivalSamplesPerCell))
+	canon.Uint64(buffer, uint64(p.MinReconnectSamplesPerMobilityCell))
 	coordinators := append([]string(nil), p.Coordinators...)
 	sort.Strings(coordinators)
 	canon.Uint32(buffer, uint32(len(coordinators)))
@@ -544,6 +600,17 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 		// the same cap that bounds an operator's samples bounds their receipts.
 		cell.Filtering.Initiator[pair.initiatorFiltering]++
 		cell.Filtering.Responder[pair.responderFiltering]++
+		// The attempted counts are the denominators the sample gates read, so
+		// they are raw pair counts over the same kept set everything else is.
+		if pair.holdAttempted {
+			cell.HoldAttemptedSamples++
+		}
+		if pair.tunnelHoldAttempted {
+			cell.TunnelHoldAttemptedSamples++
+		}
+		if pair.reconnectAttempted {
+			cell.ReconnectAttemptedSamples++
+		}
 		switch pair.outcome {
 		case OutcomeDirect:
 			establish = append(establish, pair.establish)
@@ -565,10 +632,17 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 	}
 
 	// Rates are averaged over operators, not over measurements, so one operator
-	// with a large fleet cannot outvote the rest of the study.
+	// with a large fleet cannot outvote the rest of the study. The session
+	// rates follow the same discipline, each over the pairs that attempted the
+	// phase: an operator who never ran a hold contributes nothing to the
+	// survival mean rather than an invented zero or one.
 	var directRates, tunnelRates []float64
+	var survivalRates, tunnelSurvivalRates, reconnectRates []float64
 	for _, pairs := range byOperator {
 		var direct, withProxy int
+		var holdAttempted, holdCompleted int
+		var tunnelAttempted, tunnelCompleted int
+		var reconnectAttempted, reconnectSucceeded int
 		for _, pair := range pairs {
 			switch pair.outcome {
 			case OutcomeDirect:
@@ -577,10 +651,37 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 			case OutcomeProxyFallback:
 				withProxy++
 			}
+			if pair.holdAttempted {
+				holdAttempted++
+				if pair.holdCompleted {
+					holdCompleted++
+				}
+			}
+			if pair.tunnelHoldAttempted {
+				tunnelAttempted++
+				if pair.tunnelHoldCompleted {
+					tunnelCompleted++
+				}
+			}
+			if pair.reconnectAttempted {
+				reconnectAttempted++
+				if pair.reconnectSucceeded {
+					reconnectSucceeded++
+				}
+			}
 		}
 		total := float64(len(pairs))
 		directRates = append(directRates, float64(direct)/total)
 		tunnelRates = append(tunnelRates, float64(withProxy)/total)
+		if holdAttempted > 0 {
+			survivalRates = append(survivalRates, float64(holdCompleted)/float64(holdAttempted))
+		}
+		if tunnelAttempted > 0 {
+			tunnelSurvivalRates = append(tunnelSurvivalRates, float64(tunnelCompleted)/float64(tunnelAttempted))
+		}
+		if reconnectAttempted > 0 {
+			reconnectRates = append(reconnectRates, float64(reconnectSucceeded)/float64(reconnectAttempted))
+		}
 	}
 
 	cell.Samples = len(kept)
@@ -601,10 +702,25 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 	cell.ReconnectP95 = percentile(reconnect, 95)
 	cell.SurvivalP50 = percentile(survival, 50)
 	cell.SurvivalSamples = len(survival)
+	cell.DirectSurvivalRate = measuredMean(survivalRates)
+	cell.TunnelSurvivalRate = measuredMean(tunnelSurvivalRates)
+	cell.ReconnectSuccessRate = measuredMean(reconnectRates)
 	cell.Qualifying = cell.Samples >= policy.MinSamplesPerCell &&
 		cell.Operators >= policy.MinOperatorsPerCell &&
 		cell.Sites >= policy.MinSitesPerCell
 	return cell
+}
+
+// measuredMean is the operator mean, or nil when no operator measured the
+// phase. An unattempted phase has no rate: writing 0 would read as "every
+// session died" and 1 as "every session held", and either invention would
+// move a threshold the evidence never touched.
+func measuredMean(values []float64) *float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	value := mean(values)
+	return &value
 }
 
 // mean gives every operator the same weight, whatever their sample count.
@@ -634,6 +750,16 @@ func kindFor(probe ProbeKind) Kind {
 //
 // The vocabulary depends on the probe. A UDP study reports whether a direct
 // datagram path is feasible; only an ADNL study reports a route.
+//
+// A route decision reads more than establishment. Direct-first claims that
+// direct sessions carry the normal path, and a session that establishes and
+// then dies after ten seconds carries nothing, so a cell qualifies direct
+// only when its survival rate -- and, where the cell exercises a mobility
+// event, its reconnect success rate -- also clears the predeclared bar.
+// Tunnel-first makes the same claim of tunneled sessions and reads the tunnel
+// survival rate. A cell that cannot show the predeclared minimum of attempted
+// samples for a gate the finding depends on ends the evaluation with
+// insufficient-evidence: an unmeasured phase is never a passed one.
 func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []string, []string) {
 	byKey := make(map[string]CellReport, len(cells))
 	for _, cell := range cells {
@@ -641,7 +767,8 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 	}
 	var missing []string
 	var reasons []string
-	directViable, tunnelViable, evaluated := 0, 0, 0
+	var required []CellReport
+	directViable, tunnelViable := 0, 0
 	for _, scenario := range policy.RequiredScenarios {
 		key := scenario.Key()
 		cell, found := byKey[key]
@@ -655,7 +782,7 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 			reasons = append(reasons, "required scenario is under-sampled: "+key)
 			continue
 		}
-		evaluated++
+		required = append(required, cell)
 		if cell.DirectRate >= policy.DirectViableRate {
 			directViable++
 		}
@@ -663,6 +790,7 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 			tunnelViable++
 		}
 	}
+	evaluated := len(required)
 	sort.Strings(missing)
 	if len(missing) > 0 || evaluated == 0 {
 		return FindingInsufficient, missing, reasons
@@ -677,20 +805,88 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 		return FindingUDPDirectNotViable, nil, reasons
 	}
 
+	// Direct qualification, cell by cell: establishment first, then the
+	// session gates. A cell whose establishment already misses the rate is
+	// disqualified on that alone and its session gates carry no weight; a cell
+	// whose establishment passes makes them load-bearing, and a load-bearing
+	// gate without its predeclared sample minimum is missing evidence -- the
+	// evaluation refuses rather than reasoning about whether the unknown cell
+	// could still have changed the finding.
+	directQualified := 0
+	var underSampled []string
+	for _, cell := range required {
+		if cell.DirectRate < policy.DirectViableRate {
+			continue
+		}
+		if cell.HoldAttemptedSamples < policy.MinSurvivalSamplesPerCell || cell.DirectSurvivalRate == nil {
+			underSampled = append(underSampled, cell.ScenarioKey)
+			reasons = append(reasons, "direct survival gate is under-sampled: "+cell.ScenarioKey)
+			continue
+		}
+		mobility := cell.Scenario.ExercisesMobility()
+		if mobility && (cell.ReconnectAttemptedSamples < policy.MinReconnectSamplesPerMobilityCell || cell.ReconnectSuccessRate == nil) {
+			underSampled = append(underSampled, cell.ScenarioKey)
+			reasons = append(reasons, "reconnect gate is under-sampled in a mobility cell: "+cell.ScenarioKey)
+			continue
+		}
+		qualifies := true
+		if *cell.DirectSurvivalRate < policy.MinDirectSurvivalRate {
+			qualifies = false
+			reasons = append(reasons, "direct sessions did not survive the hold window at the predeclared rate: "+cell.ScenarioKey)
+		}
+		if mobility && *cell.ReconnectSuccessRate < policy.MinReconnectSuccessRate {
+			qualifies = false
+			reasons = append(reasons, "reconnects did not succeed at the predeclared rate in a mobility cell: "+cell.ScenarioKey)
+		}
+		if qualifies {
+			directQualified++
+		}
+	}
+	if len(underSampled) > 0 {
+		sort.Strings(underSampled)
+		return FindingInsufficient, underSampled, reasons
+	}
+
 	switch {
-	case directViable == evaluated:
-		reasons = append(reasons, "every required stratum reached the direct viability rate")
+	case directQualified == evaluated:
+		reasons = append(reasons, "every required stratum reached the direct establishment, survival, and reconnect gates")
 		return FindingDirectFirst, nil, reasons
-	case directViable > 0:
-		reasons = append(reasons, "direct establishment is viable in some required strata and not others")
+	case directQualified > 0:
+		reasons = append(reasons, "direct sessions qualify in some required strata and not others")
 		return FindingHybrid, nil, reasons
-	case tunnelViable == evaluated:
-		reasons = append(reasons, "no required stratum reached the direct rate, and a proxy or tunnel lifts every one of them")
-		return FindingTunnelFirst, nil, reasons
-	default:
+	}
+
+	// Direct qualifies nowhere. If any cell misses even the tunnel
+	// establishment rate, a Relay is necessary and no tunnel session gate is
+	// load-bearing; otherwise tunnel-first is exactly the claim that tunneled
+	// sessions hold up, so the tunnel survival gate decides.
+	if tunnelViable < evaluated {
 		reasons = append(reasons, "neither direct establishment nor a proxy reaches the predeclared rate, so a Mailbox Relay is necessary; whether one performs adequately is the Relay milestone's own acceptance")
 		return FindingRelayRequired, nil, reasons
 	}
+	tunnelQualified := 0
+	for _, cell := range required {
+		if cell.TunnelHoldAttemptedSamples < policy.MinSurvivalSamplesPerCell || cell.TunnelSurvivalRate == nil {
+			underSampled = append(underSampled, cell.ScenarioKey)
+			reasons = append(reasons, "tunnel survival gate is under-sampled: "+cell.ScenarioKey)
+			continue
+		}
+		if *cell.TunnelSurvivalRate < policy.MinTunnelSurvivalRate {
+			reasons = append(reasons, "tunneled sessions did not survive the hold window at the predeclared rate: "+cell.ScenarioKey)
+			continue
+		}
+		tunnelQualified++
+	}
+	if len(underSampled) > 0 {
+		sort.Strings(underSampled)
+		return FindingInsufficient, underSampled, reasons
+	}
+	if tunnelQualified == evaluated {
+		reasons = append(reasons, "no required stratum qualifies direct sessions, and a surviving tunnel lifts every one of them")
+		return FindingTunnelFirst, nil, reasons
+	}
+	reasons = append(reasons, "tunneled sessions establish but do not survive at the predeclared rate everywhere, so a Mailbox Relay is necessary; whether one performs adequately is the Relay milestone's own acceptance")
+	return FindingRelayRequired, nil, reasons
 }
 
 // EncodeReportJSON returns the publishable report.

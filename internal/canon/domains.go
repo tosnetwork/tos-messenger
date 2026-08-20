@@ -87,8 +87,12 @@ const (
 	// digest over it is what a trial commits and what the two halves of a pair
 	// cross-check about each other.
 	DomainReachabilityCollectorManifest = "tos.messaging.reachability-collector-manifest.v1\x00"
-	// DomainReachabilityPolicy namespaces a predeclared acceptance policy.
-	DomainReachabilityPolicy = "tos.messaging.reachability-policy.v1\x00"
+	// DomainReachabilityPolicy namespaces a predeclared acceptance policy. v2
+	// folds in the session gates a route decision now reads -- the direct and
+	// tunnel survival rates, the reconnect success rate, and the attempted-sample
+	// minimums behind them -- so a policy that never predeclared them cannot be
+	// passed off as one that did.
+	DomainReachabilityPolicy = "tos.messaging.reachability-policy.v2\x00"
 	// DomainReachabilityOperator namespaces the opaque operator derivation.
 	DomainReachabilityOperator = "tos.messaging.reachability-operator.v1\x00"
 	// DomainReachabilitySite namespaces the opaque site derivation.

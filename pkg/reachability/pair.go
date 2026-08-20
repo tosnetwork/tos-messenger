@@ -38,6 +38,25 @@ type pairResult struct {
 	// as a pair's.
 	survival         uint64
 	survivalMeasured bool
+	// The phase statuses join the two halves' booleans, and each join follows
+	// what the phase is. A hold was attempted by the pair only when BOTH
+	// halves ran it -- session survival needs both halves, and one side
+	// holding alone measured its own patience, not a session -- and completed
+	// only when both survived the full window. The halves may honestly
+	// disagree about completion (one side's keepalives die first), so a
+	// completion mismatch joins by AND rather than dropping the pair as a
+	// contradiction: these are per-phase outcomes, not descriptions of one
+	// shared fact. Reconnect is initiator-only by design -- the responder
+	// never dials, and the collector refuses the flag on it -- so the pair's
+	// reconnect status is the OR across halves, mirroring how the reconnect
+	// latency already takes the max. The tunnel hold joins exactly as the
+	// direct hold does.
+	holdAttempted       bool
+	holdCompleted       bool
+	reconnectAttempted  bool
+	reconnectSucceeded  bool
+	tunnelHoldAttempted bool
+	tunnelHoldCompleted bool
 	// initiatorFiltering and responderFiltering are the filtering classes
 	// derived from each half's coordinator-signed cold-source receipts.
 	// Filtering is a property of each end, not of the pair, so each side gets
@@ -135,6 +154,16 @@ func combine(halves []Trial) (pairResult, error) {
 		result.survival = minOf(a.SurvivalSeconds, b.SurvivalSeconds)
 		result.survivalMeasured = true
 	}
+	// The phase joins: holds by AND on both booleans (the pair held only while
+	// both ends did), reconnect by OR (only the initiator can attempt it), the
+	// tunnel hold exactly as the direct one. See the field comment for why a
+	// completion mismatch is a measurement rather than a contradiction.
+	result.holdAttempted = a.HoldAttempted && b.HoldAttempted
+	result.holdCompleted = a.HoldCompleted && b.HoldCompleted
+	result.reconnectAttempted = a.ReconnectAttempted || b.ReconnectAttempted
+	result.reconnectSucceeded = a.ReconnectSucceeded || b.ReconnectSucceeded
+	result.tunnelHoldAttempted = a.TunnelHoldAttempted && b.TunnelHoldAttempted
+	result.tunnelHoldCompleted = a.TunnelHoldCompleted && b.TunnelHoldCompleted
 	return result, nil
 }
 
