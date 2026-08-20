@@ -18,12 +18,12 @@ package localapi
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
 	"regexp"
 
+	"github.com/tosnetwork/tos-messenger/internal/localwire"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
@@ -37,8 +37,6 @@ const (
 	// MaxFrameBytes bounds one request or response body. It has to hold an
 	// event, because a claim hands one back.
 	MaxFrameBytes = 512 << 10
-	// frameHeaderBytes is the length prefix.
-	frameHeaderBytes = 4
 	// MaxEventsPerResponse bounds one pending listing.
 	MaxEventsPerResponse = 64
 )
@@ -406,12 +404,7 @@ func EncodeResponse(response Response) ([]byte, error) {
 }
 
 func frame(body []byte) ([]byte, error) {
-	if len(body) > MaxFrameBytes {
-		return nil, errors.New("frame exceeds its bound")
-	}
-	out := make([]byte, frameHeaderBytes, frameHeaderBytes+len(body))
-	binary.BigEndian.PutUint32(out, uint32(len(body)))
-	return append(out, body...), nil
+	return localwire.Frame(body, MaxFrameBytes)
 }
 
 // ReadFrame reads one length-prefixed body.
@@ -419,32 +412,12 @@ func frame(body []byte) ([]byte, error) {
 // The declared length is checked before anything is allocated, so an oversized
 // frame costs four bytes rather than the size it claimed.
 func ReadFrame(reader io.Reader) ([]byte, error) {
-	var header [frameHeaderBytes]byte
-	if _, err := io.ReadFull(reader, header[:]); err != nil {
-		return nil, err
-	}
-	length := binary.BigEndian.Uint32(header[:])
-	if length == 0 {
-		return nil, errors.New("empty frame")
-	}
-	if length > MaxFrameBytes {
-		return nil, errors.New("frame exceeds its bound")
-	}
-	body := make([]byte, length)
-	if _, err := io.ReadFull(reader, body); err != nil {
-		return nil, err
-	}
-	return body, nil
+	return localwire.ReadFrame(reader, MaxFrameBytes)
 }
 
 // WriteFrame writes one length-prefixed body.
 func WriteFrame(writer io.Writer, body []byte) error {
-	framed, err := frame(body)
-	if err != nil {
-		return err
-	}
-	_, err = writer.Write(framed)
-	return err
+	return localwire.WriteFrame(writer, body, MaxFrameBytes)
 }
 
 // DecodeResponse parses one framed response.

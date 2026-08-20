@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/localwire"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
@@ -93,7 +94,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener, principal Pri
 
 func (s *Server) serveConnection(ctx context.Context, connection net.Conn, principal Principal) {
 	defer connection.Close()
-	if err := verifyPeer(connection); err != nil {
+	if err := localwire.VerifyPeer(connection); err != nil {
 		// A caller this daemon cannot identify learns nothing about why.
 		return
 	}

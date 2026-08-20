@@ -119,10 +119,13 @@ arrival-order tie-break.
 Each device generates and durably retains only its own private answering
 material; the Endpoint fixes one roster/window and durably accepts only matching
 public signed contributions, and must never become custodian of every device
-secret. An incomplete roster cannot advance the public publication ledger. The
-complete content-addressed set is published before its signed Descriptor, and
-both immutable objects exist before a signed locator can become authoritative.
-A retained device's old private material remains selectable until signed
-expiry; a revoked device drops it with its local tombstone. Endpoint signing
-stays behind `crypto.Signer`. See
-[`PREKEY_PUBLICATION.md`](PREKEY_PUBLICATION.md).
+secret. A separate bounded device API reveals only that plan and aggregate
+progress, accepts one matching signed public bundle, and grants no plan or
+owner/runtime authority. An incomplete roster cannot advance the public
+publication ledger. The complete content-addressed set is published before its
+signed Descriptor, and both immutable objects exist before a signed locator can
+become authoritative. A retained device's old private material remains
+selectable until signed expiry; a revoked device drops it with its local
+tombstone. Endpoint signing stays behind `crypto.Signer`. See
+[`PREKEY_PUBLICATION.md`](PREKEY_PUBLICATION.md) and
+[`PREKEY_DEVICE_API.md`](PREKEY_DEVICE_API.md).

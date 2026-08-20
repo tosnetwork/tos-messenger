@@ -102,12 +102,14 @@ Endpoint aggregation, durable fixed-roster public-contribution collection,
 signer isolation, the production static HTTPS object sink, ordered Descriptor
 activation, replenishment, retired-secret selection, pruning, rollback
 refusal, and local/peer equivocation classification. Daemon wiring still needs
-a narrow device-facing submission API plus generation/publication scheduling.
-The production DHT adapter keeps native key-description and value signing
-behind the selected `crypto.Signer`, including immediate signature
-verification before network use. Centralizing every device secret in the
-daemon is explicitly not an acceptable shortcut. Live independently operated
-publication and cross-observer fork exchange remain deployment evidence.
+generation/publication configuration and scheduling. The narrow device-facing
+submission API now exists separately in `pkg/prekeyapi`; it exposes only the
+public plan and accepts only matching signed public bundles. The production DHT
+adapter keeps native key-description and value signing behind the selected
+`crypto.Signer`, including immediate signature verification before network
+use. Centralizing every device secret in the daemon is explicitly not an
+acceptable shortcut. Live independently operated publication and
+cross-observer fork exchange remain deployment evidence.
 
 No canonical preimage or wire schema changed. The existing bundle and
 bundle-set vectors remain the applicable interoperation artifacts.
