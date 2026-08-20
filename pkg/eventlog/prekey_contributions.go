@@ -242,6 +242,31 @@ func (l *PrekeyContributionLedger) CurrentPrekeyCollection(delegation identity.D
 	return collection, true, nil
 }
 
+// StoredPrekeyCollection returns structurally verified public scheduler state
+// without treating it as current endpoint authority. It exists so a planner
+// can recognize an expired generation (whose bundle signatures necessarily
+// fail a current-time check) and replace it. Consumers of live contributions
+// must use CurrentPrekeyCollection instead.
+func (l *PrekeyContributionLedger) StoredPrekeyCollection(endpointID string) (PrekeyCollection, bool, error) {
+	if l == nil || l.journal == nil {
+		return PrekeyCollection{}, false, errors.New("no prekey contribution ledger")
+	}
+	if err := l.journal.usable(); err != nil {
+		return PrekeyCollection{}, false, err
+	}
+	if !ids.Endpoint.MatchString(endpointID) {
+		return PrekeyCollection{}, false, errors.New("invalid prekey collection endpoint")
+	}
+	l.journal.mutex.Lock()
+	defer l.journal.mutex.Unlock()
+	record, found, err := l.read(endpointID)
+	if err != nil || !found {
+		return PrekeyCollection{}, found, err
+	}
+	collection, err := collectionFromContributionRecord(record)
+	return collection, err == nil, err
+}
+
 // FinalizePrekeyCollection advances the publication ledger only for an exact
 // complete roster, then marks the staging generation finalized. A crash
 // between those writes is repaired by an idempotent retry.

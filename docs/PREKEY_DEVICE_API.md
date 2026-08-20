@@ -42,10 +42,19 @@ after a lost response is unambiguous. Malformed success/refusal responses,
 unknown fields, trailing JSON, oversized frames, and unknown operations fail
 closed.
 
-## Deliberate remainder
+## Daemon lifecycle and deliberate remainder
 
-The package is independently composable and fully socket-tested, but the daemon
-does not yet create this third listener or select generation plans. Daemon
-configuration must state the socket, roster, suite, lifetime, replenishment
-horizon, and publication schedule explicitly; it must not infer them from the
-owner/runtime APIs or choose any message route.
+Daemon config v4 can enable this third listener with `publication.mode =
+"prekeys"`. Configuration explicitly fixes its socket, sorted roster, suite,
+generation lifetime, replenishment horizon, and check interval. Startup creates
+or recovers one durable public plan. The planner repairs interrupted publication
+finalization, preserves a live partial generation, rotates a finalized
+generation at its configured horizon, and replaces an expired partial
+generation. Shutdown closes the listener and removes its socket.
+
+The planner has neither a signer nor a private-key store: devices retain their
+own secrets and submit already signed public bundles. Ed25519 here authenticates
+the exact bundle only; it is not encryption or key exchange. Configuration never
+chooses a message route. Scheduling the finalized public object onto HTTPS and
+native DHT publication sinks, and producing live multi-operator publication
+evidence, remain deliberate work.

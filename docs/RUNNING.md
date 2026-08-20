@@ -1,6 +1,7 @@
 # Running the daemon
 
-`tos-messengerd` owns one state directory and serves two owner-private sockets.
+`tos-messengerd` owns one state directory, always serves separate runtime and
+owner sockets, and may serve a third public-only prekey device socket.
 It cannot carry a message yet, and it says so on startup rather than looking
 like a working installation that happens to be quiet.
 
@@ -9,7 +10,7 @@ tos-messengerd -config /etc/tos-messengerd/config.json -check   # validate and e
 tos-messengerd -config /etc/tos-messengerd/config.json
 ```
 
-## Two sockets
+## Three separated capabilities
 
 The runtime connects to one socket and the owner to another, and the
 separation carries one invariant: **the party that asks for an approval must
@@ -20,6 +21,15 @@ needs approval could answer itself.
 The runtime socket carries inbox draining and event submission and no approval
 operation at all. The owner socket carries the decisions and does no Agent
 work.
+
+When `publication.mode` is `prekeys`, the third socket exposes only the current
+fixed public generation and admission of one already Endpoint-signed public
+bundle. It exposes no approval operation, private material, other device's
+bundle, or authority to select a roster/window. The v4 config explicitly states
+its clean absolute path, sorted 1–16-device roster (including this
+installation's device), algorithm identifier, 60-second-to-30-day lifetime,
+positive replenishment lead, and a check interval no longer than that lead.
+Use `publication.mode = "none"` with no unused fields to disable it.
 
 ## What must be stated
 
@@ -68,9 +78,10 @@ misspelled setting that is silently dropped is a setting an operator believes
 is in force.
 
 `docs/daemon-config.example.json` is a complete file with placeholder values.
-Peer discovery makes this schema `tos.messaging.daemon-config.v3`; older files
-are rejected instead of silently running with discovery disabled or applying a
-daemon-wide descriptor policy peers never committed.
+Public prekey planning makes this schema `tos.messaging.daemon-config.v4`;
+older files are rejected instead of silently disabling discovery or public
+generation planning, or applying a daemon-wide descriptor policy peers never
+committed.
 
 `-check` validates all of these bounds, endpoint URLs, code/hash pairs and
 paths without contacting the chain. Normal startup is fail-closed: after

@@ -40,8 +40,8 @@ func run(configPath string, checkOnly bool) error {
 		return err
 	}
 	if checkOnly {
-		fmt.Printf("configuration is valid: state_dir=%s runtime_socket=%s owner_socket=%s transport=%s\n",
-			config.StateDir, config.SocketPath, config.OwnerSocketPath, config.Transport)
+		fmt.Printf("configuration is valid: state_dir=%s runtime_socket=%s owner_socket=%s prekey_socket=%s transport=%s\n",
+			config.StateDir, config.SocketPath, config.OwnerSocketPath, config.Publication.DeviceSocketPath, config.Transport)
 		return nil
 	}
 
@@ -56,8 +56,8 @@ func run(configPath string, checkOnly bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("runtime_socket=%s owner_socket=%s state_dir=%s transport=%s\n",
-		instance.SocketPath(), instance.OwnerSocketPath(), config.StateDir, config.Transport)
+	fmt.Printf("runtime_socket=%s owner_socket=%s prekey_socket=%s state_dir=%s transport=%s\n",
+		instance.SocketPath(), instance.OwnerSocketPath(), instance.PrekeySocketPath(), config.StateDir, config.Transport)
 	if config.Transport == daemon.TransportNone {
 		fmt.Println("no transport is configured: outbound events are queued and not sent")
 	}

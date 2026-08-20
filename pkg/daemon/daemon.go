@@ -15,6 +15,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
+	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
 )
 
 const (
@@ -44,6 +45,7 @@ type Daemon struct {
 	salt      []byte
 	observer  Observer
 	discovery *discoveryRuntime
+	prekeys   *prekeyRuntime
 
 	closeOnce sync.Once
 }
@@ -65,6 +67,7 @@ func openWithDiscovery(config Config, observer Observer, verifier delegationVeri
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+	config.Publication.DeviceIDs = append([]string(nil), config.Publication.DeviceIDs...)
 	if verifier == nil {
 		return nil, errors.New("no finalized delegation verifier")
 	}
@@ -125,6 +128,13 @@ func openWithDiscovery(config Config, observer Observer, verifier delegationVeri
 		return nil, errors.New("build peer discovery: " + err.Error())
 	}
 	instance.discovery = discovery
+	prekeys, err := newPrekeyRuntime(config, delegation, journal, time.Now)
+	if err != nil {
+		_ = discovery.Close()
+		_ = journal.Close()
+		return nil, err
+	}
+	instance.prekeys = prekeys
 
 	listener, err := localapi.Listen(config.SocketPath)
 	if err != nil {
@@ -143,6 +153,19 @@ func openWithDiscovery(config Config, observer Observer, verifier delegationVeri
 		return nil, err
 	}
 	instance.owner = owner
+	if prekeys != nil {
+		device, err := prekeyapi.Listen(config.Publication.DeviceSocketPath)
+		if err != nil {
+			_ = owner.Close()
+			_ = listener.Close()
+			_ = os.Remove(config.OwnerSocketPath)
+			_ = os.Remove(config.SocketPath)
+			_ = discovery.Close()
+			_ = journal.Close()
+			return nil, err
+		}
+		prekeys.listener = device
+	}
 	return instance, nil
 }
 
@@ -168,6 +191,15 @@ func (d *Daemon) OwnerSocketPath() string {
 		return ""
 	}
 	return d.config.OwnerSocketPath
+}
+
+// PrekeySocketPath returns the public-only device contribution socket, or an
+// empty string when publication is disabled.
+func (d *Daemon) PrekeySocketPath() string {
+	if d == nil || d.prekeys == nil {
+		return ""
+	}
+	return d.config.Publication.DeviceSocketPath
 }
 
 // Run serves the local API and keeps the schedule until the context ends.
@@ -203,6 +235,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 		}(endpoint.listener, endpoint.principal)
 	}
+	if d.prekeys != nil {
+		group.Add(2)
+		go func() {
+			defer group.Done()
+			if err := d.prekeys.server.Serve(ctx, d.prekeys.listener); err != nil && !isClosed(err) {
+				d.report("serve prekey devices", err)
+			}
+		}()
+		go func() {
+			defer group.Done()
+			d.prekeys.planner.Run(ctx, func(err error) { d.report("plan prekeys", err) })
+		}()
+	}
 
 	group.Add(1)
 	go func() {
@@ -215,6 +260,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// same context.
 	_ = d.listener.Close()
 	_ = d.owner.Close()
+	if d.prekeys != nil {
+		_ = d.prekeys.listener.Close()
+	}
 	group.Wait()
 	return d.Close()
 }
@@ -228,10 +276,16 @@ func (d *Daemon) Close() error {
 	d.closeOnce.Do(func() {
 		_ = d.listener.Close()
 		_ = d.owner.Close()
+		if d.prekeys != nil && d.prekeys.listener != nil {
+			_ = d.prekeys.listener.Close()
+		}
 		// The sockets are removed only by the daemon that created them, and
 		// only once it is done with the state it was serving.
 		_ = os.Remove(d.config.SocketPath)
 		_ = os.Remove(d.config.OwnerSocketPath)
+		if d.prekeys != nil {
+			_ = os.Remove(d.config.Publication.DeviceSocketPath)
+		}
 		_ = d.discovery.Close()
 		err = d.journal.Close()
 	})

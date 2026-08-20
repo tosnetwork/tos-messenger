@@ -1,5 +1,5 @@
 {
-  "schema": "tos.messaging.daemon-config.v3",
+  "schema": "tos.messaging.daemon-config.v4",
 
   "state_dir": "/var/lib/tos-messengerd",
   "socket_path": "/run/tos-messengerd/runtime.sock",
@@ -42,6 +42,10 @@
     "refresh_lead_seconds": 300,
     "https_request_timeout_seconds": 10,
     "https_connect_timeout_seconds": 5
+  },
+
+  "publication": {
+    "mode": "none"
   },
 
   "agent_id": "agent_2222222222222222222222222222222222222222222222222222222222222222",

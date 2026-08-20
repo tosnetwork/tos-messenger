@@ -52,6 +52,7 @@ func testConfig(t *testing.T) Config {
 		ChainCheckpointPath:    filepath.Join(root, "state", "chain.checkpoint"),
 		DelegationPath:         filepath.Join(root, "delegation.json"),
 		Discovery:              DiscoveryConfig{Mode: DiscoveryNone},
+		Publication:            PublicationConfig{Mode: PublicationNone},
 		AgentID:                "agent_" + strings.Repeat("2", 64),
 		EndpointID:             "mep_" + strings.Repeat("3", 64),
 		DeviceID:               "dev_" + strings.Repeat("4", 64),
@@ -447,11 +448,19 @@ func TestConfigurationMustBeStated(t *testing.T) {
 				DelegationPath: "/etc/tos-messengerd/peer.json", DescriptorPolicyPath: "/etc/tos-messengerd/peer-policy.json"}},
 		}
 	}
+	enablePublication := func(c *Config) {
+		c.Publication = PublicationConfig{
+			Mode: PublicationPrekeys, DeviceSocketPath: c.SocketPath + ".prekeys",
+			DeviceIDs: []string{c.DeviceID}, AlgorithmID: "tos.messaging.e2ee.test-suite.v1",
+			GenerationLifetimeSeconds: 120, ReplenishBeforeSeconds: 30, CheckIntervalSeconds: 10,
+		}
+	}
 	cases := map[string]func(*Config){
 		"no schema":                      func(c *Config) { c.Schema = "" },
 		"relative state":                 func(c *Config) { c.StateDir = "state" },
 		"relative socket":                func(c *Config) { c.SocketPath = "run/messenger.sock" },
 		"socket in state":                func(c *Config) { c.SocketPath = filepath.Join(c.StateDir, "messenger.sock") },
+		"socket nested in state":         func(c *Config) { c.SocketPath = filepath.Join(c.StateDir, "run", "messenger.sock") },
 		"no network":                     func(c *Config) { c.NetworkID = "" },
 		"bad genesis":                    func(c *Config) { c.GenesisRootHash = "zz" },
 		"no registry":                    func(c *Config) { c.Registries = nil },
@@ -478,9 +487,49 @@ func TestConfigurationMustBeStated(t *testing.T) {
 		},
 		"overflowing directory duration": func(c *Config) { enableDiscovery(c); c.Discovery.RefreshIntervalSeconds = ^uint64(0) },
 		"excessive HTTPS timeout":        func(c *Config) { enableDiscovery(c); c.Discovery.HTTPSRequestTimeoutSeconds = 31 },
-		"overflowing chain timeout":      func(c *Config) { c.ChainQueryTimeoutSeconds = ^uint64(0) },
-		"oversized chain response":       func(c *Config) { c.ChainMaxResponseBytes = 16<<20 + 1 },
-		"bad registry hash":              func(c *Config) { c.Registries[0].CodeHash = "sha256:" + strings.Repeat("a", 64) },
+		"no publication mode":            func(c *Config) { c.Publication.Mode = "" },
+		"unused disabled publication":    func(c *Config) { c.Publication.DeviceSocketPath = "/run/prekeys.sock" },
+		"relative publication socket": func(c *Config) {
+			enablePublication(c)
+			c.Publication.DeviceSocketPath = "run/prekeys.sock"
+		},
+		"shared publication socket": func(c *Config) {
+			enablePublication(c)
+			c.Publication.DeviceSocketPath = c.SocketPath
+		},
+		"publication socket in state": func(c *Config) {
+			enablePublication(c)
+			c.Publication.DeviceSocketPath = filepath.Join(c.StateDir, "run", "prekeys.sock")
+		},
+		"empty publication roster": func(c *Config) { enablePublication(c); c.Publication.DeviceIDs = nil },
+		"publication omits local device": func(c *Config) {
+			enablePublication(c)
+			c.Publication.DeviceIDs = []string{"dev_" + strings.Repeat("5", 64)}
+		},
+		"duplicate publication device": func(c *Config) {
+			enablePublication(c)
+			c.Publication.DeviceIDs = []string{c.DeviceID, c.DeviceID}
+		},
+		"unsorted publication roster": func(c *Config) {
+			enablePublication(c)
+			c.Publication.DeviceIDs = []string{c.DeviceID, "dev_" + strings.Repeat("3", 64)}
+		},
+		"unknown publication suite": func(c *Config) { enablePublication(c); c.Publication.AlgorithmID = "x25519" },
+		"short publication generation": func(c *Config) {
+			enablePublication(c)
+			c.Publication.GenerationLifetimeSeconds = 59
+		},
+		"publication lead reaches expiry": func(c *Config) {
+			enablePublication(c)
+			c.Publication.ReplenishBeforeSeconds = 120
+		},
+		"publication check misses lead": func(c *Config) {
+			enablePublication(c)
+			c.Publication.CheckIntervalSeconds = 31
+		},
+		"overflowing chain timeout": func(c *Config) { c.ChainQueryTimeoutSeconds = ^uint64(0) },
+		"oversized chain response":  func(c *Config) { c.ChainMaxResponseBytes = 16<<20 + 1 },
+		"bad registry hash":         func(c *Config) { c.Registries[0].CodeHash = "sha256:" + strings.Repeat("a", 64) },
 		"registry code that does not hash to its pin": func(c *Config) {
 			c.Registries[0].CodeHash = "tvm-cell-sha256:" + strings.Repeat("a", 64)
 		},
@@ -497,6 +546,7 @@ func TestConfigurationMustBeStated(t *testing.T) {
 			// reach through every later case and the completeness check.
 			config.Registries = append([]RegistryConfig(nil), base.Registries...)
 			config.ChainEndpoints = append([]string(nil), base.ChainEndpoints...)
+			config.Publication.DeviceIDs = append([]string(nil), base.Publication.DeviceIDs...)
 			mutate(&config)
 			if name == "fast sweep" {
 				return
@@ -529,6 +579,7 @@ func TestUnknownConfigurationKeysAreRefused(t *testing.T) {
 		"chain_checkpoint_path": "/var/lib/tos-messengerd/chain.checkpoint",
 		"delegation_path": "/etc/tos-messengerd/delegation.json",
 		"discovery": {"mode": "none"},
+		"publication": {"mode": "none"},
 		"agent_id": "agent_` + strings.Repeat("2", 64) + `",
 		"endpoint_id": "mep_` + strings.Repeat("3", 64) + `",
 		"device_id": "dev_` + strings.Repeat("4", 64) + `",

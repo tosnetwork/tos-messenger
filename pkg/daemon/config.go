@@ -14,10 +14,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
+	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
@@ -27,7 +31,19 @@ import (
 )
 
 // ConfigSchema is the strict schema of a daemon configuration.
-const ConfigSchema = "tos.messaging.daemon-config.v3"
+const ConfigSchema = "tos.messaging.daemon-config.v4"
+
+// PublicationMode names the route-independent public material maintained by
+// this installation. It does not select an HTTPS, DHT, or message transport.
+type PublicationMode string
+
+const (
+	PublicationNone    PublicationMode = "none"
+	PublicationPrekeys PublicationMode = "prekeys"
+
+	MinPrekeyGenerationLifetime = time.Minute
+	MaxPrekeyPlannerInterval    = time.Hour
+)
 
 // TransportMode names how this installation carries messages.
 type TransportMode string
@@ -112,6 +128,11 @@ type Config struct {
 	// message over the same network path.
 	Discovery DiscoveryConfig `json:"discovery"`
 
+	// Publication must be stated separately from Discovery and Transport. In
+	// prekeys mode the daemon plans public generations and accepts public,
+	// device-signed contributions; it never creates or stores device secrets.
+	Publication PublicationConfig `json:"publication"`
+
 	// AgentID, EndpointID and DeviceID are who this installation speaks for.
 	// Outbound events must say they came from here, so an installation that
 	// does not know its own identity cannot send at all.
@@ -142,6 +163,88 @@ type Config struct {
 	SweepIntervalSeconds       uint64 `json:"sweep_interval_seconds,omitempty"`
 	MaintenanceIntervalSeconds uint64 `json:"maintenance_interval_seconds,omitempty"`
 	RetentionSeconds           uint64 `json:"retention_seconds,omitempty"`
+}
+
+// PublicationConfig fixes the complete roster and cadence of public prekey
+// generations. Durations are explicit because silently chosen rotation
+// policy would become security policy.
+type PublicationConfig struct {
+	Mode                      PublicationMode `json:"mode"`
+	DeviceSocketPath          string          `json:"device_socket_path,omitempty"`
+	DeviceIDs                 []string        `json:"device_ids,omitempty"`
+	AlgorithmID               string          `json:"algorithm_id,omitempty"`
+	GenerationLifetimeSeconds uint64          `json:"generation_lifetime_seconds,omitempty"`
+	ReplenishBeforeSeconds    uint64          `json:"replenish_before_seconds,omitempty"`
+	CheckIntervalSeconds      uint64          `json:"check_interval_seconds,omitempty"`
+}
+
+func (p PublicationConfig) Validate(localDeviceID, stateDir, runtimeSocket, ownerSocket string) error {
+	switch p.Mode {
+	case PublicationNone:
+		if p.DeviceSocketPath != "" || len(p.DeviceIDs) != 0 || p.AlgorithmID != "" ||
+			p.GenerationLifetimeSeconds != 0 || p.ReplenishBeforeSeconds != 0 || p.CheckIntervalSeconds != 0 {
+			return errors.New("publication none cannot carry unused settings")
+		}
+		return nil
+	case PublicationPrekeys:
+	default:
+		return errors.New("publication mode must be stated explicitly")
+	}
+	if !filepath.IsAbs(p.DeviceSocketPath) || filepath.Clean(p.DeviceSocketPath) != p.DeviceSocketPath {
+		return errors.New("publication device_socket_path must be absolute and clean")
+	}
+	if p.DeviceSocketPath == runtimeSocket || p.DeviceSocketPath == ownerSocket {
+		return errors.New("publication device socket must be independent")
+	}
+	if pathWithin(p.DeviceSocketPath, stateDir) {
+		return errors.New("publication device socket must not live inside state_dir")
+	}
+	if len(p.DeviceIDs) == 0 || len(p.DeviceIDs) > e2ee.MaxDevicesPerSet || !sort.StringsAreSorted(p.DeviceIDs) {
+		return errors.New("publication device roster must be non-empty, bounded, and sorted")
+	}
+	foundLocal := false
+	for index, deviceID := range p.DeviceIDs {
+		if !ids.Device.MatchString(deviceID) || index > 0 && p.DeviceIDs[index-1] == deviceID {
+			return errors.New("invalid publication device roster")
+		}
+		foundLocal = foundLocal || deviceID == localDeviceID
+	}
+	if !foundLocal {
+		return errors.New("publication device roster must include the configured device")
+	}
+	if err := e2ee.ValidateAlgorithmID(p.AlgorithmID); err != nil {
+		return err
+	}
+	if p.GenerationLifetimeSeconds < uint64(MinPrekeyGenerationLifetime/time.Second) ||
+		p.GenerationLifetimeSeconds > e2ee.MaxBundleLifetimeSeconds {
+		return errors.New("publication generation lifetime is outside its bound")
+	}
+	if p.ReplenishBeforeSeconds == 0 || p.ReplenishBeforeSeconds >= p.GenerationLifetimeSeconds {
+		return errors.New("publication replenish lead must be positive and shorter than its generation")
+	}
+	if p.CheckIntervalSeconds == 0 || p.CheckIntervalSeconds > p.ReplenishBeforeSeconds ||
+		p.CheckIntervalSeconds > uint64(MaxPrekeyPlannerInterval/time.Second) {
+		return errors.New("publication check interval is outside its bound")
+	}
+	return nil
+}
+
+func (p PublicationConfig) GenerationLifetime() time.Duration {
+	return time.Duration(p.GenerationLifetimeSeconds) * time.Second
+}
+
+func (p PublicationConfig) ReplenishBefore() time.Duration {
+	return time.Duration(p.ReplenishBeforeSeconds) * time.Second
+}
+
+func (p PublicationConfig) CheckInterval() time.Duration {
+	return time.Duration(p.CheckIntervalSeconds) * time.Second
+}
+
+func pathWithin(path, directory string) bool {
+	relative, err := filepath.Rel(directory, path)
+	return err == nil && relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // DiscoveryConfig provisions the out-of-band information that cannot be
@@ -384,7 +487,7 @@ func (c Config) Validate() error {
 	if c.OwnerSocketPath == c.SocketPath {
 		return errors.New("the runtime and owner sockets must be different")
 	}
-	if filepath.Dir(c.SocketPath) == c.StateDir || filepath.Dir(c.OwnerSocketPath) == c.StateDir {
+	if pathWithin(c.SocketPath, c.StateDir) || pathWithin(c.OwnerSocketPath, c.StateDir) {
 		// The state directory is owned through a lock file; a socket living in
 		// it would make a stale socket look like contested ownership.
 		return errors.New("socket_path must not live inside state_dir")
@@ -420,6 +523,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.Identity().Validate(); err != nil {
+		return err
+	}
+	if err := c.Publication.Validate(c.DeviceID, c.StateDir, c.SocketPath, c.OwnerSocketPath); err != nil {
 		return err
 	}
 	if err := c.FirewallPolicy().Validate(); err != nil {
