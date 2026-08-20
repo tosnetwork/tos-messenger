@@ -147,7 +147,11 @@ Private-room powers are now separate from MLS and transport authority.
 to the exact membership epoch/digest and current finalized room authority;
 `eventlog.RoomRoleLedger` persists monotonic revisions. Every membership
 change makes the prior policy stale, so a removed member keeps no role even if
-an old signed policy is replayed. Moderation-event effects remain open.
+an old signed policy is replayed. `room.moderation` and
+`eventlog.ModerationLedger` now turn those powers into auditable per-target
+`hide`/`restore` revisions: hidden queued messages do not reach the runtime,
+restore re-enables them, and the immutable target remains stored. Applied-
+history UI retraction remains open.
 
 ## Still open — why this remains 🟡
 

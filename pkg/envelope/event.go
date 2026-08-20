@@ -108,6 +108,7 @@ var eventKinds = map[string]kindSpec{
 	"room.invite":            {class: "room"},
 	"room.membership.commit": {class: "room"},
 	"room.message":           {class: "room"},
+	"room.moderation":        {class: "room"},
 }
 
 // Event is the inner typed object obtained after decryption.

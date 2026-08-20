@@ -729,3 +729,50 @@ func decodeRoomMessage(reader *canon.Reader) Payload {
 		Body:      reader.Text(MaxTextBytes),
 	}
 }
+
+// RoomModeration records an auditable presentation decision about one room
+// message. It never deletes ciphertext or rewrites the target Event; clients
+// derive visibility from the latest authorized decision revision.
+type RoomModeration struct {
+	RoomID             string
+	MembershipEpoch    uint64
+	RolePolicyRevision uint64
+	TargetEventID      string
+	DecisionRevision   uint64
+	Action             string
+	Reason             string
+}
+
+func (RoomModeration) Schema() string { return "tos.messaging.payload.room-moderation.v1" }
+
+func (r RoomModeration) Validate() error {
+	if err := requireMatch("room", r.RoomID, ids.Room); err != nil {
+		return err
+	}
+	if r.MembershipEpoch == 0 || r.RolePolicyRevision == 0 || r.DecisionRevision == 0 {
+		return errors.New("room moderation has no authority revision")
+	}
+	if err := requireEvent("moderation target", r.TargetEventID); err != nil {
+		return err
+	}
+	if r.Action != "hide" && r.Action != "restore" {
+		return errors.New("unknown room moderation action")
+	}
+	return requireText("moderation reason", r.Reason, MaxShortTextBytes)
+}
+
+func (r RoomModeration) encode(buffer *bytes.Buffer) {
+	canon.Text(buffer, r.RoomID)
+	canon.Uint64(buffer, r.MembershipEpoch)
+	canon.Uint64(buffer, r.RolePolicyRevision)
+	canon.Text(buffer, r.TargetEventID)
+	canon.Uint64(buffer, r.DecisionRevision)
+	canon.Text(buffer, r.Action)
+	canon.Text(buffer, r.Reason)
+}
+
+func decodeRoomModeration(reader *canon.Reader) Payload {
+	return RoomModeration{RoomID: reader.Text(MaxShortTextBytes), MembershipEpoch: reader.Uint64(),
+		RolePolicyRevision: reader.Uint64(), TargetEventID: reader.Text(MaxShortTextBytes),
+		DecisionRevision: reader.Uint64(), Action: reader.Text(MaxShortTextBytes), Reason: reader.Text(MaxShortTextBytes)}
+}

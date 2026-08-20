@@ -108,6 +108,10 @@ func sample(kind string) Payload {
 	case "room.message":
 		return RoomMessage{RoomID: "room_" + strings.Repeat("9", 64), Epoch: 3,
 			MediaType: "text/markdown", Body: "agenda"}
+	case "room.moderation":
+		return RoomModeration{RoomID: "room_" + strings.Repeat("9", 64), MembershipEpoch: 3,
+			RolePolicyRevision: 2, TargetEventID: "evt_" + strings.Repeat("8", 64),
+			DecisionRevision: 1, Action: "hide", Reason: "off topic"}
 	}
 	return nil
 }

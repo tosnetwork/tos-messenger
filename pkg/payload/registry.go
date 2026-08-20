@@ -49,4 +49,5 @@ var codecs = map[string]codec{
 	"room.invite":            {schema: RoomInvite{}.Schema(), decode: decodeRoomInvite},
 	"room.membership.commit": {schema: RoomMembershipCommit{}.Schema(), decode: decodeRoomMembershipCommit},
 	"room.message":           {schema: RoomMessage{}.Schema(), decode: decodeRoomMessage},
+	"room.moderation":        {schema: RoomModeration{}.Schema(), decode: decodeRoomModeration},
 }
