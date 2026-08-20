@@ -129,6 +129,9 @@ const (
 	// DomainRoomMembershipAuthorization namespaces the current authority's
 	// signature over one founding or successor membership.
 	DomainRoomMembershipAuthorization = "tos.messaging.room-membership-authorization.v1\x00"
+	// DomainRoomRolePolicy namespaces the current room authority's bounded
+	// assignment of elevated administrator and moderator powers.
+	DomainRoomRolePolicy = "tos.messaging.room-role-policy.v1\x00"
 	// DomainStoredAck namespaces a Relay's durable-storage acknowledgement.
 	// It is deliberately distinct from delivery and application ACK payloads:
 	// a Relay storing ciphertext proves neither recipient nor runtime action.
@@ -201,6 +204,7 @@ var Domains = []string{
 	DomainRoomMembership,
 	DomainRoomAuthorityTransfer,
 	DomainRoomMembershipAuthorization,
+	DomainRoomRolePolicy,
 	DomainStoredAck,
 	DomainConformanceReport,
 	DomainMLSDeviceCredential,

@@ -142,6 +142,13 @@ Relay roots for conversation plaintext and every member's private snapshot.
 This closes the local multi-Relay/catch-up acceptance vector, not live operator
 or post-M0-R transport evidence.
 
+Private-room powers are now separate from MLS and transport authority.
+`pkg/room.RolePolicy` binds at most four administrators and sixteen moderators
+to the exact membership epoch/digest and current finalized room authority;
+`eventlog.RoomRoleLedger` persists monotonic revisions. Every membership
+change makes the prior policy stale, so a removed member keeps no role even if
+an old signed policy is replayed. Moderation-event effects remain open.
+
 ## Still open — why this remains 🟡
 
 - independent review of the concrete OpenMLS Driver and its snapshot/process
