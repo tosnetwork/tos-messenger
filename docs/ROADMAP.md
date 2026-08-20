@@ -51,6 +51,25 @@ gate status: this repository carries none and consumes no gate capacity.
 | Cross-implementation positive vectors and adversarial corpus | 🟡 | `internal/vectors`, `pkg/conformance`, `cmd/tos-vector-report`, `pkg/evidence` | Positive vectors and a self-verifying adversarial corpus exist at object, verify, StoredAck, and concrete E2EE layers. The deterministic evidence bundle now hands their exact hashes to an external consumer, and the strict signed report verifier proves which implementation key claimed to consume them. **Named gap:** no independent implementation has returned a qualifying report — the harness makes that evidence reproducible but cannot manufacture independence |
 | Independent multi-operator interoperability evidence | ⬜ | — | Needs a second implementation |
 
+## Scenario acceptance — what "two agents can talk" actually requires
+
+The component table above tracks parts; a Messenger is accepted by scenarios.
+Neither scenario below is close-able by any single component: each names the
+exact chain still standing between the parts and a conversation, so progress
+on the chain is visible and nothing is quietly assumed. A scenario is ✅ only
+when the whole flow runs end to end on a real network between independently
+operated agents.
+
+| Scenario | Status | What already stands | The blocking chain, in dependency order |
+|---|---:|---|---|
+| **S1 — Two OpenFox agents discover each other and hold a one-to-one conversation** | ⬜ | Agent/Endpoint/Device identity; descriptor + locator formats and the route-neutral refresh manager; the default 1:1 E2EE candidate and its vectors; envelopes, payload codecs, durable inbox/outbox with delivery leases; negotiation-to-settlement commerce riding the same events | (1) the multi-operator M0-R study produces a route finding — the architecture forbids building the transport first; (2) the production transport that finding selects, over the native stack; (3) owner ratification freezes the E2EE suite; (4) production DHT/descriptor adapters wired into the daemon (the refresh manager currently drives fakes); (5) the OpenFox `tos-messenger` channel adapter (`pkg/channels/` peer of the existing channels) |
+| **S2 — Three OpenFox agents converse in a private room, third member invited by epoch transition** | ⬜ | Everything S1 stands on, plus: membership epochs with durable rollback/gap enforcement; admission-gate membership refusal; the MLS 1.0 selection and the group contract/refutation harness; the route-neutral mailbox store for offline KeyPackage/Welcome delivery | Everything S1 still lacks, plus: (6) the TOS-MLS v1 profile implemented against the two-clock model with canonical encodings and adversarial vectors; (7) the room-authority decision (single-authority vs. member-consensus) recorded and enforced; (8) KeyPackage/Welcome delivery bound to real Relay retrieval, which itself waits on the post-M0-R transport binding |
+
+The chain is deliberately honest about what kind of blocker each link is:
+(1) needs external operators, (3) and (7) are owner freeze decisions, and the
+rest is buildable code in this repository or in `openfox` once its
+predecessors land.
+
 ## Private-room cryptography selection — TOS-MLS v1 candidate
 
 **Construction decision (2026-08-20): private rooms use MLS 1.0 (RFC 9420 / TreeKEM).** MLS versus a TOS-specific group ratchet is no longer an open choice. The adaptation below is the profile to implement and test; its wire commitments are not frozen until the canonical encodings, implementation, adversarial vectors, independent review, and second-implementation evidence exist.
