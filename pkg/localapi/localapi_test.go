@@ -121,6 +121,7 @@ func newHarnessWithPolicy(t *testing.T, policy firewall.Policy) *harness {
 		Journal: journal, Suite: stubSuite{}, Sender: instance.sender,
 		Bindings: stubBindings{}, Now: func() time.Time { return instance.clock },
 		Identity: dispatch.Identity{AgentID: senderID, EndpointID: senderMEP, DeviceID: senderDev},
+		Network:  testNetwork(),
 	})
 	if err != nil {
 		t.Fatalf("dispatcher: %v", err)
@@ -399,6 +400,78 @@ func TestRuntimeSubmitsAnEvent(t *testing.T) {
 	})
 	if bad.OK {
 		t.Fatal("a malformed event was queued")
+	}
+}
+
+func TestRuntimeComposesDaemonOwnedEventWithStableRetry(t *testing.T) {
+	h := newHarness(t)
+	request := Request{Op: OpCompose, ConversationID: convoID, MediaType: "text/plain; charset=utf-8",
+		Body: "daemon owns this envelope", IdempotencyKey: "idem_" + strings.Repeat("a", 64),
+		SessionID: sessionID, RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 3600}
+	first := h.call(t, request)
+	if !first.OK || !first.Fresh || first.EventID == "" {
+		t.Fatalf("first compose: %+v", first)
+	}
+	h.clock = h.clock.Add(30 * time.Second)
+	retry := h.call(t, request)
+	if !retry.OK || retry.Fresh || retry.EventID != first.EventID {
+		t.Fatalf("retry changed the durable event: first=%+v retry=%+v", first, retry)
+	}
+	delivery, found, err := h.journal.LookupDelivery(first.EventID)
+	if err != nil || !found {
+		t.Fatalf("lookup composed delivery: found=%v err=%v", found, err)
+	}
+	raw, err := delivery.Payload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := envelope.DecodeEventJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.SenderAgentID != senderID || event.SenderEndpointID != senderMEP ||
+		event.SenderDeviceID != senderDev || event.Network.NetworkId != testNetwork().NetworkId {
+		t.Fatalf("event escaped daemon authority: %+v", event)
+	}
+
+	substitution := request
+	substitution.Body = "replace it"
+	if response := h.call(t, substitution); response.OK {
+		t.Fatal("one idempotency key accepted different content")
+	}
+	substitution = request
+	substitution.RecipientEndpointID = "mep_" + strings.Repeat("9", 64)
+	if response := h.call(t, substitution); response.OK {
+		t.Fatal("one idempotency key accepted a different recipient")
+	}
+}
+
+func TestRuntimeComposesBoundRoomMessage(t *testing.T) {
+	h := newHarness(t)
+	roomID := "room_" + strings.Repeat("b", 64)
+	response := h.call(t, Request{Op: OpCompose, ConversationID: convoID, RoomID: roomID,
+		MembershipEpoch: 7, MediaType: "text/plain; charset=utf-8", Body: "room hello",
+		IdempotencyKey: "idem_" + strings.Repeat("c", 64), SessionID: sessionID,
+		RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 3600})
+	if !response.OK {
+		t.Fatalf("compose room message: %+v", response)
+	}
+	delivery, _, err := h.journal.LookupDelivery(response.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := delivery.Payload()
+	event, err := envelope.DecodeEventJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := payload.Decode(event.Kind, event.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, ok := decoded.(payload.RoomMessage)
+	if !ok || event.RoomID != roomID || message.RoomID != roomID || message.Epoch != 7 {
+		t.Fatalf("room binding was lost: event=%+v payload=%+v", event, decoded)
 	}
 }
 

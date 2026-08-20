@@ -125,6 +125,7 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 	// this installation can honestly do.
 	dispatcher, err := dispatch.New(dispatch.Config{
 		Journal: journal, Identity: config.Identity(),
+		Network:             config.Network(),
 		AllowedEventClasses: append([]string(nil), delegation.AllowedOutboundEventClasses...),
 	})
 	if err != nil {

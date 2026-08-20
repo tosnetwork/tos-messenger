@@ -13,17 +13,21 @@
 package dispatch
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
 // Message is one sealed event handed to a transport.
@@ -72,6 +76,9 @@ type Config struct {
 	// from it, because a runtime that could set the sender fields freely could
 	// send as somebody else from this daemon's own sessions.
 	Identity Identity
+	// Network is fixed by daemon configuration. It is deliberately not a
+	// compose-call argument: a runtime may choose words, not their chain domain.
+	Network *nativev1.NetworkDomain
 	// AllowedEventClasses is the outbound authority granted by the live
 	// endpoint delegation. Nil leaves the dispatcher reusable for callers that
 	// enforce authority at a higher boundary; daemon startup always supplies
@@ -80,6 +87,15 @@ type Config struct {
 	// AttemptLease bounds how long one sweep may hold a delivery. A lease that
 	// never expires strands an event when the sweep holding it dies.
 	AttemptLease time.Duration
+}
+
+// ComposeRequest is the semantic subset an Agent runtime may choose.
+type ComposeRequest struct {
+	ConversationID, RoomID, ReplyToEventID string
+	MembershipEpoch                        uint64
+	MediaType, Body, IdempotencyKey        string
+	SessionID, RecipientEndpointID         string
+	ExpiresAtUnix                          uint64
 }
 
 // DefaultAttemptLease is how long one sweep holds a delivery by default.
@@ -237,6 +253,65 @@ func (d *Dispatcher) Queue(event envelope.Event, sessionID, recipientEndpointID 
 		CreatedAtUnix:       uint64(now.Unix()),
 		ExpiresAtUnix:       expiresAtUnix,
 	})
+}
+
+// ComposeAndQueue constructs the canonical event under daemon-owned identity,
+// network, clock and kind, then durably binds it to the runtime's idempotency
+// key before queueing it. A process crash at either boundary is retry-safe.
+func (d *Dispatcher) ComposeAndQueue(request ComposeRequest) (envelope.Event, bool, error) {
+	if d == nil || d.config.Network == nil {
+		return envelope.Event{}, false, errors.New("dispatch composition has no network")
+	}
+	now := d.config.Now()
+	if now.IsZero() || now.Unix() < 0 || request.ExpiresAtUnix <= uint64(now.Unix()) {
+		return envelope.Event{}, false, errors.New("invalid outbound lifetime")
+	}
+	kind := "text"
+	var body payload.Payload = payload.Text{MediaType: request.MediaType, Body: request.Body, ReplyToEventID: request.ReplyToEventID}
+	if request.RoomID != "" {
+		kind = "room.message"
+		body = payload.RoomMessage{RoomID: request.RoomID, Epoch: request.MembershipEpoch, MediaType: request.MediaType, Body: request.Body}
+	}
+	content, err := payload.Encode(body)
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	event, err := envelope.NewEvent(envelope.Event{Network: d.config.Network,
+		ConversationID: request.ConversationID, SenderAgentID: d.config.Identity.AgentID,
+		SenderEndpointID: d.config.Identity.EndpointID, SenderDeviceID: d.config.Identity.DeviceID,
+		RoomID: request.RoomID, ReplyToEventID: request.ReplyToEventID,
+		CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: request.ExpiresAtUnix,
+		Kind: kind, IdempotencyKey: strings.TrimPrefix(request.IdempotencyKey, "idem_"), Content: content})
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	encoded, err := envelope.EncodeEventJSON(event)
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	intent := bytes.NewBufferString(canon.DomainOutboundIntent)
+	for _, value := range []string{d.config.Network.NetworkId, d.config.Network.GenesisRootHash,
+		d.config.Network.GenesisFileHash, d.config.Identity.AgentID, d.config.Identity.EndpointID,
+		d.config.Identity.DeviceID, request.ConversationID, request.RoomID, request.ReplyToEventID, request.MediaType,
+		request.Body, request.IdempotencyKey, request.SessionID, request.RecipientEndpointID} {
+		canon.Text(intent, value)
+	}
+	canon.Uint64(intent, request.MembershipEpoch)
+	canon.Uint64(intent, request.ExpiresAtUnix)
+	chosen, compositionFresh, err := d.config.Journal.ClaimOutboundComposition(request.IdempotencyKey, canon.Digest(intent.Bytes()), eventlog.Outbound{
+		EventID: event.EventID, SessionID: request.SessionID, RecipientEndpointID: request.RecipientEndpointID,
+		ConversationID: request.ConversationID, Payload: encoded, CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: request.ExpiresAtUnix})
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	if !compositionFresh {
+		event, err = envelope.DecodeEventJSON(chosen.Payload)
+		if err != nil {
+			return envelope.Event{}, false, err
+		}
+	}
+	fresh, _, err := d.config.Journal.Enqueue(chosen)
+	return event, fresh, err
 }
 
 // Sweep attempts every delivery whose next attempt has arrived.

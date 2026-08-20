@@ -161,6 +161,8 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.reject(request, now)
 	case OpQueue:
 		return s.queue(request)
+	case OpCompose:
+		return s.compose(request)
 	case OpAwaitingAdmission:
 		return s.awaitingAdmission(request, now)
 	case OpAdmit:
@@ -279,6 +281,20 @@ func (s *Server) queue(request Request) Response {
 		return refuse(fault.CodeInternal, err)
 	}
 	return Response{OK: true, Fresh: fresh}
+}
+
+func (s *Server) compose(request Request) Response {
+	event, fresh, err := s.config.Dispatcher.ComposeAndQueue(dispatch.ComposeRequest{
+		ConversationID: request.ConversationID, RoomID: request.RoomID,
+		ReplyToEventID: request.ReplyToEventID, MembershipEpoch: request.MembershipEpoch,
+		MediaType: request.MediaType, Body: request.Body, IdempotencyKey: request.IdempotencyKey,
+		SessionID: request.SessionID, RecipientEndpointID: request.RecipientEndpointID,
+		ExpiresAtUnix: request.ExpiresAtUnix,
+	})
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, Fresh: fresh, EventID: event.EventID}
 }
 
 // awaitingAdmission lists what the owner has yet to decide about.

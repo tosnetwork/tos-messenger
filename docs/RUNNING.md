@@ -19,8 +19,15 @@ Agent runtime from the person it is asking, so an Agent deciding that a payment
 needs approval could answer itself.
 
 The runtime socket carries inbox draining and event submission and no approval
-operation at all. The owner socket carries the decisions and does no Agent
-work.
+operation at all. For ordinary text it should use `outbox.compose`: the runtime
+supplies conversation/room meaning, text, a fixed route, expiry and a canonical
+idempotency key, while the daemon supplies its finalized identity, network,
+clock, event kind, payload schema and content-addressed Event ID. The first
+complete event and route are persisted before queueing; a retry after a crash
+returns the same Event ID, while changed content or recipient under the same
+key fails closed. The legacy full-event `outbox.queue` remains a validated
+compatibility operation. The owner socket carries the decisions and does no
+Agent work.
 
 `tos-messenger-owner` makes the action-decision path operational without
 requiring the online machine to load the owner's private key. The challenge is
@@ -168,7 +175,7 @@ and sealing for a transport that does not exist would spend a message key per
 event on nothing. Queued events wait; they are not lost and they are not
 delivered.
 
-The local API still works: a runtime can drain the inbox and submit events, and
+The local API still works: a runtime can drain the inbox and compose or submit events, and
 an owner can admit or refuse an inbound message that is waiting, and release or
 abandon a held outbound one. What is missing is the middle,
 and it stays missing until the reachability study picks a route.

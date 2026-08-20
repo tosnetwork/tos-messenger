@@ -137,6 +137,7 @@ func newHarness(t *testing.T) *harness {
 		Bindings: bindings{},
 		Now:      func() time.Time { return instance.clock },
 		Identity: testIdentity(),
+		Network:  &nativev1.NetworkDomain{NetworkId: "tos-local", GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)},
 	})
 	if err != nil {
 		t.Fatalf("dispatcher: %v", err)
@@ -146,6 +147,47 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("session: %v", err)
 	}
 	return instance
+}
+
+func TestComposeRetrySurvivesRestartWithoutTransport(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	clock := time.Unix(int64(baseUnix), 0)
+	request := ComposeRequest{ConversationID: convoID, MediaType: "text/plain; charset=utf-8", Body: "durable",
+		IdempotencyKey: "idem_" + strings.Repeat("a", 64), SessionID: sessionID,
+		RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 3600}
+	open := func(t *testing.T) (*eventlog.Journal, *Dispatcher) {
+		t.Helper()
+		journal, err := eventlog.Open(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dispatcher, err := New(Config{Journal: journal, Now: func() time.Time { return clock },
+			Identity: testIdentity(), Network: &nativev1.NetworkDomain{NetworkId: "tos-local",
+				GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)}})
+		if err != nil {
+			_ = journal.Close()
+			t.Fatal(err)
+		}
+		return journal, dispatcher
+	}
+	journal, dispatcher := open(t)
+	first, fresh, err := dispatcher.ComposeAndQueue(request)
+	if err != nil || !fresh {
+		t.Fatalf("first compose: fresh=%v err=%v", fresh, err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(time.Minute)
+	journal, dispatcher = open(t)
+	defer journal.Close()
+	retry, fresh, err := dispatcher.ComposeAndQueue(request)
+	if err != nil || fresh || retry.EventID != first.EventID {
+		t.Fatalf("restart retry: first=%s retry=%s fresh=%v err=%v", first.EventID, retry.EventID, fresh, err)
+	}
+	if _, err := dispatcher.Sweep(context.Background(), 1); !errors.Is(err, ErrNoTransport) {
+		t.Fatalf("queue-only dispatcher hid missing transport: %v", err)
+	}
 }
 
 func (h *harness) event(t *testing.T, body string) envelope.Event {

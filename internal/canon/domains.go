@@ -175,6 +175,9 @@ const (
 	// DomainOpenFoxMLSAAD binds a local encrypted acceptance message to the
 	// exact room, authenticated sender, and retry-stable client identifier.
 	DomainOpenFoxMLSAAD = "tos.messaging.openfox-mls-message-aad.v1\x00"
+	// DomainOutboundIntent binds a runtime's semantic message and fixed route
+	// independently of the daemon-owned creation time and Event ID.
+	DomainOutboundIntent = "tos.messaging.outbound-intent.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -222,6 +225,7 @@ var Domains = []string{
 	DomainLabRoom,
 	DomainLabMessage,
 	DomainOpenFoxMLSAAD,
+	DomainOutboundIntent,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainAdmissionInvite,

@@ -30,7 +30,7 @@ import (
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema = "tos.messaging.local-request.v2"
+	RequestSchema = "tos.messaging.local-request.v3"
 	// ResponseSchema is the strict wire schema of a response.
 	ResponseSchema = "tos.messaging.local-response.v1"
 
@@ -56,6 +56,9 @@ const (
 	OpReject Operation = "inbox.reject"
 	// OpQueue submits an event for delivery.
 	OpQueue Operation = "outbox.queue"
+	// OpCompose submits message meaning; the daemon supplies identity, network,
+	// clock, payload schema, kind and Event ID.
+	OpCompose Operation = "outbox.compose"
 
 	// OpAwaitingAdmission lists inbound events waiting for the owner. A
 	// runtime never sees these; deciding about them is what the owner is for.
@@ -126,7 +129,7 @@ const (
 
 var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
-		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {},
+		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
 	},
 	PrincipalOwner: {
@@ -149,7 +152,7 @@ func Permits(principal Principal, operation Operation) bool {
 }
 
 var operations = map[Operation]struct{}{
-	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {},
+	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
 	OpApprove: {}, OpDeny: {},
 	OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpPendingActions: {},
@@ -159,15 +162,17 @@ var operations = map[Operation]struct{}{
 }
 
 var (
-	eventPattern       = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
-	leasePattern       = regexp.MustCompile(`^lease_[0-9a-f]{64}$`)
-	sessionPattern     = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
-	endpointPattern    = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
-	actionPattern      = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
-	idempotencyPattern = regexp.MustCompile(`^idem_[0-9a-f]{64}$`)
-	mandatePattern     = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
-	agentPattern       = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
-	challengePattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	eventPattern        = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
+	leasePattern        = regexp.MustCompile(`^lease_[0-9a-f]{64}$`)
+	sessionPattern      = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
+	endpointPattern     = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
+	actionPattern       = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
+	idempotencyPattern  = regexp.MustCompile(`^idem_[0-9a-f]{64}$`)
+	conversationPattern = regexp.MustCompile(`^conv_[0-9a-f]{64}$`)
+	roomPattern         = regexp.MustCompile(`^room_[0-9a-f]{64}$`)
+	mandatePattern      = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
+	agentPattern        = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
+	challengePattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Request is one call over the local socket.
@@ -186,6 +191,13 @@ type Request struct {
 	SessionID           string          `json:"session_id,omitempty"`
 	RecipientEndpointID string          `json:"recipient_endpoint_id,omitempty"`
 	ExpiresAtUnix       uint64          `json:"expires_at_unix,omitempty"`
+	ConversationID      string          `json:"conversation_id,omitempty"`
+	RoomID              string          `json:"room_id,omitempty"`
+	ReplyToEventID      string          `json:"reply_to_event_id,omitempty"`
+	MembershipEpoch     uint64          `json:"membership_epoch,omitempty"`
+	MediaType           string          `json:"media_type,omitempty"`
+	Body                string          `json:"body,omitempty"`
+	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
 
 	// Action is one proposed action, for the firewall operations. It is the
 	// action itself rather than an identifier, because the identifier is
@@ -325,9 +337,10 @@ type Response struct {
 	Code   fault.Code `json:"code,omitempty"`
 	Detail string     `json:"detail,omitempty"`
 
-	Events []PendingEvent `json:"events,omitempty"`
-	Event  *PendingEvent  `json:"claimed,omitempty"`
-	Fresh  bool           `json:"fresh,omitempty"`
+	Events  []PendingEvent `json:"events,omitempty"`
+	Event   *PendingEvent  `json:"claimed,omitempty"`
+	Fresh   bool           `json:"fresh,omitempty"`
+	EventID string         `json:"event_id,omitempty"`
 
 	// Actions lists decisions waiting for the owner.
 	Actions []WaitingAction `json:"actions,omitempty"`
@@ -478,6 +491,11 @@ func ValidateRequest(request Request) error {
 		(request.InvitedAgentID != "" || request.InviteExpiresAtUnix != 0) {
 		return errors.New("only admission invite creation carries invite terms")
 	}
+	if request.Op != OpCompose && (request.ConversationID != "" || request.RoomID != "" ||
+		request.ReplyToEventID != "" || request.MembershipEpoch != 0 || request.MediaType != "" ||
+		request.Body != "" || request.IdempotencyKey != "") {
+		return errors.New("only outbound composition carries message semantics")
+	}
 	switch request.Op {
 	case OpPending, OpAwaitingAdmission:
 		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
@@ -512,6 +530,26 @@ func ValidateRequest(request Request) error {
 		}
 		if request.ExpiresAtUnix == 0 {
 			return errors.New("a submission needs an expiry")
+		}
+		return nil
+	case OpCompose:
+		if !conversationPattern.MatchString(request.ConversationID) ||
+			!sessionPattern.MatchString(request.SessionID) || !endpointPattern.MatchString(request.RecipientEndpointID) ||
+			!idempotencyPattern.MatchString(request.IdempotencyKey) || request.ExpiresAtUnix == 0 {
+			return errors.New("a composition needs canonical conversation, route, expiry and idempotency identifiers")
+		}
+		if request.RoomID == "" {
+			if request.MembershipEpoch != 0 {
+				return errors.New("a direct message has no membership epoch")
+			}
+		} else if !roomPattern.MatchString(request.RoomID) || request.MembershipEpoch == 0 {
+			return errors.New("a room message needs a canonical room and membership epoch")
+		}
+		if request.ReplyToEventID != "" && !eventPattern.MatchString(request.ReplyToEventID) {
+			return errors.New("invalid reply event identifier")
+		}
+		if request.MediaType == "" || request.Body == "" {
+			return errors.New("a composition needs media type and body")
 		}
 		return nil
 	case OpApprove, OpDeny, OpAdmit:

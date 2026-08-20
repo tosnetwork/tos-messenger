@@ -43,10 +43,11 @@ const (
 	// Schema is the on-disk record schema identifier.
 	Schema = "tos.messaging.event-journal.v1"
 
-	lockName      = ".messenger-event-journal.lock"
-	inboundDir    = "inbound"
-	outboundDir   = "outbound"
-	moderationDir = "room-moderation"
+	lockName       = ".messenger-event-journal.lock"
+	inboundDir     = "inbound"
+	outboundDir    = "outbound"
+	compositionDir = "outbound-compositions"
+	moderationDir  = "room-moderation"
 
 	// MaxRecordBytes bounds one on-disk record. It has to hold a complete
 	// event, because a record without its event cannot be re-delivered, and an
@@ -296,7 +297,7 @@ func openJournalAt(root string, quota Quota) (*Journal, error) {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return nil, errors.New("event journal root must be a private directory")
 	}
-	for _, name := range []string{inboundDir, outboundDir, moderationDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, devicePrekeyDir, prekeyContributionDir, prekeyPublicationDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, escrowLocatorDir, agentPacketDir, admissionInviteDir} {
+	for _, name := range []string{inboundDir, outboundDir, compositionDir, moderationDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, devicePrekeyDir, prekeyContributionDir, prekeyPublicationDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, escrowLocatorDir, agentPacketDir, admissionInviteDir} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			return nil, errors.New("create event journal directory")
 		}
