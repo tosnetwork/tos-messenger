@@ -23,10 +23,11 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/tosaddr"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
 )
 
 // ConfigSchema is the strict schema of a daemon configuration.
-const ConfigSchema = "tos.messaging.daemon-config.v1"
+const ConfigSchema = "tos.messaging.daemon-config.v2"
 
 // TransportMode names how this installation carries messages.
 type TransportMode string
@@ -77,6 +78,19 @@ type Config struct {
 	// MinFinalizedCheckpoint refuses state older than a point the operator
 	// already knows about.
 	MinFinalizedCheckpoint uint64 `json:"min_finalized_checkpoint,omitempty"`
+
+	// ChainEndpoints are independent JSON-RPC authorities queried for a
+	// strict-majority finalized view. NativeRegistryCodeHash selects the one
+	// registry version whose deterministic account layout the live resolver
+	// uses; Registries remains the complete set accepted by the verifier.
+	ChainEndpoints              []string `json:"chain_endpoints"`
+	ChainQuorum                 int      `json:"chain_quorum"`
+	ChainQueryTimeoutSeconds    uint64   `json:"chain_query_timeout_seconds,omitempty"`
+	ChainMaxResponseBytes       int64    `json:"chain_max_response_bytes,omitempty"`
+	ChainReadinessMaxAgeSeconds uint64   `json:"chain_readiness_max_age_seconds,omitempty"`
+	NativeRegistryCodeHash      string   `json:"native_registry_code_hash"`
+	ChainCheckpointPath         string   `json:"chain_checkpoint_path"`
+	DelegationPath              string   `json:"delegation_path"`
 
 	// AgentID, EndpointID and DeviceID are who this installation speaks for.
 	// Outbound events must say they came from here, so an installation that
@@ -191,6 +205,40 @@ func (c Config) Chain() (identity.ChainPolicy, error) {
 	return policy, nil
 }
 
+// NativeRegistry returns the explicitly selected contract layout used for
+// direct finalized Agent reads.
+func (c Config) NativeRegistry() (RegistryConfig, error) {
+	for _, registry := range c.Registries {
+		if registry.CodeHash == c.NativeRegistryCodeHash {
+			return registry, nil
+		}
+	}
+	return RegistryConfig{}, errors.New("native_registry_code_hash must select a configured registry")
+}
+
+// ChainAdapter builds the bounded, strict-majority finalized-state client.
+// Construction performs all endpoint and policy validation without issuing a
+// network request, so config checking remains offline.
+func (c Config) ChainAdapter() (*toschain.Adapter, error) {
+	if c.ChainQueryTimeoutSeconds > 30 {
+		return nil, errors.New("chain_query_timeout_seconds exceeds 30 seconds")
+	}
+	if c.ChainReadinessMaxAgeSeconds > 3600 {
+		return nil, errors.New("chain_readiness_max_age_seconds exceeds one hour")
+	}
+	if c.ChainMaxResponseBytes < 0 || c.ChainMaxResponseBytes > 16<<20 {
+		return nil, errors.New("chain_max_response_bytes exceeds 16 MiB")
+	}
+	return toschain.New(toschain.Config{
+		Network:          c.NetworkID,
+		Endpoints:        c.ChainEndpoints,
+		Quorum:           c.ChainQuorum,
+		QueryTimeout:     time.Duration(c.ChainQueryTimeoutSeconds) * time.Second,
+		MaxResponseBytes: c.ChainMaxResponseBytes,
+		ReadinessMaxAge:  time.Duration(c.ChainReadinessMaxAgeSeconds) * time.Second,
+	})
+}
+
 // SweepInterval is how often queued events are attempted.
 func (c Config) SweepInterval() time.Duration {
 	if c.SweepIntervalSeconds == 0 {
@@ -248,6 +296,21 @@ func (c Config) Validate() error {
 	}
 	if err := chain.Validate(); err != nil {
 		return err
+	}
+	if _, err := c.NativeRegistry(); err != nil {
+		return err
+	}
+	if _, err := c.ChainAdapter(); err != nil {
+		return err
+	}
+	if !filepath.IsAbs(c.ChainCheckpointPath) || filepath.Clean(c.ChainCheckpointPath) != c.ChainCheckpointPath {
+		return errors.New("chain_checkpoint_path must be an absolute, clean path")
+	}
+	if c.ChainCheckpointPath != filepath.Join(c.StateDir, "chain.checkpoint") {
+		return errors.New("chain_checkpoint_path must be the daemon-owned state checkpoint")
+	}
+	if !filepath.IsAbs(c.DelegationPath) || filepath.Clean(c.DelegationPath) != c.DelegationPath {
+		return errors.New("delegation_path must be an absolute, clean path")
 	}
 	if err := c.Identity().Validate(); err != nil {
 		return err

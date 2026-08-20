@@ -531,6 +531,35 @@ func TestLocalOnlyKindsCannotBeQueued(t *testing.T) {
 	}
 }
 
+func TestEndpointDelegationLimitsOutboundEventClasses(t *testing.T) {
+	h := newHarness(t)
+	h.dispatcher.allowed = map[string]struct{}{"read.ack": {}}
+	event := h.event(t, "not delegated")
+	if _, _, err := h.dispatcher.Queue(event, sessionID, peerMEP, baseUnix+3600); err == nil {
+		t.Fatal("an event class outside the endpoint delegation was queued")
+	}
+	if _, found, err := h.journal.LookupDelivery(event.EventID); err != nil || found {
+		t.Fatalf("unauthorized event reached durable delivery state: found=%v err=%v", found, err)
+	}
+}
+
+func TestEndpointDelegationAuthorityMustBeNonEmptyAndUnique(t *testing.T) {
+	journal, err := eventlog.Open(filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatalf("journal: %v", err)
+	}
+	defer journal.Close()
+	for name, classes := range map[string][]string{
+		"empty": {}, "empty class": {""}, "duplicate": {"text", "text"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := New(Config{Journal: journal, Identity: testIdentity(), AllowedEventClasses: classes}); err == nil {
+				t.Fatalf("invalid authority %v was accepted", classes)
+			}
+		})
+	}
+}
+
 // A runtime does not get to choose who a message came from: the session it
 // would be sealed under belongs to this installation.
 func TestOutboundSenderMustBeThisInstallation(t *testing.T) {

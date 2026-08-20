@@ -72,6 +72,11 @@ type Config struct {
 	// from it, because a runtime that could set the sender fields freely could
 	// send as somebody else from this daemon's own sessions.
 	Identity Identity
+	// AllowedEventClasses is the outbound authority granted by the live
+	// endpoint delegation. Nil leaves the dispatcher reusable for callers that
+	// enforce authority at a higher boundary; daemon startup always supplies
+	// the finalized delegation's non-empty list.
+	AllowedEventClasses []string
 	// AttemptLease bounds how long one sweep may hold a delivery. A lease that
 	// never expires strands an event when the sweep holding it dies.
 	AttemptLease time.Duration
@@ -103,7 +108,8 @@ func (i Identity) Validate() error {
 
 // Dispatcher sends what the journal says is due.
 type Dispatcher struct {
-	config Config
+	config  Config
+	allowed map[string]struct{}
 }
 
 // Summary is what one sweep did.
@@ -153,7 +159,23 @@ func New(config Config) (*Dispatcher, error) {
 	if config.AttemptLease < time.Second {
 		return nil, errors.New("the send attempt lease is below its floor")
 	}
-	return &Dispatcher{config: config}, nil
+	var allowed map[string]struct{}
+	if config.AllowedEventClasses != nil {
+		allowed = make(map[string]struct{}, len(config.AllowedEventClasses))
+		for _, class := range config.AllowedEventClasses {
+			if class == "" {
+				return nil, errors.New("dispatch event authority contains an empty class")
+			}
+			if _, duplicate := allowed[class]; duplicate {
+				return nil, errors.New("dispatch event authority contains a duplicate class")
+			}
+			allowed[class] = struct{}{}
+		}
+		if len(allowed) == 0 {
+			return nil, errors.New("dispatch event authority is empty")
+		}
+	}
+	return &Dispatcher{config: config, allowed: allowed}, nil
 }
 
 // CanSend reports whether this dispatcher has a transport.
@@ -172,6 +194,11 @@ func (d *Dispatcher) Queue(event envelope.Event, sessionID, recipientEndpointID 
 	}
 	if err := envelope.ValidateEvent(event); err != nil {
 		return false, eventlog.Delivery{}, err
+	}
+	if d.allowed != nil {
+		if _, authorized := d.allowed[event.Kind]; !authorized {
+			return false, eventlog.Delivery{}, errors.New("event class is not authorized by the endpoint delegation")
+		}
 	}
 	// A local-only kind carries authority granted here. The receiving side
 	// refuses it on every route, and refusing to send it is what makes the

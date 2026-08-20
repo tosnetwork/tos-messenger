@@ -19,6 +19,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
+	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
@@ -36,23 +37,50 @@ func testConfig(t *testing.T) Config {
 	t.Helper()
 	root := t.TempDir()
 	return Config{
-		Schema:            ConfigSchema,
-		StateDir:          filepath.Join(root, "state"),
-		SocketPath:        filepath.Join(root, "run", "runtime.sock"),
-		OwnerSocketPath:   filepath.Join(root, "run", "owner.sock"),
-		NetworkID:         "tos-local",
-		GenesisRootHash:   strings.Repeat("a", 64),
-		GenesisFileHash:   strings.Repeat("b", 64),
-		Registries:        []RegistryConfig{{CodeHash: registryCode, CodeBOC: registryBOC, Workchain: 0}},
-		AgentID:           "agent_" + strings.Repeat("2", 64),
-		EndpointID:        "mep_" + strings.Repeat("3", 64),
-		DeviceID:          "dev_" + strings.Repeat("4", 64),
-		OwnerPublicKeyHex: testOwnerPublicHex(),
+		Schema:                 ConfigSchema,
+		StateDir:               filepath.Join(root, "state"),
+		SocketPath:             filepath.Join(root, "run", "runtime.sock"),
+		OwnerSocketPath:        filepath.Join(root, "run", "owner.sock"),
+		NetworkID:              "tos-local",
+		GenesisRootHash:        strings.Repeat("a", 64),
+		GenesisFileHash:        strings.Repeat("b", 64),
+		Registries:             []RegistryConfig{{CodeHash: registryCode, CodeBOC: registryBOC, Workchain: 0}},
+		ChainEndpoints:         []string{"http://127.0.0.1:18001", "http://127.0.0.1:18002", "http://127.0.0.1:18003"},
+		ChainQuorum:            2,
+		NativeRegistryCodeHash: registryCode,
+		ChainCheckpointPath:    filepath.Join(root, "state", "chain.checkpoint"),
+		DelegationPath:         filepath.Join(root, "delegation.json"),
+		AgentID:                "agent_" + strings.Repeat("2", 64),
+		EndpointID:             "mep_" + strings.Repeat("3", 64),
+		DeviceID:               "dev_" + strings.Repeat("4", 64),
+		OwnerPublicKeyHex:      testOwnerPublicHex(),
 		Firewall: FirewallConfig{
 			UnattendedCeiling: "message", OwnInitiativeCeiling: "tool-call",
 		},
 		Transport: TransportNone,
 	}
+}
+
+type acceptingVerifier struct{}
+
+func (acceptingVerifier) Verify(config Config, _ time.Time) (identity.Delegation, error) {
+	return identity.Delegation{
+		AgentID: config.AgentID, EndpointID: config.EndpointID,
+		AllowedOutboundEventClasses: []string{"text"},
+	}, nil
+}
+
+type fixedVerifier struct {
+	delegation identity.Delegation
+	err        error
+}
+
+func (v fixedVerifier) Verify(Config, time.Time) (identity.Delegation, error) {
+	return v.delegation, v.err
+}
+
+func openTest(config Config, observer Observer) (*Daemon, error) {
+	return open(config, observer, acceptingVerifier{})
 }
 
 type recorder struct {
@@ -91,7 +119,7 @@ func (r *recorder) Failed(stage string, err error)       { r.failures = append(r
 func TestDaemonServesAndReleasesItsState(t *testing.T) {
 	config := testConfig(t)
 	observer := &recorder{}
-	instance, err := Open(config, observer)
+	instance, err := openTest(config, observer)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -135,7 +163,7 @@ func TestDaemonServesAndReleasesItsState(t *testing.T) {
 
 func TestSecondDaemonRefusesTheSameState(t *testing.T) {
 	config := testConfig(t)
-	first, err := Open(config, nil)
+	first, err := openTest(config, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -144,8 +172,49 @@ func TestSecondDaemonRefusesTheSameState(t *testing.T) {
 	second := config
 	second.SocketPath = filepath.Join(filepath.Dir(config.SocketPath), "second.sock")
 	second.OwnerSocketPath = filepath.Join(filepath.Dir(config.SocketPath), "second-owner.sock")
-	if _, err := Open(second, nil); !errors.Is(err, dirlock.ErrHeld) {
+	if _, err := openTest(second, nil); !errors.Is(err, dirlock.ErrHeld) {
 		t.Fatalf("a second daemon opened the same state: %v", err)
+	}
+}
+
+func TestFinalizedDelegationMustAuthorizeConfiguredEndpoint(t *testing.T) {
+	config := testConfig(t)
+	wrong := identity.Delegation{AgentID: config.AgentID, EndpointID: "mep_" + strings.Repeat("9", 64)}
+	if _, err := open(config, nil, fixedVerifier{delegation: wrong}); err == nil {
+		t.Fatal("a delegation for another endpoint was accepted")
+	}
+	// A failed authority check releases the state lock, so a corrected daemon
+	// can start without operator cleanup.
+	journal, err := eventlog.Open(config.StateDir)
+	if err != nil {
+		t.Fatalf("failed authority check retained state ownership: %v", err)
+	}
+	_ = journal.Close()
+
+	if _, err := open(config, nil, fixedVerifier{err: errors.New("chain unavailable")}); err == nil ||
+		!strings.Contains(err.Error(), "verify finalized endpoint delegation") {
+		t.Fatalf("finalized resolver failure was not surfaced: %v", err)
+	}
+}
+
+func TestDelegationFileMustBeBoundedAndRegular(t *testing.T) {
+	root := t.TempDir()
+	regular := filepath.Join(root, "delegation.json")
+	if err := os.WriteFile(regular, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if raw, err := readBoundedRegularFile(regular, 2); err != nil || string(raw) != "{}" {
+		t.Fatalf("regular file refused: %q %v", raw, err)
+	}
+	link := filepath.Join(root, "delegation-link.json")
+	if err := os.Symlink(regular, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := readBoundedRegularFile(link, 2); err == nil {
+		t.Fatal("delegation symlink was followed")
+	}
+	if _, err := readBoundedRegularFile(regular, 1); err == nil {
+		t.Fatal("oversized delegation file was accepted")
 	}
 }
 
@@ -154,7 +223,7 @@ func TestSecondDaemonRefusesTheSameState(t *testing.T) {
 // correlating with themselves.
 func TestInstallSaltIsStable(t *testing.T) {
 	config := testConfig(t)
-	first, err := Open(config, nil)
+	first, err := openTest(config, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -166,7 +235,7 @@ func TestInstallSaltIsStable(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	second, err := Open(config, nil)
+	second, err := openTest(config, nil)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -187,7 +256,7 @@ func TestInstallSaltIsStable(t *testing.T) {
 // deliver.
 func TestQueuedEventSurvivesWithoutATransport(t *testing.T) {
 	config := testConfig(t)
-	instance, err := Open(config, nil)
+	instance, err := openTest(config, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -237,7 +306,7 @@ func TestQueuedEventSurvivesWithoutATransport(t *testing.T) {
 func TestMaintenanceSettlesThenPrunes(t *testing.T) {
 	config := testConfig(t)
 	observer := &recorder{}
-	instance, err := Open(config, observer)
+	instance, err := openTest(config, observer)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -279,7 +348,7 @@ func TestMaintenanceSettlesThenPrunes(t *testing.T) {
 // A sweep with no transport does nothing rather than reporting an empty
 // success, so a quiet daemon does not read as a working one.
 func TestSweepWithoutATransportIsSilent(t *testing.T) {
-	instance, err := Open(testConfig(t), &recorder{})
+	instance, err := openTest(testConfig(t), &recorder{})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -297,14 +366,22 @@ func TestSweepWithoutATransportIsSilent(t *testing.T) {
 func TestConfigurationMustBeStated(t *testing.T) {
 	base := testConfig(t)
 	cases := map[string]func(*Config){
-		"no schema":         func(c *Config) { c.Schema = "" },
-		"relative state":    func(c *Config) { c.StateDir = "state" },
-		"relative socket":   func(c *Config) { c.SocketPath = "run/messenger.sock" },
-		"socket in state":   func(c *Config) { c.SocketPath = filepath.Join(c.StateDir, "messenger.sock") },
-		"no network":        func(c *Config) { c.NetworkID = "" },
-		"bad genesis":       func(c *Config) { c.GenesisRootHash = "zz" },
-		"no registry":       func(c *Config) { c.Registries = nil },
-		"bad registry hash": func(c *Config) { c.Registries[0].CodeHash = "sha256:" + strings.Repeat("a", 64) },
+		"no schema":                      func(c *Config) { c.Schema = "" },
+		"relative state":                 func(c *Config) { c.StateDir = "state" },
+		"relative socket":                func(c *Config) { c.SocketPath = "run/messenger.sock" },
+		"socket in state":                func(c *Config) { c.SocketPath = filepath.Join(c.StateDir, "messenger.sock") },
+		"no network":                     func(c *Config) { c.NetworkID = "" },
+		"bad genesis":                    func(c *Config) { c.GenesisRootHash = "zz" },
+		"no registry":                    func(c *Config) { c.Registries = nil },
+		"no chain endpoints":             func(c *Config) { c.ChainEndpoints = nil },
+		"minority chain quorum":          func(c *Config) { c.ChainQuorum = 1 },
+		"insecure remote chain endpoint": func(c *Config) { c.ChainEndpoints[0] = "http://rpc.example.net" },
+		"unselected native registry":     func(c *Config) { c.NativeRegistryCodeHash = "tvm-cell-sha256:" + strings.Repeat("a", 64) },
+		"checkpoint outside state":       func(c *Config) { c.ChainCheckpointPath = filepath.Join(filepath.Dir(c.StateDir), "other.checkpoint") },
+		"relative delegation":            func(c *Config) { c.DelegationPath = "delegation.json" },
+		"overflowing chain timeout":      func(c *Config) { c.ChainQueryTimeoutSeconds = ^uint64(0) },
+		"oversized chain response":       func(c *Config) { c.ChainMaxResponseBytes = 16<<20 + 1 },
+		"bad registry hash":              func(c *Config) { c.Registries[0].CodeHash = "sha256:" + strings.Repeat("a", 64) },
 		"registry code that does not hash to its pin": func(c *Config) {
 			c.Registries[0].CodeHash = "tvm-cell-sha256:" + strings.Repeat("a", 64)
 		},
@@ -320,6 +397,7 @@ func TestConfigurationMustBeStated(t *testing.T) {
 			// The registry list is a slice, so a mutation would otherwise
 			// reach through every later case and the completeness check.
 			config.Registries = append([]RegistryConfig(nil), base.Registries...)
+			config.ChainEndpoints = append([]string(nil), base.ChainEndpoints...)
 			mutate(&config)
 			if name == "fast sweep" {
 				return
@@ -346,6 +424,11 @@ func TestUnknownConfigurationKeysAreRefused(t *testing.T) {
 		"genesis_root_hash": "` + strings.Repeat("a", 64) + `",
 		"genesis_file_hash": "` + strings.Repeat("b", 64) + `",
 		"registries": [{"code_hash": "` + registryCode + `", "code_boc": "` + registryBOC + `", "workchain": 0}],
+		"chain_endpoints": ["http://127.0.0.1:18001", "http://127.0.0.1:18002", "http://127.0.0.1:18003"],
+		"chain_quorum": 2,
+		"native_registry_code_hash": "` + registryCode + `",
+		"chain_checkpoint_path": "/var/lib/tos-messengerd/chain.checkpoint",
+		"delegation_path": "/etc/tos-messengerd/delegation.json",
 		"agent_id": "agent_` + strings.Repeat("2", 64) + `",
 		"endpoint_id": "mep_` + strings.Repeat("3", 64) + `",
 		"device_id": "dev_` + strings.Repeat("4", 64) + `",
@@ -432,7 +515,7 @@ func TestExampleConfigurationIsValid(t *testing.T) {
 // approval operations on it at all.
 func TestRuntimeAndOwnerSocketsAreSeparate(t *testing.T) {
 	config := testConfig(t)
-	instance, err := Open(config, nil)
+	instance, err := openTest(config, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

@@ -53,14 +53,30 @@ type Daemon struct {
 // what makes a second daemon on the same state fail immediately rather than
 // two of them interleaving writes for a while first.
 func Open(config Config, observer Observer) (*Daemon, error) {
+	return open(config, observer, finalizedVerifier{})
+}
+
+func open(config Config, observer Observer, verifier delegationVerifier) (*Daemon, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
+	}
+	if verifier == nil {
+		return nil, errors.New("no finalized delegation verifier")
 	}
 	journal, err := eventlog.Open(config.StateDir)
 	if err != nil {
 		return nil, err
 	}
 	instance := &Daemon{config: config, journal: journal, observer: observer}
+	delegation, err := verifier.Verify(config, time.Now())
+	if err != nil {
+		_ = journal.Close()
+		return nil, errors.New("verify finalized endpoint delegation: " + err.Error())
+	}
+	if delegation.AgentID != config.AgentID || delegation.EndpointID != config.EndpointID {
+		_ = journal.Close()
+		return nil, errors.New("finalized delegation does not authorize the configured endpoint")
+	}
 
 	salt, err := loadOrCreateSalt(filepath.Join(config.StateDir, SaltFile))
 	if err != nil {
@@ -71,7 +87,10 @@ func Open(config Config, observer Observer) (*Daemon, error) {
 
 	// With no transport the dispatcher can queue and not send, which is what
 	// this installation can honestly do.
-	dispatcher, err := dispatch.New(dispatch.Config{Journal: journal, Identity: config.Identity()})
+	dispatcher, err := dispatch.New(dispatch.Config{
+		Journal: journal, Identity: config.Identity(),
+		AllowedEventClasses: append([]string(nil), delegation.AllowedOutboundEventClasses...),
+	})
 	if err != nil {
 		_ = journal.Close()
 		return nil, err
