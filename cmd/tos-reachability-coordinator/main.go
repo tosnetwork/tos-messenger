@@ -31,7 +31,7 @@ func main() {
 	perWindow := flag.Int("requests-per-window", probe.DefaultRequestsPerWindow, "requests admitted per source address per window")
 	window := flag.Duration("rate-window", probe.DefaultRateWindow, "rate-limit window")
 	filterListen := flag.String("filter-listen", ":0",
-		"UDP address for the cold second-port filter source; it must share the primary address, and empty disables filter probing")
+		"UDP address for the cold second-port filter source; it must share the primary address, defaults to an ephemeral port so filter probing is on, and empty disables it")
 	filterSecondary := flag.String("filter-secondary-listen", "",
 		"UDP address for a cold filter source on a secondary address this host also holds; the address must genuinely differ from the primary, because the coordinator attests the source kind and cannot check it")
 	flag.Parse()
