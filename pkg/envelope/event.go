@@ -88,9 +88,10 @@ var eventKinds = map[string]kindSpec{
 	"owner.approval.grant": {class: "owner.approval", localOnly: true},
 	"owner.approval.deny":  {class: "owner.approval", localOnly: true},
 
-	"a2a.message": {class: "a2a"},
-	"mcp.call":    {class: "mcp"},
-	"mcp.result":  {class: "mcp"},
+	"a2a.message":  {class: "a2a"},
+	"mcp.call":     {class: "mcp"},
+	"mcp.result":   {class: "mcp"},
+	"agent.packet": {class: "agent.packet"},
 
 	"artifact.offer":     {class: "artifact"},
 	"artifact.reference": {class: "artifact"},

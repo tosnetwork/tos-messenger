@@ -286,6 +286,23 @@ func decodeMCPResult(reader *canon.Reader) Payload {
 	return MCPResult{Foreign: decodeForeign(reader)}
 }
 
+// AgentPacketMessage carries the exact signed Agent Packet V1 JSON bytes.
+// Decoding this wrapper does not verify packet authority; agentpacketbridge
+// resolves finalized Agent state and durably claims the packet nonce.
+type AgentPacketMessage struct{ Foreign }
+
+func (AgentPacketMessage) Schema() string { return "tos.messaging.payload.agent-packet.v1" }
+func (a AgentPacketMessage) Validate() error {
+	if a.Protocol != "agentpacket" || a.Version != "1" {
+		return errors.New("invalid Agent Packet carriage profile")
+	}
+	return a.Foreign.validate()
+}
+func (a AgentPacketMessage) encode(buffer *bytes.Buffer) { a.Foreign.encode(buffer) }
+func decodeAgentPacketMessage(reader *canon.Reader) Payload {
+	return AgentPacketMessage{Foreign: decodeForeign(reader)}
+}
+
 // ArtifactOffer says an artifact exists and what it is, without moving it.
 type ArtifactOffer struct {
 	ArtifactDigest string

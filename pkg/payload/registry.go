@@ -29,9 +29,10 @@ var codecs = map[string]codec{
 	"owner.approval.grant": {schema: OwnerApprovalGrant{}.Schema(), decode: decodeOwnerApprovalGrant},
 	"owner.approval.deny":  {schema: OwnerApprovalDeny{}.Schema(), decode: decodeOwnerApprovalDeny},
 
-	"a2a.message": {schema: A2AMessage{}.Schema(), decode: decodeA2AMessage},
-	"mcp.call":    {schema: MCPCall{}.Schema(), decode: decodeMCPCall},
-	"mcp.result":  {schema: MCPResult{}.Schema(), decode: decodeMCPResult},
+	"a2a.message":  {schema: A2AMessage{}.Schema(), decode: decodeA2AMessage},
+	"mcp.call":     {schema: MCPCall{}.Schema(), decode: decodeMCPCall},
+	"mcp.result":   {schema: MCPResult{}.Schema(), decode: decodeMCPResult},
+	"agent.packet": {schema: AgentPacketMessage{}.Schema(), decode: decodeAgentPacketMessage},
 
 	"artifact.offer":     {schema: ArtifactOffer{}.Schema(), decode: decodeArtifactOffer},
 	"artifact.reference": {schema: ArtifactReference{}.Schema(), decode: decodeArtifactReference},

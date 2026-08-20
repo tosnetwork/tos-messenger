@@ -61,6 +61,8 @@ func sample(kind string) Payload {
 		return MCPCall{Foreign: Foreign{Protocol: "mcp", Version: "1", Body: []byte("{}")}}
 	case "mcp.result":
 		return MCPResult{Foreign: Foreign{Protocol: "mcp", Version: "1", Body: []byte("{}")}}
+	case "agent.packet":
+		return AgentPacketMessage{Foreign: Foreign{Protocol: "agentpacket", Version: "1", Body: []byte("{}")}}
 	case "artifact.offer":
 		return ArtifactOffer{ArtifactDigest: "sha256:" + strings.Repeat("6", 64),
 			MediaType: "application/pdf", SizeBytes: 4096}

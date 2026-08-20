@@ -136,6 +136,8 @@ const (
 	DomainAttachmentChunk = "tos.messaging.attachment-chunk.v1\x00"
 	// DomainAttachmentManifest identifies the ordered ciphertext chunk set.
 	DomainAttachmentManifest = "tos.messaging.attachment-manifest.v1\x00"
+	// DomainAgentPacketClaim namespaces a durable sender+nonce replay claim.
+	DomainAgentPacketClaim = "tos.messaging.agent-packet-claim.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -169,6 +171,7 @@ var Domains = []string{
 	DomainAttachmentMetadata,
 	DomainAttachmentChunk,
 	DomainAttachmentManifest,
+	DomainAgentPacketClaim,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainNegotiationRecord,
