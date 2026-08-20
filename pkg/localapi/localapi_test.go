@@ -868,7 +868,11 @@ func testPurchaseCap(capSeed string, units uint64) *PurchaseTerms {
 }
 
 func testProposal(effect string, origins ...ActionOrigin) *ProposedAction {
-	return &ProposedAction{Effect: effect, Summary: "call the payments tool", Derived: origins}
+	proposal := &ProposedAction{Effect: effect, Summary: "call the payments tool", Derived: origins}
+	if effect == "tool-call" {
+		proposal.IdempotencyKey = "idem_" + strings.Repeat("a", 64)
+	}
+	return proposal
 }
 
 func testActionOrigin() ActionOrigin {
@@ -914,6 +918,9 @@ func TestActionDerivedFromReceivedContentWaitsForTheOwner(t *testing.T) {
 		waiting.Actions[0].Origins[0].EventID != testActionOrigin().EventID {
 		t.Fatalf("the owner would not know what caused it: %+v", waiting.Actions[0])
 	}
+	if waiting.Actions[0].IdempotencyKey != askedKey(t, asked.ActionID, testProposal("tool-call", testActionOrigin())) {
+		t.Fatal("the owner was not shown the tool invocation idempotency key")
+	}
 
 	if granted := h.owner(t, Request{Op: OpGrantAction, ActionID: asked.ActionID}); !granted.OK {
 		t.Fatalf("grant: %+v", granted)
@@ -925,6 +932,64 @@ func TestActionDerivedFromReceivedContentWaitsForTheOwner(t *testing.T) {
 	second := h.call(t, Request{Op: OpClaimAction, ActionID: asked.ActionID})
 	if second.Authorised {
 		t.Fatal("one decision authorised the same action twice")
+	}
+}
+
+func askedKey(t *testing.T, actionID string, proposal *ProposedAction) string {
+	t.Helper()
+	action, err := toAction(*proposal)
+	if err != nil {
+		t.Fatalf("action: %v", err)
+	}
+	derived, err := firewall.ActionID(action)
+	if err != nil || derived != actionID {
+		t.Fatalf("proposal did not reproduce action id: %s %v", derived, err)
+	}
+	return proposal.IdempotencyKey
+}
+
+func TestPolicyAllowedToolCallIsClaimedOncePerIdempotencyKey(t *testing.T) {
+	h := newHarness(t)
+	first := testProposal("tool-call")
+	allowed := h.call(t, Request{Op: OpRequestAction, Action: first})
+	if !allowed.OK || allowed.Decision != "allow" || allowed.Authorised || allowed.State != "granted" {
+		t.Fatalf("tool call did not become a one-shot grant: %+v", allowed)
+	}
+	if claimed := h.call(t, Request{Op: OpClaimAction, ActionID: allowed.ActionID}); !claimed.Authorised {
+		t.Fatalf("tool call grant could not be claimed: %+v", claimed)
+	}
+	replayed := h.call(t, Request{Op: OpRequestAction, Action: first})
+	if replayed.ActionID != allowed.ActionID || replayed.State != "spent" {
+		t.Fatalf("same idempotency key minted another grant: %+v", replayed)
+	}
+	if claimed := h.call(t, Request{Op: OpClaimAction, ActionID: replayed.ActionID}); claimed.Authorised {
+		t.Fatal("same tool invocation was authorised twice")
+	}
+	reworded := *first
+	reworded.Summary = "same invocation, gentler description"
+	conflict := h.call(t, Request{Op: OpRequestAction, Action: &reworded})
+	if conflict.Decision != "refuse" || conflict.ActionID == allowed.ActionID {
+		t.Fatalf("re-described invocation reused one key: %+v", conflict)
+	}
+
+	second := testProposal("tool-call")
+	second.IdempotencyKey = "idem_" + strings.Repeat("b", 64)
+	distinct := h.call(t, Request{Op: OpRequestAction, Action: second})
+	if distinct.ActionID == allowed.ActionID || distinct.State != "granted" {
+		t.Fatalf("distinct tool invocation was collapsed into a replay: %+v", distinct)
+	}
+}
+
+func TestToolCallRequiresCanonicalIdempotencyKey(t *testing.T) {
+	for name, key := range map[string]string{"missing": "", "malformed": "idem_not-hex"} {
+		t.Run(name, func(t *testing.T) {
+			request := Request{Op: OpRequestAction, Action: &ProposedAction{
+				Effect: "tool-call", Summary: "invoke tool", IdempotencyKey: key,
+			}}
+			if _, err := EncodeRequest(request); err == nil {
+				t.Fatalf("tool call idempotency key %q was accepted", key)
+			}
+		})
 	}
 }
 

@@ -358,3 +358,24 @@ func TestApprovalCannotMoveBetweenPrices(t *testing.T) {
 		t.Fatal("a message carried purchase terms")
 	}
 }
+
+func TestActionIdentifierCommitsToolIdempotencyKey(t *testing.T) {
+	first := Action{Effect: EffectToolCall, Summary: "invoke scanner",
+		IdempotencyKey: "idem_" + strings.Repeat("a", 64)}
+	second := first
+	second.IdempotencyKey = "idem_" + strings.Repeat("b", 64)
+	firstID, err := ActionID(first)
+	if err != nil {
+		t.Fatalf("first id: %v", err)
+	}
+	secondID, err := ActionID(second)
+	if err != nil {
+		t.Fatalf("second id: %v", err)
+	}
+	if firstID == secondID {
+		t.Fatal("distinct tool invocations derived one action identifier")
+	}
+	if _, err := ActionID(Action{Effect: EffectToolCall, Summary: "invoke scanner", IdempotencyKey: "bad"}); err == nil {
+		t.Fatal("a malformed idempotency key was accepted")
+	}
+}

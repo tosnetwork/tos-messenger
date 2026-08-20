@@ -393,13 +393,14 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 		return refuse(fault.CodeInternal, err)
 	}
 	if decision.Outcome == firewall.Allow {
-		// An allowed spend is authorised once, not indefinitely. The grant is
+		// An allowed spend or tool call is authorised once, not indefinitely. The grant is
 		// recorded the way an owner's would be and consumed by ClaimAction, so
 		// one decision -- human or policy -- backs one execution. The action
 		// identifier commits the terms, which is what makes a second identical
-		// purchase a replay rather than a coincidence. Weaker effects are
-		// authorised inline: a reply repeated is a nuisance, a payment
-		// repeated is a loss, and the machinery is spent where the damage is.
+		// purchase a replay rather than a coincidence. Tool calls use the
+		// runtime's explicit idempotency key for the same distinction. Weaker
+		// effects remain inline: a repeated reply is a nuisance, while a repeated
+		// external invocation or payment is an uncontrolled side effect.
 		if action.Effect == firewall.EffectSpend {
 			// One purchase is authorised once, keyed on the economic execution --
 			// the mandate and the terms -- not on the action identifier, which a
@@ -454,6 +455,28 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 				Decision: string(decision.Outcome), Detail: decision.Reason,
 				State: string(approval.State)}
 		}
+		if action.Effect == firewall.EffectToolCall {
+			bound, _, err := s.config.Journal.ClaimToolExecution(action.IdempotencyKey, actionID, now)
+			if err != nil {
+				return refuse(fault.CodeInternal, err)
+			}
+			if bound != actionID {
+				return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
+					Decision: string(firewall.Refuse), Detail: "this tool invocation key is already bound to another action"}
+			}
+			approval, err := s.config.Journal.RecordAutoAuthorization(eventlog.ApprovalRequest{
+				ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
+				IdempotencyKey: action.IdempotencyKey,
+				Reason:         "allowed by policy", Origins: toApprovalOrigins(decision.Provenance),
+				AskedAt: uint64(now.Unix()),
+			})
+			if err != nil {
+				return refuse(fault.CodeInternal, err)
+			}
+			return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
+				Decision: string(decision.Outcome), Detail: decision.Reason,
+				State: string(approval.State)}
+		}
 		return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
 			Decision: string(decision.Outcome), Detail: decision.Reason, Authorised: true}
 	}
@@ -473,9 +496,20 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 		}
 		return s.escalateSpend(request, action, actionID, decision.Provenance, decision.Reason, now)
 	}
+	if action.Effect == firewall.EffectToolCall {
+		bound, _, err := s.config.Journal.ClaimToolExecution(action.IdempotencyKey, actionID, now)
+		if err != nil {
+			return refuse(fault.CodeInternal, err)
+		}
+		if bound != actionID {
+			return Response{Schema: ResponseSchema, OK: true, ActionID: actionID,
+				Decision: string(firewall.Refuse), Detail: "this tool invocation key is already bound to another action"}
+		}
+	}
 	approval, err := s.config.Journal.RequestApproval(eventlog.ApprovalRequest{
 		ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
-		Reason: decision.Reason, Origins: toApprovalOrigins(decision.Provenance),
+		IdempotencyKey: action.IdempotencyKey,
+		Reason:         decision.Reason, Origins: toApprovalOrigins(decision.Provenance),
 		Terms: action.Terms, AskedAt: uint64(now.Unix()),
 	})
 	if err != nil {
@@ -583,7 +617,8 @@ func (s *Server) pendingActions(request Request, now time.Time) Response {
 		}
 		actions = append(actions, WaitingAction{
 			ActionID: approval.ActionID, Effect: approval.Effect, Summary: approval.Summary,
-			Reason: approval.Reason, Origins: fromApprovalOrigins(approval.Origins),
+			IdempotencyKey: approval.IdempotencyKey,
+			Reason:         approval.Reason, Origins: fromApprovalOrigins(approval.Origins),
 			Terms: approval.Terms, AskedAtUnix: approval.AskedAtUnix,
 		})
 	}
@@ -626,7 +661,8 @@ func toAction(proposed ProposedAction) (firewall.Action, error) {
 	}
 	action := firewall.Action{
 		Effect: firewall.Effect(proposed.Effect), Summary: proposed.Summary,
-		DerivedFrom: origins, Terms: toTerms(proposed.Terms),
+		IdempotencyKey: proposed.IdempotencyKey,
+		DerivedFrom:    origins, Terms: toTerms(proposed.Terms),
 	}
 	return action, nil
 }
@@ -676,10 +712,11 @@ func firewallOrigins(origins []eventlog.ApprovalOrigin) []firewall.Origin {
 // gentler description substituted for a harsher one.
 func approvalReproducesID(approval eventlog.Approval) bool {
 	action := firewall.Action{
-		Effect:      firewall.Effect(approval.Effect),
-		Summary:     approval.Summary,
-		DerivedFrom: firewallOrigins(approval.Origins),
-		Terms:       approval.Terms,
+		Effect:         firewall.Effect(approval.Effect),
+		Summary:        approval.Summary,
+		IdempotencyKey: approval.IdempotencyKey,
+		DerivedFrom:    firewallOrigins(approval.Origins),
+		Terms:          approval.Terms,
 	}
 	recomputed, err := firewall.ActionID(action)
 	if err != nil {

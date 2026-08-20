@@ -157,7 +157,9 @@ Deliberately absent, with the reason:
 - An approval names a deed, not a request. The identifier of a proposed action
   is derived from what the action is and what it came from, so a permission
   cannot be moved to a different action, and it is spent the first time it is
-  used.
+  used. Tool calls also require a runtime-supplied `idem_` key: the key is
+  durably bound to its first Action ID before a grant exists, so retry is
+  idempotent and re-describing one invocation cannot mint another grant.
 - Defence against instructions hidden in content is structural, not detective.
   There are no patterns for recognising manipulation, because a filter that
   tries to recognise an attack fails open on the ones it has not seen while

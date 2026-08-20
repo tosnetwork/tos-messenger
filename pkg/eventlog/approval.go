@@ -5,12 +5,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
+
+var approvalIdempotencyPattern = regexp.MustCompile(`^idem_[0-9a-f]{64}$`)
 
 const (
 	approvalDir = "approvals"
@@ -86,11 +89,12 @@ type ApprovalRequest struct {
 	// ActionID commits what the action is. The approval is an approval of that
 	// action: a different action derives a different identifier and finds no
 	// approval waiting for it.
-	ActionID string
-	Effect   string
-	Summary  string
-	Reason   string
-	Origins  []ApprovalOrigin
+	ActionID       string
+	Effect         string
+	Summary        string
+	IdempotencyKey string
+	Reason         string
+	Origins        []ApprovalOrigin
 	// Terms are the exact structured purchase, present for a spend. They are
 	// persisted so the owner is shown the real amount, asset, provider, and
 	// expiry from typed state rather than the runtime's summary, and so the
@@ -107,19 +111,20 @@ type ApprovalRequest struct {
 
 // Approval is the durable state of one request.
 type Approval struct {
-	Schema        string             `json:"schema"`
-	ActionID      string             `json:"action_id"`
-	Effect        string             `json:"effect"`
-	Summary       string             `json:"summary"`
-	Reason        string             `json:"reason"`
-	Origins       []ApprovalOrigin   `json:"origins,omitempty"`
-	Terms         *negotiation.Terms `json:"terms,omitempty"`
-	MandateID     string             `json:"mandate_id,omitempty"`
-	State         ApprovalState      `json:"state"`
-	AskedAtUnix   uint64             `json:"asked_at_unix"`
-	DecidedAtUnix uint64             `json:"decided_at_unix,omitempty"`
-	SpentAtUnix   uint64             `json:"spent_at_unix,omitempty"`
-	DenialReason  string             `json:"denial_reason,omitempty"`
+	Schema         string             `json:"schema"`
+	ActionID       string             `json:"action_id"`
+	Effect         string             `json:"effect"`
+	Summary        string             `json:"summary"`
+	IdempotencyKey string             `json:"idempotency_key,omitempty"`
+	Reason         string             `json:"reason"`
+	Origins        []ApprovalOrigin   `json:"origins,omitempty"`
+	Terms          *negotiation.Terms `json:"terms,omitempty"`
+	MandateID      string             `json:"mandate_id,omitempty"`
+	State          ApprovalState      `json:"state"`
+	AskedAtUnix    uint64             `json:"asked_at_unix"`
+	DecidedAtUnix  uint64             `json:"decided_at_unix,omitempty"`
+	SpentAtUnix    uint64             `json:"spent_at_unix,omitempty"`
+	DenialReason   string             `json:"denial_reason,omitempty"`
 }
 
 // RequestApproval durably records that an action is waiting for a person.
@@ -154,7 +159,8 @@ func (j *Journal) RequestApproval(request ApprovalRequest) (Approval, error) {
 	}
 	approval := Approval{
 		Schema: ApprovalSchema, ActionID: request.ActionID, Effect: request.Effect,
-		Summary: request.Summary, Reason: request.Reason, Origins: request.Origins,
+		Summary: request.Summary, IdempotencyKey: request.IdempotencyKey,
+		Reason: request.Reason, Origins: request.Origins,
 		Terms: request.Terms, MandateID: request.MandateID, State: ApprovalPending,
 		AskedAtUnix: request.AskedAt,
 	}
@@ -345,6 +351,9 @@ func validateApprovalRequest(request ApprovalRequest) error {
 	if request.Summary == "" || len(request.Summary) > MaxApprovalSummaryBytes {
 		return errors.New("an approval request must describe itself")
 	}
+	if request.IdempotencyKey != "" && !approvalIdempotencyPattern.MatchString(request.IdempotencyKey) {
+		return errors.New("invalid approval idempotency key")
+	}
 	if request.Reason == "" || len(request.Reason) > MaxApprovalSummaryBytes {
 		return errors.New("an approval request must say why it is being asked")
 	}
@@ -521,7 +530,8 @@ func (j *Journal) RecordAutoAuthorization(request ApprovalRequest) (Approval, er
 	}
 	approval := Approval{
 		Schema: ApprovalSchema, ActionID: request.ActionID, Effect: request.Effect,
-		Summary: request.Summary, Reason: request.Reason, Origins: request.Origins,
+		Summary: request.Summary, IdempotencyKey: request.IdempotencyKey,
+		Reason: request.Reason, Origins: request.Origins,
 		Terms: request.Terms, MandateID: request.MandateID, State: ApprovalGranted,
 		AskedAtUnix: request.AskedAt, DecidedAtUnix: request.AskedAt,
 	}

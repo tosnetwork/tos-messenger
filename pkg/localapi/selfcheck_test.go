@@ -76,4 +76,20 @@ func TestApprovalReproducesID(t *testing.T) {
 	if approvalReproducesID(priceTampered) {
 		t.Fatal("a swapped price still reproduced the identifier")
 	}
+
+	tool := firewall.Action{Effect: firewall.EffectToolCall, Summary: "invoke scanner",
+		IdempotencyKey: "idem_" + strings.Repeat("a", 64)}
+	toolID, err := firewall.ActionID(tool)
+	if err != nil {
+		t.Fatalf("tool action id: %v", err)
+	}
+	toolApproval := eventlog.Approval{ActionID: toolID, Effect: string(tool.Effect),
+		Summary: tool.Summary, IdempotencyKey: tool.IdempotencyKey}
+	if !approvalReproducesID(toolApproval) {
+		t.Fatal("a faithful tool approval did not reproduce its identifier")
+	}
+	toolApproval.IdempotencyKey = "idem_" + strings.Repeat("b", 64)
+	if approvalReproducesID(toolApproval) {
+		t.Fatal("a swapped tool idempotency key reproduced the identifier")
+	}
 }

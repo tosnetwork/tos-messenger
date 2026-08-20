@@ -21,12 +21,15 @@ package firewall
 import (
 	"bytes"
 	"errors"
+	"regexp"
 	"sort"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
+
+var idempotencyKeyPattern = regexp.MustCompile(`^idem_[0-9a-f]{64}$`)
 
 // Bounds on what one action may cite.
 const (
@@ -189,6 +192,9 @@ type Action struct {
 	// no approval is expected, because an action nobody can describe is one
 	// nobody can review afterwards either.
 	Summary string
+	// IdempotencyKey distinguishes legitimate repeated tool invocations while
+	// making a retry of one invocation reproduce the same one-shot grant.
+	IdempotencyKey string
 	// DerivedFrom names the received content that contributed to this action.
 	// An empty set is a claim that nothing received contributed, and it is the
 	// runtime's claim to make honestly: this package cannot check it.
@@ -208,6 +214,9 @@ func (a Action) Validate() error {
 	}
 	if a.Summary == "" || len(a.Summary) > MaxSummaryBytes {
 		return errors.New("an action must describe itself")
+	}
+	if a.IdempotencyKey != "" && !idempotencyKeyPattern.MatchString(a.IdempotencyKey) {
+		return errors.New("invalid action idempotency key")
 	}
 	if len(a.DerivedFrom) > MaxProvenance {
 		return errors.New("action cites more origins than an owner could review")
@@ -327,6 +336,10 @@ func ActionID(action Action) (string, error) {
 	buffer := bytes.NewBufferString(canon.DomainAgentAction)
 	canon.Text(buffer, string(action.Effect))
 	canon.Text(buffer, action.Summary)
+	if action.IdempotencyKey != "" {
+		canon.Text(buffer, "idempotency-key")
+		canon.Text(buffer, action.IdempotencyKey)
+	}
 	canon.Uint32(buffer, uint32(len(origins)))
 	for _, origin := range origins {
 		canon.Text(buffer, origin.AgentID)

@@ -30,7 +30,7 @@ import (
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema = "tos.messaging.local-request.v1"
+	RequestSchema = "tos.messaging.local-request.v2"
 	// ResponseSchema is the strict wire schema of a response.
 	ResponseSchema = "tos.messaging.local-response.v1"
 
@@ -155,13 +155,14 @@ var operations = map[Operation]struct{}{
 }
 
 var (
-	eventPattern     = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
-	leasePattern     = regexp.MustCompile(`^lease_[0-9a-f]{64}$`)
-	sessionPattern   = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
-	endpointPattern  = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
-	actionPattern    = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
-	mandatePattern   = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
-	challengePattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	eventPattern       = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
+	leasePattern       = regexp.MustCompile(`^lease_[0-9a-f]{64}$`)
+	sessionPattern     = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
+	endpointPattern    = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
+	actionPattern      = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
+	idempotencyPattern = regexp.MustCompile(`^idem_[0-9a-f]{64}$`)
+	mandatePattern     = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
+	challengePattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Request is one call over the local socket.
@@ -277,9 +278,10 @@ type HeldMandate struct {
 
 // ProposedAction is what a runtime says it intends to do.
 type ProposedAction struct {
-	Effect  string         `json:"effect"`
-	Summary string         `json:"summary"`
-	Derived []ActionOrigin `json:"derived_from,omitempty"`
+	Effect         string         `json:"effect"`
+	Summary        string         `json:"summary"`
+	IdempotencyKey string         `json:"idempotency_key,omitempty"`
+	Derived        []ActionOrigin `json:"derived_from,omitempty"`
 	// Terms is what a spend would buy. It is part of the action, so the
 	// identifier commits it and an approval for one price cannot be spent on
 	// another.
@@ -338,11 +340,12 @@ type Response struct {
 
 // WaitingAction is one decision the owner has not made yet.
 type WaitingAction struct {
-	ActionID string         `json:"action_id"`
-	Effect   string         `json:"effect"`
-	Summary  string         `json:"summary"`
-	Reason   string         `json:"reason"`
-	Origins  []ActionOrigin `json:"origins,omitempty"`
+	ActionID       string         `json:"action_id"`
+	Effect         string         `json:"effect"`
+	Summary        string         `json:"summary"`
+	IdempotencyKey string         `json:"idempotency_key,omitempty"`
+	Reason         string         `json:"reason"`
+	Origins        []ActionOrigin `json:"origins,omitempty"`
 	// Terms is the structured purchase, present for a spend. The owner renders
 	// the amount, asset, provider, and expiry from this rather than from the
 	// summary, and recomputes the action identifier from it to confirm the
@@ -531,6 +534,12 @@ func ValidateRequest(request Request) error {
 		}
 		if request.ActionID != "" {
 			return errors.New("the action identifier is derived, not declared")
+		}
+		if request.Action.Effect == "tool-call" && !idempotencyPattern.MatchString(request.Action.IdempotencyKey) {
+			return errors.New("a tool call needs a canonical idempotency key")
+		}
+		if request.Action.Effect != "tool-call" && request.Action.IdempotencyKey != "" {
+			return errors.New("only a tool call carries an idempotency key")
 		}
 		if request.Action.Effect == "spend" {
 			if request.Action.Terms == nil {

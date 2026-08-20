@@ -118,7 +118,7 @@ repository, and one ✅ or one 🟡 would misstate both halves.
 |---|---:|---|
 | Action policy evaluator (effects, ceilings, provenance typing) | ✅ | `pkg/firewall` |
 | Authenticated owner decision queue (challenge + signature, bounded, expiring) | ✅ | `pkg/localapi`, `pkg/eventlog` |
-| One-shot side-effect authorization | 🟡 | Owner-granted actions and policy-allowed **spends** are spent once. Generic tool calls are still authorised inline: without a runtime-supplied idempotency key, two legitimate identical calls cannot be told apart from a replay |
+| One-shot side-effect authorization | ✅ | Owner-granted actions and policy-allowed **spends and tool calls** become durable grants consumed by `actions.claim` exactly once. Tool calls require a canonical runtime-supplied `idem_` key committed into the Action ID: a retry reproduces the spent grant, while two legitimate identical invocations use distinct keys. Low-risk message/local effects remain deliberately inline |
 | OpenFox provenance enforcement | ⬜ | `DerivedFrom` is the runtime's own claim. Until a trusted runtime wrapper binds model context to action provenance, a compromised runtime can under-report and be judged at the looser ceiling |
 | Wallet/tool adapter enforcement | ⬜ | Nothing executes through the firewall yet; there is no wallet and no tool adapter |
 
