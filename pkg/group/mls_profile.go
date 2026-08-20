@@ -53,6 +53,26 @@ type Driver interface {
 	Open(opaqueState, authenticatedData, privateMessage []byte) (nextState, plaintext []byte, err error)
 }
 
+// ProvisioningDriver extends Driver with the two operations needed before a
+// room exists. The returned identity state contains the one-time KeyPackage
+// private material and must be stored with the same secrecy as group state.
+type ProvisioningDriver interface {
+	Driver
+	NewIdentity(basicCredentialIdentity []byte) (OpenMLSIdentity, error)
+	CreateGroup(identityState, ownKeyPackage, groupID []byte) (opaqueState []byte, err error)
+}
+
+type MLSStateInfo struct {
+	GroupID []byte
+	Epoch   uint64
+}
+
+// StateInspector exposes only the public binding needed to keep an opaque
+// library state attached to the correct application room and MLS epoch.
+type StateInspector interface {
+	Inspect(opaqueState []byte) (MLSStateInfo, error)
+}
+
 // Clock separates logical Agent membership from MLS cryptographic evolution.
 // RoomEpoch changes only with pkg/room; MLSEpoch changes on every accepted MLS
 // commit, including device churn and PCS updates.
@@ -310,7 +330,16 @@ func validateCredential(c DeviceCredential, signed bool) error {
 }
 
 // Leaf is the TOS authority attached to one MLS leaf.
-type Leaf struct{ AgentID, EndpointID, DeviceID, DeviceSetDigest, KeyPackageRef string }
+type Leaf struct {
+	AgentID, EndpointID, DeviceID, DeviceSetDigest, KeyPackageRef string
+	// CredentialIdentity and KeyPackage are the public RFC 9420 material needed
+	// by a Driver when this leaf is added or replaced. They are deliberately not
+	// included in room membership digests; DeviceCredential authenticates their
+	// exact values before an operation reaches the Driver.
+	CredentialIdentity     []byte
+	LeafSignaturePublicKey ed25519.PublicKey
+	KeyPackage             []byte
+}
 
 type LeafOperationKind string
 
@@ -367,7 +396,11 @@ func PlanDeviceSuccession(agentID, endpointID string, current []Leaf, succession
 		if err != nil {
 			return nil, err
 		}
-		next := Leaf{AgentID: agentID, EndpointID: endpointID, DeviceID: deviceID, DeviceSetDigest: succession.Accepted.Digest, KeyPackageRef: ref}
+		credentialIdentity, err := BasicCredentialIdentity(credential)
+		if err != nil {
+			return nil, err
+		}
+		next := Leaf{AgentID: agentID, EndpointID: endpointID, DeviceID: deviceID, DeviceSetDigest: succession.Accepted.Digest, KeyPackageRef: ref, CredentialIdentity: credentialIdentity, LeafSignaturePublicKey: append(ed25519.PublicKey(nil), credential.LeafSignaturePublicKey...), KeyPackage: append([]byte(nil), credential.KeyPackage...)}
 		if prior, exists := byDevice[deviceID]; exists {
 			p := prior
 			n := next

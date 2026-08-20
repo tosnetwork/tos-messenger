@@ -86,7 +86,7 @@ and devices may become MLS members.
 ## 8. MLS implementation boundary
 
 The first cryptographic Driver uses OpenMLS with MLS 1.0 cipher suite `0x0001`
-behind the existing narrow `group.Driver` boundary. The reviewed library owns
+behind the existing narrow `group.Driver` boundary. The upstream library owns
 RFC 9420 state transitions; Go owns TOS authority, the room/MLS clocks,
 persistence order, Relay semantics, and fail-closed recovery. No TreeKEM or
 HPKE implementation is invented in this repository, and no emerging pure-Go
@@ -102,7 +102,8 @@ The critical path is:
 3. implement production DHT/descriptor adapters;
 4. run the multi-operator M0-R study;
 5. implement only the route selected by that finding and close S1;
-6. integrate the MLS Driver and single-writer room authority and close S2;
+6. wire the integrated MLS Driver and single-writer room authority through real
+   Relay delivery and OpenFox, then close S2;
 7. then add remote attachments, native clients, and public channels.
 
 Lines of code do not reorder this path. S1 and S2 remain incomplete until their

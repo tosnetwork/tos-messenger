@@ -137,6 +137,9 @@ func TestDeviceSuccessionKeepsOtherAgentDevice(t *testing.T) {
 		if op.Kind == LeafRemove && op.Prior.DeviceID != d2 {
 			t.Fatalf("wrong device removed: %s", op.Prior.DeviceID)
 		}
+		if op.Next != nil && (len(op.Next.CredentialIdentity) == 0 || len(op.Next.LeafSignaturePublicKey) != ed25519.PublicKeySize || len(op.Next.KeyPackage) == 0) {
+			t.Fatal("planned MLS leaf omitted Driver authority material")
+		}
 	}
 }
 

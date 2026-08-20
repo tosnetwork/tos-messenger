@@ -110,7 +110,7 @@ than silently forking two implementations.
 | Multi-device fan-out | one logical event, one content-addressed identity, one sealed copy to every live device of the recipient and of the sender; an expired bundle bootstraps nothing but does not close an established session | `e2ee.FanOut` |
 | Room membership epoch | membership is a sorted Agent set; every add or remove advances a monotonic epoch by exactly one and commits a domain-separated digest over the room, epoch, count, and members. The epoch inside the preimage is what stops an old membership being replayed as a current one. A removed member is absent, not revoked — an Agent legitimately returns, unlike a device key, so re-adding is an ordinary add at a fresh epoch | `pkg/room`, `eventlog.RoomLedger` |
 | Room succession scope | the ledger accepts only strict single-step succession (epoch *n*+1 derived from the members of epoch *n*), because it holds only the current member set and each successor is derived from it; a gapped or peer-observed commit carries no member set to verify. The durable current-authority model refuses concurrent peer-driven membership histories; an authority change is signed by the old finalized Endpoint, binds both adjacent memberships, verifies the new finalized Endpoint, and commits atomically | `eventlog.RoomLedger.Advance`, `eventlog.RoomLedger.TransferAuthority`, [`FIRST_PRINCIPLES_DECISIONS.md`](FIRST_PRINCIPLES_DECISIONS.md) |
-| Private-room construction choice | MLS 1.0 / RFC 9420 (TreeKEM) is selected instead of a TOS-specific group ratchet. The application-side candidate now implements two clocks, endpoint-authorised per-device Leaf/KeyPackage publication, raw-genesis BasicCredential/group-id candidate bytes, succession planning, durable opaque state/receipt ancestry, and signed single-authority transfer. The TOS-MLS wire profile is still not frozen: a reviewed RFC 9420 Driver, cryptographic MLS vectors, real Relay catch-up, independent review, and second-implementation evidence remain open | [`ROADMAP.md`](ROADMAP.md), [`TOS_MLS_CANDIDATE.md`](TOS_MLS_CANDIDATE.md), `pkg/group` |
+| Private-room construction choice | MLS 1.0 / RFC 9420 (TreeKEM) is selected instead of a TOS-specific group ratchet. The application candidate implements two clocks, Endpoint-authorised Leaf/KeyPackage publication, raw-genesis BasicCredential/group-id bytes, succession, signed single authority, and crash-safe state. Pinned OpenMLS `0.8.1` now supplies suite `0x0001` through a bounded one-shot sidecar; the controller persists Commit and same-epoch ratchet state before output. The TOS-MLS wire profile is still not frozen: remaining cryptographic/PCS vectors, real Relay catch-up, independent review, and second-implementation evidence remain open | [`ROADMAP.md`](ROADMAP.md), [`TOS_MLS_CANDIDATE.md`](TOS_MLS_CANDIDATE.md), `pkg/group`, `pkg/eventlog` |
 | Account binding | the account a finalized Agent record came from is recomputed from the network, object identifier, registry code and workchain, and compared; a chain policy without a locator cannot validate | `identity.ChainPolicy.Locator`, `tosaddr.Locator` |
 | Addressing rules | called through the protocol SDK rather than reimplemented, because a second implementation of an addressing rule can drift and a drifted check refuses correct state | `tosaddr` |
 | Pending queue bounds | what may wait on an owner is bounded in count, per sender, in bytes and in age; a full queue refuses the sender rather than dropping the event, and expired questions are recorded as refused rather than deleted | `eventlog.Quota`, `eventlog.ExpirePendingAdmissions` |
@@ -174,13 +174,12 @@ implementation of them:
 - final wire freeze of the approved one-to-one construction, which still needs
   independent review and second-language vector evidence. A hybrid
   post-quantum successor and its downgrade rules remain a separate version;
-- the TOS-MLS v1 cryptographic implementation and wire freeze. MLS 1.0 / RFC
-  9420 is selected, and `pkg/group` now supplies the application-side two-clock
-  adapter, distinct endpoint-authorised device leaf credentials/KeyPackages,
-  candidate vectors and succession plan; `eventlog.MLSLedger` durably records
-  opaque state, globally consumed KeyPackages, Welcomes and commit ancestry.
-  Still open are an OpenMLS-backed RFC 9420 Driver and real cryptographic/Relay acceptance vectors,
-  independent review, and second-implementation evidence;
+- the TOS-MLS v1 wire freeze. MLS 1.0 / RFC 9420 is selected; `pkg/group` and
+  pinned OpenMLS `0.8.1` now supply the two-clock application adapter and real
+  suite-`0x0001` operations, while `eventlog.MLSController` durably orders
+  private ratchets, Welcomes and commits. Still open are the remaining
+  cryptographic/Relay acceptance vectors, independent review, and
+  second-implementation evidence;
 - private-room transport, beyond the per-device fan-out default;
 - stock-command assembly of operator-specific HTTPS root, Descriptor policy,
   DHT client, and external Endpoint signer configuration. The device API,

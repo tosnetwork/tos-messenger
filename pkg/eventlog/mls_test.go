@@ -155,3 +155,50 @@ func TestMLSLedgerDetectsStateTampering(t *testing.T) {
 		t.Fatal("tampered MLS state accepted")
 	}
 }
+
+func TestMLSLedgerRatchetUsesStateDigestCASAndSurvivesRestart(t *testing.T) {
+	root := t.TempDir() + "/state"
+	j, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, _ := j.OpenMLS()
+	binding := mlsLedgerBinding(t)
+	if err := ledger.InstallFounder(binding, []byte("founder generation zero"), canon.Digest([]byte("founder-kp")), time.Unix(500, 0)); err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := ledger.Current(binding.RoomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := ledger.Ratchet(binding.RoomID, record.StateDigest, []byte("sender generation one"), time.Unix(501, 0))
+	if err != nil || !changed {
+		t.Fatalf("ratchet: changed=%v err=%v", changed, err)
+	}
+	if _, err := ledger.Ratchet(binding.RoomID, record.StateDigest, []byte("competing generation one"), time.Unix(502, 0)); !errors.Is(err, ErrMLSFork) {
+		t.Fatalf("stale ratchet CAS accepted: %v", err)
+	}
+	commitRef := canon.Digest([]byte("commit from stale state"))
+	transition := group.Transition{Prior: binding, Next: group.State{RoomID: binding.RoomID, Clock: group.Clock{RoomEpoch: binding.Clock.RoomEpoch, MLSEpoch: 1}, MembershipDigest: binding.MembershipDigest, AcceptedCommitRef: commitRef}, CommitRef: commitRef}
+	if _, err := ledger.AdvanceFrom(transition, record.StateDigest, []byte("stale commit child"), time.Unix(503, 0)); !errors.Is(err, ErrMLSFork) {
+		t.Fatalf("stale commit overwrote a ratchet: %v", err)
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	j, err = Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	ledger, _ = j.OpenMLS()
+	restarted, found, err := ledger.Current(binding.RoomID)
+	if err != nil || !found {
+		t.Fatalf("restart: found=%v err=%v", found, err)
+	}
+	state, err := restarted.State()
+	if err != nil || string(state) != "sender generation one" || restarted.Binding() != binding {
+		t.Fatalf("wrong restarted ratchet state: %q %#v %v", state, restarted.Binding(), err)
+	}
+}

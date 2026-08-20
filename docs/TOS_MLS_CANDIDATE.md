@@ -1,10 +1,10 @@
 # TOS-MLS v1 application adapter (candidate)
 
-This repository now implements the route-neutral, application-side invariants
-around an RFC 9420 implementation. It does **not** implement TreeKEM, HPKE, the
-MLS key schedule, or MLS message parsing. Those operations must come from a
-reviewed RFC 9420 library through `group.Driver`; passing the application tests
-does not make a Driver cryptographically sound.
+This repository implements the route-neutral application invariants around RFC
+9420 and a process-isolated Driver backed by pinned OpenMLS `0.8.1`. Messenger
+does **not** reimplement TreeKEM, HPKE, the MLS key schedule, or MLS parsing;
+those operations remain inside OpenMLS through `group.Driver`. Passing these
+tests is implementation evidence, not an independent cryptographic review.
 
 The implemented boundary consists of:
 
@@ -27,6 +27,16 @@ match its BasicCredential identity and LeafNode signing key;
   and processed Welcomes. Exact replay is idempotent; rollback, gaps, state
   substitution, duplicate Welcomes, KeyPackage reuse, and competing children
   fail closed.
+- `rust/openmls-driver`, a one-request-per-process OpenMLS adapter fixed to suite
+  `0x0001`. It uses strict TLS decoding, a bounded deterministic full-storage
+  snapshot, exact BasicCredential/leaf-key validation, canonical group IDs,
+  founder/join, mixed Add/Remove replacement commits, encrypted application
+  messages, and public group-id/epoch inspection;
+- `group.OpenMLSSidecar` and `eventlog.MLSController`, which bound process I/O,
+  reject wrong AAD and state bindings, derive the Commit reference from exact
+  wire bytes, and persist the next private state before returning a Commit,
+  Welcome, ciphertext, or plaintext. Same-epoch send/receive ratchets and
+  epoch-changing commits both use old-state-digest compare-and-swap;
 - a durable single-authority room ledger. Every founding/successor membership
   carries the recorded Endpoint's bounded signature over the exact digest;
   transfer is one adjacent room epoch signed by the old delegated Endpoint and
@@ -99,18 +109,22 @@ RFC 9420 KeyPackage against suite `0x0001` and the credential's leaf key. A
 syntactically valid MLS credential or KeyPackage is never TOS authority by
 itself.
 
-After `Join`, atomically install the returned opaque state with
-`eventlog.MLSLedger.InstallWelcome`. After `Commit` or `Apply`, validate the
-application transition and durably install the next opaque state with
-`Advance` before exposing membership or plaintext dependent on that state.
+Production callers use `eventlog.MLSController`: `CreateFounder`/`Join` verify
+the actual OpenMLS group ID and epoch before installation; `Commit` derives and
+validates the randomized wire Commit reference; `Apply` checks it; and
+`Seal`/`Open` durably CAS the same-epoch ratchet before exposing ciphertext or
+plaintext. Direct `MLSLedger` methods remain lower-level persistence primitives.
 Relays may deliver these bytes, but Relay order never chooses a commit.
 
 ## Still open — why this remains 🟡
 
-- integrate and review OpenMLS behind a concrete `group.Driver`; suite `0x0001`
-  is selected, but the cryptographic Driver is not yet integrated;
-- real MLS founding, join/no-past, remove/no-future, exporter separation and
-  PCS vectors executed through the selected Driver;
+- independent review of the concrete OpenMLS Driver and its snapshot/process
+  boundary;
+- the committed integration proves real founding, sequential joins, mixed
+  replacement/removal, removed-member send refusal, AAD/replay refusal,
+  bidirectional application encryption and full restart recovery. Dedicated
+  joiner-no-past, removed-member-no-future receive, forged/stale-authority,
+  exporter separation and explicit PCS vectors remain;
 - offline multi-Relay catch-up using the eventual post-M0-R transport;
 - independent cryptographic review and a second MLS implementation cross-check.
 

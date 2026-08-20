@@ -106,10 +106,59 @@ func (l *MLSLedger) InstallWelcome(binding group.State, opaqueState []byte, keyP
 	return l.write(record)
 }
 
+// InstallFounder installs the creator's epoch-zero state and retires the
+// creator KeyPackage material. A founder does not process a Welcome, but the
+// private KeyPackage bundle must still never be reused as a future join token.
+func (l *MLSLedger) InstallFounder(binding group.State, opaqueState []byte, keyPackageRef string, now time.Time) error {
+	if l == nil {
+		return errors.New("no MLS ledger")
+	}
+	if !canon.ValidDigest(keyPackageRef) {
+		return errors.New("invalid founder KeyPackage reference")
+	}
+	if binding.Clock.MLSEpoch != 0 || binding.AcceptedCommitRef != "" {
+		return errors.New("founder MLS state is not epoch zero")
+	}
+	if err := validateInitialMLS(binding, opaqueState, keyPackageRef, canon.Digest([]byte("founder")), now); err != nil {
+		return err
+	}
+	l.journal.mutex.Lock()
+	defer l.journal.mutex.Unlock()
+	consumed, err := l.keyPackageConsumed(keyPackageRef)
+	if err != nil {
+		return err
+	}
+	if consumed {
+		return ErrKeyPackageConsumed
+	}
+	if _, found, err := l.read(binding.RoomID); err != nil {
+		return err
+	} else if found {
+		return ErrMLSFork
+	}
+	record := newMLSRecord(binding, opaqueState, now)
+	record.ConsumedKeyPackages = []string{keyPackageRef}
+	return l.write(record)
+}
+
 // Advance installs exactly one child of the durable state. Exact replay is
 // idempotent; another child of the same parent is a fork, not "last arrival
 // wins" Relay authority.
 func (l *MLSLedger) Advance(transition group.Transition, opaqueState []byte, now time.Time) (bool, error) {
+	return l.advanceFrom(transition, "", opaqueState, now)
+}
+
+// AdvanceFrom is Advance with a private-state compare-and-swap token. Runtime
+// callers use it so a concurrent same-epoch send/receive ratchet cannot be
+// overwritten by a commit calculated from stale private state.
+func (l *MLSLedger) AdvanceFrom(transition group.Transition, expectedStateDigest string, opaqueState []byte, now time.Time) (bool, error) {
+	if !canon.ValidDigest(expectedStateDigest) {
+		return false, errors.New("invalid prior MLS state digest")
+	}
+	return l.advanceFrom(transition, expectedStateDigest, opaqueState, now)
+}
+
+func (l *MLSLedger) advanceFrom(transition group.Transition, expectedStateDigest string, opaqueState []byte, now time.Time) (bool, error) {
 	if l == nil {
 		return false, errors.New("no MLS ledger")
 	}
@@ -127,6 +176,9 @@ func (l *MLSLedger) Advance(transition group.Transition, opaqueState []byte, now
 	}
 	if !found {
 		return false, errors.New("MLS room has no installed state")
+	}
+	if expectedStateDigest != "" && record.StateDigest != expectedStateDigest {
+		return false, ErrMLSFork
 	}
 	current := record.Binding()
 	if sameGroupState(current, transition.Next) {
@@ -148,6 +200,44 @@ func (l *MLSLedger) Advance(transition group.Transition, opaqueState []byte, now
 		return false, ErrMLSFork
 	}
 	next := newMLSRecord(transition.Next, opaqueState, now)
+	next.ConsumedKeyPackages = record.ConsumedKeyPackages
+	next.ProcessedWelcomes = record.ProcessedWelcomes
+	if err := l.write(next); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// Ratchet atomically replaces private MLS state without changing the public
+// room/epoch binding. expectedStateDigest is a compare-and-swap token obtained
+// from Current; it prevents two concurrent sends or receives from overwriting
+// one another with descendants of the same sender-ratchet generation.
+func (l *MLSLedger) Ratchet(roomID, expectedStateDigest string, opaqueState []byte, now time.Time) (bool, error) {
+	if l == nil {
+		return false, errors.New("no MLS ledger")
+	}
+	if !ids.Room.MatchString(roomID) || !canon.ValidDigest(expectedStateDigest) {
+		return false, errors.New("invalid MLS ratchet binding")
+	}
+	if err := validateOpaqueMLS(opaqueState, now); err != nil {
+		return false, err
+	}
+	l.journal.mutex.Lock()
+	defer l.journal.mutex.Unlock()
+	record, found, err := l.read(roomID)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, errors.New("MLS room has no installed state")
+	}
+	if record.StateDigest != expectedStateDigest {
+		return false, ErrMLSFork
+	}
+	if canon.Digest(opaqueState) == record.StateDigest {
+		return false, nil
+	}
+	next := newMLSRecord(record.Binding(), opaqueState, now)
 	next.ConsumedKeyPackages = record.ConsumedKeyPackages
 	next.ProcessedWelcomes = record.ProcessedWelcomes
 	if err := l.write(next); err != nil {
