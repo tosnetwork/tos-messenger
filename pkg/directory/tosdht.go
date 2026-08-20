@@ -3,6 +3,7 @@ package directory
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"errors"
 	"math"
@@ -32,7 +33,7 @@ const (
 // away from the production client.
 type TOSDHTClient interface {
 	FindValue(context.Context, *dht.Key, ...*dht.Continuation) (*dht.Value, *dht.Continuation, error)
-	Store(context.Context, any, []byte, int32, []byte, any, time.Duration, ed25519.PrivateKey) (int, []byte, error)
+	StoreWithSigner(context.Context, any, []byte, int32, []byte, any, time.Duration, crypto.Signer) (int, []byte, error)
 }
 
 var _ TOSDHTClient = (*dht.Client)(nil)
@@ -70,11 +71,12 @@ func (t TOSDHT) Locator(ctx context.Context, key DHTKey) ([]byte, error) {
 	return verifyNativeLocatorValue(key, value, now)
 }
 
-// PublishLocator signs the native DHT envelope with the same delegated
-// Endpoint key that signed the locator. That key remains an online messaging
-// key; this operation grants no Agent-controller, wallet, or execution power.
+// PublishLocator signs the native DHT envelope through the same delegated
+// Endpoint signer that signed the locator. The private key need not enter this
+// process; this operation grants no Agent-controller, wallet, or execution
+// power.
 func (t TOSDHT) PublishLocator(ctx context.Context, delegation identity.Delegation,
-	locator Locator, endpointKey ed25519.PrivateKey) (int, error) {
+	locator Locator, endpointSigner crypto.Signer) (int, error) {
 	if ctx == nil {
 		return 0, errors.New("TOS DHT publication needs a context")
 	}
@@ -85,8 +87,11 @@ func (t TOSDHT) PublishLocator(ctx context.Context, delegation identity.Delegati
 	if err != nil {
 		return 0, err
 	}
-	if len(endpointKey) != ed25519.PrivateKeySize ||
-		!bytes.Equal(endpointKey.Public().(ed25519.PublicKey), delegation.IdentityPublicKey) {
+	if endpointSigner == nil {
+		return 0, errors.New("no DHT Endpoint signer")
+	}
+	public, ok := endpointSigner.Public().(ed25519.PublicKey)
+	if !ok || len(public) != ed25519.PublicKeySize || !bytes.Equal(public, delegation.IdentityPublicKey) {
 		return 0, errors.New("DHT publishing key is not the delegated Endpoint key")
 	}
 	if err := VerifyLocator(delegation, locator, now); err != nil {
@@ -108,9 +113,9 @@ func (t TOSDHT) PublishLocator(ctx context.Context, delegation identity.Delegati
 	if ttl < time.Second {
 		return 0, errors.New("locator expires before a DHT value can be published")
 	}
-	public := append(ed25519.PublicKey(nil), delegation.IdentityPublicKey...)
-	stored, storedKey, err := t.Client.Store(ctx, keys.PublicKeyED25519{Key: public},
-		[]byte(key.Name), int32(key.Index), raw, dht.UpdateRuleSignature{}, ttl, endpointKey)
+	owner := append(ed25519.PublicKey(nil), delegation.IdentityPublicKey...)
+	stored, storedKey, err := t.Client.StoreWithSigner(ctx, keys.PublicKeyED25519{Key: owner},
+		[]byte(key.Name), int32(key.Index), raw, dht.UpdateRuleSignature{}, ttl, endpointSigner)
 	if err != nil {
 		return 0, err
 	}

@@ -187,8 +187,9 @@ implementation of them:
 - private-room transport, beyond the per-device fan-out default;
 - concrete one-time invite-token encoding and direct/Relay parity tests for the
   selected allow-list/invite/owner-hold first-contact default;
-- device-contribution collection and native-DHT publication wiring in the
-  daemon without centralizing device secrets or exporting the Endpoint signer,
+- device-contribution collection and native-DHT publication scheduling in the
+  daemon without centralizing device secrets (the DHT adapter now accepts an
+  isolated `crypto.Signer` and verifies its native envelope signatures),
   plus live independently operated publication and cross-observer fork exchange;
 - Mailbox Relay sender privacy, quota tokens, and anti-spam model;
 - mobile push privacy within the contentless wake-up constraint; and

@@ -95,11 +95,13 @@ The route-neutral lifecycle now supplies device-local custody, public-only
 Endpoint aggregation, signer isolation, the production static HTTPS object
 sink, ordered Descriptor activation, replenishment, retired-secret selection,
 pruning, rollback refusal, and local/peer equivocation classification. Daemon
-wiring still needs a device-contribution collection boundary and a production
-DHT adapter capable of keeping native envelope signing behind the selected
-Endpoint signer. Centralizing every device secret in the daemon is explicitly
-not an acceptable shortcut. Live independently operated publication and
-cross-observer fork exchange remain deployment evidence.
+wiring still needs a device-contribution collection boundary and publication
+scheduling. The production DHT adapter now keeps native key-description and
+value signing behind the selected `crypto.Signer`, including immediate
+signature verification before network use. Centralizing every device secret
+in the daemon is explicitly not an acceptable shortcut. Live independently
+operated publication and cross-observer fork exchange remain deployment
+evidence.
 
 No canonical preimage or wire schema changed. The existing bundle and
 bundle-set vectors remain the applicable interoperation artifacts.

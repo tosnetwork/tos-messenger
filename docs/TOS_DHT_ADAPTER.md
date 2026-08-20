@@ -26,10 +26,13 @@ Endpoint key, not current Agent authorization.
 ## Publication
 
 Publication accepts only a locator already valid under a live delegation and
-the exact corresponding Endpoint private key. It calls the native DHT client
-with `pub.ed25519`, the signature update rule, and a cache TTL no longer than
-one hour. The returned native DHT key and positive replica count are checked
-before publication is reported as successful.
+a `crypto.Signer` exposing the exact corresponding Endpoint Ed25519 public
+key. The pinned `tosutils-go` client signs both native envelopes through that
+interface and verifies every returned signature before network use; the
+Endpoint private key need not enter the publishing process. Publication uses
+`pub.ed25519`, the signature update rule, and a cache TTL no longer than one
+hour. The returned native DHT key and positive replica count are checked before
+publication is reported as successful.
 
 The inner locator may remain valid for up to its protocol lifetime. It can be
 republished inside freshly signed native DHT envelopes before their shorter

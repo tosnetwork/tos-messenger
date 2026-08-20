@@ -3,6 +3,7 @@ package directory
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"errors"
 	"strings"
@@ -27,7 +28,7 @@ type fakeTOSDHTClient struct {
 	storeData   []byte
 	storeRule   any
 	storeTTL    time.Duration
-	storeOwner  ed25519.PrivateKey
+	storeOwner  crypto.Signer
 }
 
 func (f *fakeTOSDHTClient) FindValue(_ context.Context, key *dht.Key,
@@ -36,15 +37,15 @@ func (f *fakeTOSDHTClient) FindValue(_ context.Context, key *dht.Key,
 	return f.value, nil, f.findErr
 }
 
-func (f *fakeTOSDHTClient) Store(_ context.Context, id any, name []byte, index int32,
-	value []byte, rule any, ttl time.Duration, owner ed25519.PrivateKey) (int, []byte, error) {
+func (f *fakeTOSDHTClient) StoreWithSigner(_ context.Context, id any, name []byte, index int32,
+	value []byte, rule any, ttl time.Duration, owner crypto.Signer) (int, []byte, error) {
 	f.storeID = id
 	f.storeName = append([]byte(nil), name...)
 	f.storeIndex = index
 	f.storeData = append([]byte(nil), value...)
 	f.storeRule = rule
 	f.storeTTL = ttl
-	f.storeOwner = append(ed25519.PrivateKey(nil), owner...)
+	f.storeOwner = owner
 	return f.storedCount, append([]byte(nil), f.storedKey...), f.storeErr
 }
 
@@ -208,6 +209,10 @@ func TestTOSDHTPublishesUnderTheLiveTOSKeyEncoding(t *testing.T) {
 	if _, ok := client.storeRule.(dht.UpdateRuleSignature); !ok {
 		t.Fatal("publication did not require the native signature update rule")
 	}
+	storedPublic, ok := client.storeOwner.Public().(ed25519.PublicKey)
+	if !ok || !bytes.Equal(storedPublic, owner.Public().(ed25519.PublicKey)) {
+		t.Fatal("publication did not preserve the Endpoint signer boundary")
+	}
 	wantTTL := time.Duration(locator.ExpiresAtUnix-uint64(now.Unix())) * time.Second
 	if client.storeTTL != wantTTL || client.storeTTL > DefaultTOSDHTPublishTTL {
 		t.Fatalf("ttl=%v want=%v", client.storeTTL, wantTTL)
@@ -276,6 +281,10 @@ func TestTOSDHTPublicationFailsClosed(t *testing.T) {
 	wrong := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x77}, ed25519.SeedSize))
 	client := &fakeTOSDHTClient{storedCount: 1, storedKey: expected}
 	adapter := TOSDHT{Client: client, Now: func() time.Time { return now }}
+	if _, err := adapter.PublishLocator(context.Background(), delegation, locator, nil); err == nil ||
+		!strings.Contains(err.Error(), "no DHT Endpoint signer") {
+		t.Fatalf("missing signer error=%v", err)
+	}
 	if _, err := adapter.PublishLocator(context.Background(), delegation, locator, wrong); err == nil ||
 		!strings.Contains(err.Error(), "delegated Endpoint") {
 		t.Fatalf("wrong key error=%v", err)

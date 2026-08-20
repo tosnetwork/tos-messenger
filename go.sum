@@ -8,8 +8,8 @@ github.com/pierrec/lz4/v4 v4.1.27 h1:+PhzhWDrjRj89TH2sw43nE3+4+W8lSxIuQadEHZyjUk
 github.com/pierrec/lz4/v4 v4.1.27/go.mod h1:EoQMVJgeeEOMsCqCzqFm2O0cJvljX2nGZjcRIPL34O4=
 github.com/tosnetwork/tos-service-protocol v0.0.0-20260820090236-2a06d05b29db h1:mY8J+W3+nslO6VbtgAgoQIyWEEc7SuuhlQQyb1WMu8w=
 github.com/tosnetwork/tos-service-protocol v0.0.0-20260820090236-2a06d05b29db/go.mod h1:CRRhzdu1Qg3ZhGWiw+QkSaZxBz21E+GqGU5hTZabOMs=
-github.com/tosnetwork/tosutils-go v1.18.1 h1:FaGgdkidQS8QjCnkzj3+9lJupBtAJxuLFy9/gs0p8bE=
-github.com/tosnetwork/tosutils-go v1.18.1/go.mod h1:HtytU2Ya/EII8lswkqK30qgQePIHS1k7XDMxll3d9CQ=
+github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef h1:P+zHw4vfeKoRdLgjEmLFnkZOu4MleU9X22hHEX6l/F8=
+github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef/go.mod h1:HtytU2Ya/EII8lswkqK30qgQePIHS1k7XDMxll3d9CQ=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
 github.com/xssnick/raptorq v1.5.0 h1:sNtaD0JTO7rzTOIvITeFAz5Rla/to/gw5MKAy9DD1Mk=
