@@ -116,11 +116,12 @@ one issuance watermark per publication. Different non-retirement content at
 the same watermark is an equivocation and is refused without a digest or
 arrival-order tie-break.
 
-Exact signed bundle-set bytes and their private answering material become
-durable before an object sink can see them. The content-addressed object is
-published before a signed descriptor names its digest. A retained device's
-superseded private material remains selectable by exact bundle digest until
-its signed expiry; a revoked device's answering material is dropped with its
-tombstone. Endpoint signing stays behind `crypto.Signer`; the publisher never
-requires exportable Endpoint private-key bytes. See
+Each device generates and durably retains only its own private answering
+material; the Endpoint aggregator accepts public signed contributions and must
+never become custodian of every device secret. The complete content-addressed
+set is published before its signed Descriptor, and both immutable objects exist
+before a signed locator can become authoritative. A retained device's old
+private material remains selectable until signed expiry; a revoked device
+drops it with its local tombstone. Endpoint signing stays behind
+`crypto.Signer`. See
 [`PREKEY_PUBLICATION.md`](PREKEY_PUBLICATION.md).

@@ -10,6 +10,7 @@ package directory
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -146,12 +147,22 @@ func SignDescriptor(descriptor Descriptor, endpointKey ed25519.PrivateKey) (Desc
 	if len(endpointKey) != ed25519.PrivateKeySize {
 		return Descriptor{}, errors.New("invalid descriptor signing key")
 	}
+	return SignDescriptorWith(descriptor, endpointKey)
+}
+
+// SignDescriptorWith signs through an Endpoint signer without requiring its
+// private bytes to be exportable to the publication coordinator.
+func SignDescriptorWith(descriptor Descriptor, signer crypto.Signer) (Descriptor, error) {
 	descriptor.EndpointSignature = nil
 	preimage, err := SigningBytes(descriptor)
 	if err != nil {
 		return Descriptor{}, err
 	}
-	descriptor.EndpointSignature = ed25519.Sign(endpointKey, preimage)
+	signature, err := signEndpoint(signer, preimage)
+	if err != nil {
+		return Descriptor{}, errors.New("sign descriptor: " + err.Error())
+	}
+	descriptor.EndpointSignature = signature
 	return descriptor, nil
 }
 

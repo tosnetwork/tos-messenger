@@ -2,6 +2,7 @@ package directory
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
@@ -241,12 +242,23 @@ func SignLocator(locator Locator, endpointKey ed25519.PrivateKey) (Locator, erro
 	if len(endpointKey) != ed25519.PrivateKeySize {
 		return Locator{}, errors.New("invalid locator signing key")
 	}
+	return SignLocatorWith(locator, endpointKey)
+}
+
+// SignLocatorWith signs the inner Messenger locator through an isolated
+// Endpoint signer. Native DHT envelope signing remains the DHT adapter's
+// separate boundary.
+func SignLocatorWith(locator Locator, signer crypto.Signer) (Locator, error) {
 	locator.EndpointSignature = nil
 	preimage, err := LocatorSigningBytes(locator)
 	if err != nil {
 		return Locator{}, err
 	}
-	locator.EndpointSignature = ed25519.Sign(endpointKey, preimage)
+	signature, err := signEndpoint(signer, preimage)
+	if err != nil {
+		return Locator{}, errors.New("sign locator: " + err.Error())
+	}
+	locator.EndpointSignature = signature
 	return locator, nil
 }
 

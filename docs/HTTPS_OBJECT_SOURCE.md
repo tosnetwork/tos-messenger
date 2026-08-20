@@ -20,6 +20,15 @@ use standard HTTPS port 443 and contain no credentials, query, or fragment.
 Redirects are refused, including same-origin redirects, so a signed reference
 cannot silently become another retrieval instruction.
 
+New descriptors are published immutably at:
+
+```text
+/.well-known/tos-messenger/descriptors/<lowercase-sha256-hex>.json
+```
+
+The DHT locator names that exact content-addressed URL. This avoids replacing a
+mutable descriptor path before the DHT has replaced its old digest.
+
 The prekey object uses schema
 `tos.messaging.prekey-bundle-set.v1` and contains `schema` plus `bundles`.
 Each member is an existing strict `tos.messaging.prekey-bundle.v1` object. The
@@ -29,6 +38,20 @@ continues to commit the order-independent canonical bundle-digest set under
 the existing `tos.messaging.prekey-bundle-set.v1` domain. Positive vectors now
 include the wrapper, canonical set bytes, and resulting digest; adversarial
 vectors cover unknown fields, trailing JSON, truncation, and empty input.
+
+`directory.HTTPSPublisher` implements the static-origin write side. It requires
+an absolute protected non-symlink root, creates only the fixed directories
+above, validates both content addresses, requires the prekey wrapper in sorted
+device publication order, syncs a temporary regular file, and installs it with
+an atomic no-overwrite link. An exact retry is idempotent; different bytes at
+one address are refused.
+
+`ActivateHTTPSPublication` validates and signs the complete dependency graph
+before writing, then stores prekeys before the Descriptor and returns the signed
+inner locator only after both are durable. DHT publication is deliberately the
+last authority-changing step. Native DHT envelope signing and collection of
+public contributions from independently custodied devices are not yet wired
+into the daemon.
 
 ## Network boundary
 

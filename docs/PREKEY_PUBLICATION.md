@@ -8,9 +8,12 @@ route and does not add one-time prekeys to the approved suite.
 
 An endpoint publishes the complete current device set at once. Every bundle in
 that set has the same `issued_at_unix`, `expires_at_unix`, network, Agent,
-Endpoint, and algorithm. Device identifiers are sorted before generation so a
-retry has a stable object representation; the descriptor still commits the
-order-independent `e2ee.SetDigest`.
+Endpoint, and algorithm. The Endpoint coordinates that window; each device
+generates and retains only its own opaque private material, then contributes an
+Endpoint-signed public bundle. `eventlog.PrekeyPublicationLedger` aggregates
+those public contributions and contains no device secret. Device identifiers
+are sorted before publication so one digest has one accepted JSON object; the
+descriptor still commits the order-independent `e2ee.SetDigest`.
 
 The issuance second is the generation watermark. A different non-retirement
 set at an already used watermark is an equivocation, not a value that can be
@@ -27,23 +30,31 @@ on which device happened to carry the largest timestamp.
 
 ## Crash order
 
-`eventlog.LocalPrekeyLedger.EnsurePrekeys` performs these steps under the
-journal's exclusive writer lock:
+`eventlog.DevicePrekeyLedger.EnsureDevicePrekey` performs these steps under the
+device journal's exclusive writer lock:
 
-1. validate the live delegation, exact delegated Ed25519 signer, suite,
-   devices, lifetime, and replenishment horizon;
-2. generate and sign every device bundle through `crypto.Signer`;
-3. verify the complete set under the delegation and derive its digest;
-4. atomically persist the exact bundle-set JSON and its private answering
+1. validate the live delegation, exact delegated Ed25519 signer, suite, local
+   Device ID, coordinated window, and replenishment horizon;
+2. generate and Endpoint-sign that device's public bundle;
+3. atomically persist that bundle and only that device's private answering
    material; and only then
-5. return the immutable publication to the caller.
+4. return the public contribution to the Endpoint aggregator.
 
-A crash before step 4 exposes nothing. A crash after step 4 reloads the exact
-same signatures and JSON, so retry cannot create a second set at the same
-generation. `PublishPrekeySet` revalidates that stored artifact and passes a
-copy to a route-neutral content-addressed sink. The object must be available
-before an endpoint publishes a signed descriptor that names its digest; the
-descriptor update must never create a dangling commitment.
+A crash before step 3 exposes nothing. A crash after step 3 reloads the exact
+same signature and secret, so retry cannot create a competing contribution at
+the same generation. `PreparePrekeyPublication` verifies all public
+contributions under the delegation, enforces one coordinated generation and
+succession, then atomically records the exact public-only bundle set.
+
+`directory.ActivateHTTPSPublication` signs and verifies the Descriptor and
+inner locator before mutation, then writes the immutable prekey object first
+and the content-addressed Descriptor second. Only after both exist does it
+return the signed locator that may be published to the DHT. A failure leaves at
+most unreachable immutable objects, never an authoritative dangling pointer.
+`directory.HTTPSPublisher` is the production static-origin sink: it uses fixed
+same-origin paths, protected non-symlink directories, synced temporary files,
+atomic no-overwrite installation, exact idempotent retries, and conflict
+refusal.
 
 The publisher asks a narrow `crypto.Signer` for Ed25519 signatures and verifies
 every returned signature. It neither loads nor serializes the Endpoint signing
@@ -52,40 +63,43 @@ operator responsibilities.
 
 ## Replenishment and private-material lifetime
 
-`PrekeyPlan` gives a bounded bundle lifetime and a strictly shorter
-replenishment horizon. `EnsurePrekeys` returns the durable current generation
-unchanged while it covers the requested device set and extends beyond that
-horizon. At the horizon it creates a strictly newer complete generation. A
-delegation too close to expiry to cover the horizon fails closed instead of
-publishing immediately stale material.
+`DevicePrekeyPlan` gives the Endpoint-coordinated issuance and expiry plus a
+strictly shorter replenishment horizon. `EnsureDevicePrekey` returns the exact
+durable current contribution while its window matches and covers the horizon.
+At the horizon the Endpoint must coordinate a strictly newer window; asking a
+device to create different material under the old issuance second is refused
+as equivocation.
 
 A sender may have fetched the preceding signed publication shortly before a
 routine rotation. The receiver therefore retains a still-current device's old
 answering material until its signed expiry and selects it by the exact
 per-bundle digest already produced by fan-out planning. A removed device is
-different: all its current and retired answering material is dropped in the
-same atomic transition that records its tombstone, so a cached bundle cannot
-restore its bootstrap authority. `PrunePrekeys` removes other expired current
-and retired private material while retaining public generation and
-device-revocation history. This is logical key erasure; secure deletion of old
+different: `RevokeDevicePrekeys` drops that device's current and retired
+answering material before recording its local tombstone, while the public
+aggregation ledger permanently tombstones its Device ID. A cached bundle
+cannot restore bootstrap authority. `PruneDevicePrekeys` removes other expired
+private generations. This is logical key erasure; secure deletion of old
 filesystem blocks or storage snapshots is an operator/storage property.
 
 Removing a local device creates a permanent tombstone. It may return only as a
 new device key with a new identifier. Replenishing unchanged devices does not
 revoke them; it merely retires their old answering material at its existing
-expiry. Live retired secrets are capped at 80 and tombstones at 256, within the
-journal's bounded record. At either bound a further rotation fails closed
-rather than forgetting a still-valid answering key or an old revocation.
+expiry. Live retired secrets are capped at 32 per local device and public
+tombstones at 256, within bounded journal records. At either bound a further
+transition fails closed rather than forgetting a still-valid answering key or
+an old revocation.
 
 ## Deliberate boundary
 
-This round supplies the durable publisher, signer isolation, exact object-sink
-contract, replenishment, retired-secret selection, pruning, rollback refusal,
-and local/peer equivocation classification. A production daemon still needs an
-operator-selected content sink and the endpoint-authorized descriptor update
-that exposes the new digest. Live independently operated publication and
-cross-observer fork exchange remain deployment evidence, not claims made by
-the local state machine.
+The route-neutral lifecycle now supplies device-local custody, public-only
+Endpoint aggregation, signer isolation, the production static HTTPS object
+sink, ordered Descriptor activation, replenishment, retired-secret selection,
+pruning, rollback refusal, and local/peer equivocation classification. Daemon
+wiring still needs a device-contribution collection boundary and a production
+DHT adapter capable of keeping native envelope signing behind the selected
+Endpoint signer. Centralizing every device secret in the daemon is explicitly
+not an acceptable shortcut. Live independently operated publication and
+cross-observer fork exchange remain deployment evidence.
 
 No canonical preimage or wire schema changed. The existing bundle and
 bundle-set vectors remain the applicable interoperation artifacts.

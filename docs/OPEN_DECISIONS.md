@@ -98,7 +98,7 @@ than silently forking two implementations.
 | Withdrawal | a withdrawn mandate is kept rather than deleted, and re-placing the same terms finds the withdrawn record rather than reopening it | `eventlog.RevokeMandate` |
 | Channel separation | instructions and received content are different types with no conversion, and quotations are framed by a delimiter derived from their own content | `firewall.Instruction`, `firewall.Quotation` |
 | Device-set succession | a successor set may add or retire devices, never lower the freshness watermark, and never readmit a revoked device; the watermark rule alone stops a replayed old set even when it is a strict subset | `e2ee.Succeed`, `eventlog.DeviceLedger` |
-| Prekey publication generation | all retained devices rotate as one signed generation; exact public bytes and private answering material are durable before publication, equal-time non-retirement conflicts are equivocation, retained-device secrets remain until signed expiry while revoked-device secrets are dropped immediately, and the Endpoint key stays behind `crypto.Signer` | `eventlog.LocalPrekeyLedger`, [`PREKEY_PUBLICATION.md`](PREKEY_PUBLICATION.md) |
+| Prekey publication generation | all retained devices rotate as one coordinated signed generation; every device keeps only its own private material while the Endpoint ledger aggregates public contributions only; prekeys precede the content-addressed Descriptor and both precede locator authority; equal-time conflicts are equivocation, retained-device secrets remain until signed expiry, revoked-device secrets drop immediately, and the Endpoint key stays behind `crypto.Signer` | `eventlog.DevicePrekeyLedger`, `eventlog.PrekeyPublicationLedger`, `directory.ActivateHTTPSPublication`, [`PREKEY_PUBLICATION.md`](PREKEY_PUBLICATION.md) |
 | Device sessions | one session per device pair, its identifier derived deterministically and symmetrically so neither end negotiates it; the ratchet inside provides freshness, not session churn | `e2ee.DeviceSessionID` |
 | Adversarial corpus scope | the corpus is split into a decode layer and a verify layer, and every entry names its `layer`. A decode entry is refused on shape; a verify entry decodes cleanly and is refused only when measured against the authority it claims (a delegation, a route, a coordinator key). The generator proves a verify entry passes its decoder and fails its verifier, so a semantic refusal can never masquerade as a decode one — refusing for the wrong reason is itself the interop bug the split prevents | `internal/vectors` corpus |
 | Device revocation enforcement | the admission gate refuses only a revoked device, not an unknown one: the ledger is a revocation overlay on top of the delegation, and refusing an unseen device would cut off every device a peer added since the last descriptor fetch | `admission.Gate.Admit`, `eventlog.DeviceLedger.Judge` |
@@ -187,8 +187,9 @@ implementation of them:
 - private-room transport, beyond the per-device fan-out default;
 - concrete one-time invite-token encoding and direct/Relay parity tests for the
   selected allow-list/invite/owner-hold first-contact default;
-- production prekey object-sink and descriptor-update daemon wiring, plus live
-  independently operated publication and cross-observer equivocation exchange;
+- device-contribution collection and native-DHT publication wiring in the
+  daemon without centralizing device secrets or exporting the Endpoint signer,
+  plus live independently operated publication and cross-observer fork exchange;
 - Mailbox Relay sender privacy, quota tokens, and anti-spam model;
 - mobile push privacy within the contentless wake-up constraint; and
 - public channel ordering and moderation policy; and
