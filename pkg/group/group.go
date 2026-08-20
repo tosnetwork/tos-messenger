@@ -1,24 +1,24 @@
-// Package group is the contract a group-key-agreement scheme must satisfy, and
-// nothing more. It selects no construction and implements no cryptography, for
-// the same reason pkg/e2ee does not: choosing the scheme that re-keys a private
-// room on every membership change is a protocol-freeze decision, and a scheme
-// written here would be a second opinion about a choice that is not this
-// repository's to make.
+// Package group is the pre-implementation contract a group-key-agreement
+// scheme must satisfy. MLS 1.0 is now the selected construction, but the
+// TOS-MLS wire profile is not frozen and this package still implements no
+// cryptography. Selection does not substitute for the canonical profile,
+// vectors, independent review, or second-implementation evidence a freeze
+// requires.
 //
 // What the package fixes is the shape of the agreement and the properties a
 // candidate is refuted against. A room's membership already advances in epochs
 // (see pkg/room): each add or remove produces a new epoch and a commitment over
-// the member set. A group-key scheme rides those epochs -- every epoch has a
-// secret that exactly its members can derive, a member removed at an epoch
-// cannot derive the next one, and a member added at an epoch cannot derive the
-// previous ones. The membership state machine says who is in the room; the
-// scheme says what only they can read.
+// the member set. The current interface models one key epoch per room epoch;
+// the selected MLS adaptation must split that into logical room and
+// cryptographic MLS clocks because device changes and recovery updates may
+// advance MLS without changing the Agent member set. Until that adapter lands,
+// this contract remains a refutation floor rather than the final MLS API.
 //
 // The refutation harness in the conformance subpackage establishes the absence
 // of these properties, never their presence. A scheme that lets a removed
 // member reach the next epoch's secret definitively does not re-key on removal.
 // The converse does not follow: clearing the harness is a floor, not soundness,
-// and selecting a construction still requires cryptographic review the harness
+// and the selected construction still requires cryptographic review the harness
 // cannot substitute for.
 package group
 

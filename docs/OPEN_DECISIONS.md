@@ -105,6 +105,7 @@ than silently forking two implementations.
 | Multi-device fan-out | one logical event, one content-addressed identity, one sealed copy to every live device of the recipient and of the sender; an expired bundle bootstraps nothing but does not close an established session | `e2ee.FanOut` |
 | Room membership epoch | membership is a sorted Agent set; every add or remove advances a monotonic epoch by exactly one and commits a domain-separated digest over the room, epoch, count, and members. The epoch inside the preimage is what stops an old membership being replayed as a current one. A removed member is absent, not revoked — an Agent legitimately returns, unlike a device key, so re-adding is an ordinary add at a fresh epoch | `pkg/room`, `eventlog.RoomLedger` |
 | Room succession scope | the ledger accepts only strict single-step succession (epoch *n*+1 derived from the members of epoch *n*), because it holds only the current member set and each successor is derived from it; a gapped or peer-observed commit carries no member set to verify. Reconciling membership a peer drove independently is deferred to the room-authority decision below | `eventlog.RoomLedger.Advance` |
+| Private-room construction choice | MLS 1.0 / RFC 9420 (TreeKEM) is selected instead of a TOS-specific group ratchet. The TOS-MLS v1 adaptation is not a frozen wire profile: its per-device LeafNode signing-key authority, BasicCredential and group-id canonical encodings, two-clock adapter, vectors, implementation, independent review, and second-implementation evidence remain open | [`ROADMAP.md`](ROADMAP.md), `pkg/group` |
 | Account binding | the account a finalized Agent record came from is recomputed from the network, object identifier, registry code and workchain, and compared; a chain policy without a locator cannot validate | `identity.ChainPolicy.Locator`, `tosaddr.Locator` |
 | Addressing rules | called through the protocol SDK rather than reimplemented, because a second implementation of an addressing rule can drift and a drifted check refuses correct state | `tosaddr` |
 | Pending queue bounds | what may wait on an owner is bounded in count, per sender, in bytes and in age; a full queue refuses the sender rather than dropping the event, and expired questions are recorded as refused rather than deleted | `eventlog.Quota`, `eventlog.ExpirePendingAdmissions` |
@@ -170,15 +171,14 @@ implementation of them:
   default candidate in [`E2EE_SUITE_DECISION.md`](E2EE_SUITE_DECISION.md), but
   its identifier remains a proposal until the owner ratifies it; the hybrid
   successor and downgrade rules remain open;
-- the group key-management protocol, where MLS (RFC 9420) is the recorded
-  default candidate that an alternative must be justified against. `pkg/room`
-  commits room *membership* per epoch, and `pkg/group` now fixes the contract a
-  group-key scheme must satisfy and how it is refuted — founding agreement,
-  epoch advance, membership binding, re-keying on removal, a joiner with no
-  past, forged-commit refusal — exactly as `pkg/e2ee` does for the 1:1 suite. It
-  selects no construction and implements no cryptography; the harness checks
-  protocol structure, not secrecy. Choosing and building a scheme is the freeze
-  decision that remains;
+- the TOS-MLS v1 group-key implementation and wire freeze. MLS 1.0 / RFC 9420
+  is now the selected construction, while `pkg/group` remains the pre-selection
+  contract and refutation floor. The selected profile candidate still needs a
+  distinct Ed25519 LeafNode key authorised for each device, an endpoint-signed
+  MLS credential/KeyPackage publication path, BasicCredential and group-id
+  canonical bytes after the genesis-hash representation decision, a two-clock
+  adapter, durable implementation, positive and adversarial vectors,
+  independent review, and second-implementation evidence;
 - the room-authority model — whether a room's membership is driven by a single
   owner or by member consensus — which decides how a participant reconciles a
   membership epoch another party advanced while it was offline. Until it is
