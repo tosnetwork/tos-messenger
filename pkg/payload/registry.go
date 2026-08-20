@@ -42,6 +42,7 @@ var codecs = map[string]codec{
 
 	"delivery.ack":    {schema: DeliveryAck{}.Schema(), decode: decodeDeliveryAck},
 	"application.ack": {schema: ApplicationAck{}.Schema(), decode: decodeApplicationAck},
+	"read.ack":        {schema: ReadAck{}.Schema(), decode: decodeReadAck},
 
 	"room.invite":            {schema: RoomInvite{}.Schema(), decode: decodeRoomInvite},
 	"room.membership.commit": {schema: RoomMembershipCommit{}.Schema(), decode: decodeRoomMembershipCommit},

@@ -101,6 +101,7 @@ var eventKinds = map[string]kindSpec{
 
 	"delivery.ack":    {class: "delivery"},
 	"application.ack": {class: "application"},
+	"read.ack":        {class: "read"},
 
 	"room.invite":            {class: "room"},
 	"room.membership.commit": {class: "room"},

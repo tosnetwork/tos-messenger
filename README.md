@@ -140,6 +140,9 @@ Deliberately absent, with the reason:
   says it decided, which is information and may travel. An owner approval is
   authority granted here, and it is not expressible on the wire at all: it
   exists on the owner's own socket and nowhere else.
+- Stored, delivery, application, and optional read acknowledgements are
+  different facts. None is a TOS Receipt, settlement authority, or evidence
+  that a user read an event unless it is specifically a `ReadAck`.
 - The party that asks for an approval cannot grant it. The runtime and the
   owner speak over separate sockets, the runtime's has no approval operation on
   it, and every decision carries the owner's signature over a single-use

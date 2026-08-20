@@ -507,6 +507,34 @@ func decodeApplicationAck(reader *canon.Reader) Payload {
 	}
 }
 
+// ReadAck is optional user-facing read state. It is distinct from delivery and
+// application acceptance: reading is a UI action and grants no authority. A
+// sender that does not negotiate or want read state simply never emits it.
+type ReadAck struct {
+	EventID    string
+	ReadAtUnix uint64
+}
+
+// Schema implements Payload.
+func (ReadAck) Schema() string { return "tos.messaging.payload.read-ack.v1" }
+
+// Validate implements Payload.
+func (r ReadAck) Validate() error {
+	if err := requireEvent("read event", r.EventID); err != nil {
+		return err
+	}
+	return requireTime("read time", r.ReadAtUnix)
+}
+
+func (r ReadAck) encode(buffer *bytes.Buffer) {
+	canon.Text(buffer, r.EventID)
+	canon.Uint64(buffer, r.ReadAtUnix)
+}
+
+func decodeReadAck(reader *canon.Reader) Payload {
+	return ReadAck{EventID: reader.Text(MaxShortTextBytes), ReadAtUnix: reader.Uint64()}
+}
+
 // RoomInvite invites an Agent into a room.
 type RoomInvite struct {
 	RoomID         string

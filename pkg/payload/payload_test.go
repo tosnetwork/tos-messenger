@@ -76,6 +76,8 @@ func sample(kind string) Payload {
 	case "application.ack":
 		return ApplicationAck{EventID: "evt_" + strings.Repeat("8", 64), Outcome: "applied",
 			DecidedAtUnix: 1_800_000_000}
+	case "read.ack":
+		return ReadAck{EventID: "evt_" + strings.Repeat("8", 64), ReadAtUnix: 1_800_000_000}
 	case "room.invite":
 		return RoomInvite{RoomID: "room_" + strings.Repeat("9", 64),
 			InviteeAgentID: "agent_" + strings.Repeat("a", 64),
@@ -231,6 +233,7 @@ func TestInvalidBodiesAreRefused(t *testing.T) {
 		"zero digest":            ArtifactOffer{ArtifactDigest: "sha256:" + strings.Repeat("0", 64), MediaType: "application/pdf", SizeBytes: 1},
 		"rejection with no reason": ApplicationAck{EventID: "evt_" + strings.Repeat("8", 64),
 			Outcome: "rejected", DecidedAtUnix: 1},
+		"read ack with no time": ReadAck{EventID: "evt_" + strings.Repeat("8", 64)},
 		"room with no members": RoomMembershipCommit{RoomID: "room_" + strings.Repeat("9", 64),
 			Epoch: 1, MembershipDigest: "sha256:" + strings.Repeat("b", 64)},
 		"carried message with no body": A2AMessage{Foreign: Foreign{Protocol: "a2a", Version: "1"}},
