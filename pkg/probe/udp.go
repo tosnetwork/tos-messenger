@@ -65,7 +65,13 @@ type Config struct {
 	// evidence from one where the tunnel also failed, and the operator chooses
 	// which is being collected.
 	TunnelAddr string
-	Commit     string
+	// EchoSizes asks for one echo round trip per size after a confirmed
+	// direct establishment: an ADNL query carrying that many random bytes,
+	// answered with their sha256. The results are cross-check harness
+	// evidence about payload transport between implementations, reported
+	// beside the trial and never inside it. ADNL probe only.
+	EchoSizes []int
+	Commit    string
 	// ManifestDigest is the digest of this endpoint's collector manifest,
 	// presented to the peer wherever the commit is. The commit names a
 	// repository revision; the manifest names the build that spoke on the wire,
@@ -137,6 +143,10 @@ type Result struct {
 	// PeerTransportKey is the key the peer will run its measured transport
 	// under, learned during pairing.
 	PeerTransportKey string
+	// EchoResults is what each configured echo round trip did over the
+	// confirmed direct session, in the order configured. It is cross-check
+	// harness evidence, reported beside the trial and never inside it.
+	EchoResults []EchoResult
 	// Observation is the coordinator's signed account of what it saw. A result
 	// without one cannot be filed under a stratum, because the two facts that
 	// place it there would be the endpoint's own claim.
@@ -155,6 +165,16 @@ type Result struct {
 	FilteringObservations []reachability.FilteringObservation
 	TxBytes               uint64
 	RxBytes               uint64
+}
+
+// EchoResult is one echo round trip's outcome: how many random bytes the
+// query carried, whether their exact sha256 came back inside the window, and
+// how long the round trip took (zero when it never completed, the schema's
+// "not measured").
+type EchoResult struct {
+	Bytes  int
+	OK     bool
+	Millis uint64
 }
 
 // NewSessionID returns a fresh session identifier for one measured pair.
@@ -342,12 +362,21 @@ func validateConfig(config *Config) error {
 			return errors.New("invalid tunnel relay address")
 		}
 	}
-	// The datagram probe has no session to hold, reconnect, or tunnel.
-	// Ignoring the request would record "not measured" for something the
-	// operator asked to measure, so it is refused instead.
+	// The datagram probe has no session to hold, reconnect, tunnel, or echo
+	// over. Ignoring the request would record "not measured" for something
+	// the operator asked to measure, so it is refused instead.
 	if config.Probe == reachability.ProbeUDP &&
-		(config.HoldWindow > 0 || config.MeasureReconnect || config.TunnelAddr != "") {
+		(config.HoldWindow > 0 || config.MeasureReconnect || config.TunnelAddr != "" ||
+			len(config.EchoSizes) > 0) {
 		return errors.New("the udp probe measures datagram establishment only")
+	}
+	// An echo that cannot be sent must be refused where the operator can see
+	// it: the native stack caps query payloads, and a size past the cap would
+	// be recorded as a network failure it never was.
+	for _, size := range config.EchoSizes {
+		if size < 1 || size > MaxEchoBytes {
+			return errors.New("echo sizes must be between 1 and 8176 bytes")
+		}
 	}
 	if config.Commit != "" && !commitPattern.MatchString(config.Commit) {
 		return errors.New("invalid probe commit")

@@ -387,6 +387,83 @@ func TestConfigRefusesUnusableMeasurementWindows(t *testing.T) {
 	}
 }
 
+// The echo cross-check must work between two of this collector's own
+// endpoints before it can prove anything about another implementation: each
+// side answers the other's sized queries with the payload hash, and the
+// querier verifies the exact hash came back over the session under test. Both
+// the fragmentation-exercising size and the largest permitted size must round
+// trip on loopback.
+func TestEndToEndADNLEchoCrossCheck(t *testing.T) {
+	sizes := []int{1024, MaxEchoBytes}
+	results := runADNLPair(t, "127.0.0.1", func(role Role, config *Config) {
+		config.EchoSizes = sizes
+	})
+	for role, result := range results {
+		if !result.Established {
+			t.Fatalf("no ADNL session was established for role %s: failure=%q", role, result.Failure)
+		}
+		if len(result.EchoResults) != len(sizes) {
+			t.Fatalf("role %s ran %d echoes, configured %d: %+v",
+				role, len(result.EchoResults), len(sizes), result.EchoResults)
+		}
+		for index, echoed := range result.EchoResults {
+			if echoed.Bytes != sizes[index] {
+				t.Fatalf("role %s echo %d carried %d bytes, configured %d",
+					role, index, echoed.Bytes, sizes[index])
+			}
+			if !echoed.OK {
+				t.Fatalf("role %s echo of %d bytes did not verify", role, echoed.Bytes)
+			}
+			if echoed.Millis == 0 {
+				t.Fatalf("role %s echo of %d bytes verified without a latency", role, echoed.Bytes)
+			}
+		}
+	}
+}
+
+// An establishment-only run must keep its empty echo slice: nothing was
+// configured, so nothing may claim to have run.
+func TestADNLEchoNotRunUnlessConfigured(t *testing.T) {
+	results := runADNLPair(t, "127.0.0.1", nil)
+	for role, result := range results {
+		if len(result.EchoResults) != 0 {
+			t.Fatalf("role %s ran echoes nobody configured: %+v", role, result.EchoResults)
+		}
+	}
+}
+
+// What a runner cannot measure it must refuse, not silently skip: echo sizes
+// past the native cap or under a byte, echoes on the sessionless udp probe,
+// the tunnel fallback on the sidecar runner, and each runner given the other
+// runner's configuration.
+func TestConfigRefusesWhatTheRunnersCannotMeasure(t *testing.T) {
+	base := Config{
+		EndpointKeyHex: testEndpointKey(RoleA), Probe: reachability.ProbeADNL,
+		Coordinators: []string{"127.0.0.1:9"},
+		SessionID:    "ses_00000000000000000000000000000000",
+		Role:         RoleA,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	oversized := base
+	oversized.EchoSizes = []int{MaxEchoBytes + 1}
+	if _, err := RunADNL(ctx, oversized); err == nil {
+		t.Fatal("an echo past the native query cap was accepted")
+	}
+	empty := base
+	empty.EchoSizes = []int{0}
+	if _, err := RunADNL(ctx, empty); err == nil {
+		t.Fatal("a zero-byte echo was accepted")
+	}
+	udpEcho := base
+	udpEcho.Probe = reachability.ProbeUDP
+	udpEcho.EchoSizes = []int{1024}
+	if _, err := Run(ctx, udpEcho); err == nil {
+		t.Fatal("the udp probe accepted an echo it cannot measure")
+	}
+}
+
 // skipUnderRace names the reason once. The Makefile's verify target runs these
 // tests in a dedicated non-race pass, so the skip is a relocation, not a loss.
 func skipUnderRace(t *testing.T) {

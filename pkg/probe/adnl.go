@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/xssnick/tonutils-go/adnl"
@@ -17,8 +16,6 @@ import (
 
 	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 )
-
-var silenceADNLLogs sync.Once
 
 const (
 	// keepalivePingTimeout bounds one keepalive or reconnect round trip. It is
@@ -90,7 +87,6 @@ func RunADNL(ctx context.Context, config Config) (Result, error) {
 	if config.Probe != reachability.ProbeADNL {
 		return Result{}, errors.New("this runner measures the adnl probe; use Run for udp")
 	}
-
 	transportPublic, transportPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return Result{}, errors.New("generate transport key")
@@ -367,11 +363,10 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 	}
 	port := local.Port
 
-	silenceADNLLogs.Do(func() {
-		// The responder's punch datagrams are not ADNL, and the peer's gateway
-		// drops them; the drop must not spam whatever process embeds this.
-		adnl.Logger = func(...any) {}
-	})
+	// The logger doubles as the raw-answer watch, and the responder's punch
+	// datagrams are not ADNL -- the peer's gateway drops them, and the drop
+	// must not spam whatever process embeds this.
+	installADNLLogger()
 
 	gateway := adnl.NewGateway(transportKey)
 	// The gateway advertises the address the coordinator observed for this
@@ -447,6 +442,15 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 		}
 	}
 
+	// The echo cross-check runs last, after every phase the signed trial
+	// carries: it is harness evidence about payload transport across
+	// implementations, not part of the trial, and the native stack's own
+	// query-size limits make a large echo the likeliest phase to end a peer's
+	// process -- an accident that must not be able to destroy the measured
+	// phases that preceded it. It never runs over a tunneled session, whose
+	// echo would measure the relay.
+	r.runEchoPhase(ctx, confirmed)
+
 	// The gateway has to outlive this endpoint's own success: closing the
 	// moment the session came up would pull it out from under a peer that is
 	// still measuring, and that error is not random -- it lands on whichever
@@ -466,12 +470,42 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 // phase is bounded by the punch timeout. The reconnect share is budgeted on
 // both sides even though only the initiator reconnects, because an endpoint
 // cannot see its peer's flags -- and the done signal ends the wait early, so
-// the surplus is only ever paid when the peer actually uses it.
+// the surplus is only ever paid when the peer actually uses it. The echo
+// share covers this endpoint's own configured echoes, because the peer's
+// sizes are not knowable here and each side has to at least outlive itself.
 func measurementBudget(config Config) time.Duration {
+	budget := echoBudget(config)
 	if config.HoldWindow <= 0 {
-		return 0
+		if budget > 0 {
+			budget += doneSignalGrace
+		}
+		return budget
 	}
-	return config.HoldWindow + keepalivePingTimeout + config.PunchTimeout + doneSignalGrace
+	return budget + config.HoldWindow + keepalivePingTimeout + config.PunchTimeout + doneSignalGrace
+}
+
+// echoBudget is the widest span this endpoint's own echo phase can occupy:
+// every configured size, each given the full punch-timeout window.
+func echoBudget(config Config) time.Duration {
+	return time.Duration(len(config.EchoSizes)) * config.PunchTimeout
+}
+
+// runEchoPhase runs one echo round trip per configured size over the
+// confirmed direct session and records what each one did. The results are
+// cross-check harness evidence -- whether sized payloads actually transport
+// between the two implementations on this path -- and deliberately never part
+// of the signed trial: the study's vocabulary is not grown from inside a
+// collector.
+func (r *runner) runEchoPhase(ctx context.Context, peer adnl.Peer) {
+	for _, size := range r.config.EchoSizes {
+		if ctx.Err() != nil {
+			return
+		}
+		millis, ok := echoRoundTrip(ctx, peer, size, r.config.PunchTimeout)
+		r.result.EchoResults = append(r.result.EchoResults, EchoResult{
+			Bytes: size, OK: ok, Millis: millis,
+		})
+	}
 }
 
 // holdSession keeps the confirmed session alive with paced pings until the
@@ -506,9 +540,7 @@ func (r *runner) holdSession(ctx context.Context, peer adnl.Peer) (uint64, bool)
 			// end: at the keepalive's granularity that is what was observed.
 			return clampedSeconds(r.config.HoldWindow), true
 		}
-		attempt, cancel := context.WithTimeout(ctx, keepalivePingTimeout)
-		_, err := peer.Ping(attempt)
-		cancel()
+		err := sessionRoundTrip(ctx, peer, keepalivePingTimeout)
 		if err == nil {
 			lastAlive = time.Now()
 			failures = 0
@@ -557,9 +589,7 @@ func (r *runner) measureReconnect(ctx context.Context, peer adnl.Peer) {
 		if ctx.Err() != nil {
 			return
 		}
-		attempt, cancel := context.WithTimeout(ctx, keepalivePingTimeout)
-		_, err := peer.Ping(attempt)
-		cancel()
+		err := sessionRoundTrip(ctx, peer, keepalivePingTimeout)
 		if err == nil {
 			elapsed := time.Since(dropped).Milliseconds()
 			if elapsed < 1 {
@@ -592,17 +622,18 @@ var reconnectWindowForTest time.Duration
 var directPeersForTest func([]netip.AddrPort) []netip.AddrPort
 
 // confirmInbound is the gateway connection handler every phase shares: the
-// responder's only path, the initiator's safety net. A completed ping round
-// trip over the inbound session is what establishment means, and it is
-// retried because losing the measurement to one dropped packet would
-// understate the path.
+// responder's only path, the initiator's safety net. A completed round trip
+// over the inbound session is what establishment means, and it is retried
+// because losing the measurement to one dropped packet would understate the
+// path. Every inbound peer is also made to answer the probe's echo queries,
+// because that is the round trip a native peer confirms, keeps alive, and
+// echoes with.
 func confirmInbound(ctx context.Context, deadline time.Time, established chan<- arrival) func(adnl.Peer) error {
 	return func(client adnl.Peer) error {
+		answerEchoQueries(client)
 		go func() {
 			for time.Now().Before(deadline) {
-				attempt, cancel := context.WithTimeout(ctx, keepalivePingTimeout)
-				_, err := client.Ping(attempt)
-				cancel()
+				err := sessionRoundTrip(ctx, client, keepalivePingTimeout)
 				if err != nil {
 					if ctx.Err() != nil {
 						return
@@ -653,12 +684,15 @@ func (r *runner) dial(ctx context.Context, gateway *adnl.Gateway, peerKey ed2551
 				if err != nil {
 					continue
 				}
+				// The dialled peer answers echo queries too: the native
+				// responder confirms the inbound session with its own query
+				// round trip, and an initiator that stayed silent would leave
+				// the peer's half unconfirmable.
+				answerEchoQueries(registered)
 				dialled[name] = registered
 				peer = registered
 			}
-			attempt, cancel := context.WithTimeout(ctx, 2*time.Second)
-			_, err := peer.Ping(attempt)
-			cancel()
+			err := sessionRoundTrip(ctx, peer, 2*time.Second)
 			if err != nil {
 				failures[name]++
 				if failures[name]%2 == 0 {
