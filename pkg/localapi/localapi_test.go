@@ -127,8 +127,8 @@ func newHarnessWithPolicy(t *testing.T, policy firewall.Policy) *harness {
 	}
 	server, err := NewServer(Config{
 		Journal: journal, Dispatcher: dispatcher, Policy: policy,
-		OwnerKey: testOwnerPublic(),
-		Now:      func() time.Time { return instance.clock },
+		OwnerKey: testOwnerPublic(), LocalEndpointID: peerMEP,
+		Now: func() time.Time { return instance.clock },
 	})
 	if err != nil {
 		t.Fatalf("server: %v", err)
@@ -151,6 +151,28 @@ func (h *harness) event(t *testing.T, body string) envelope.Event {
 		t.Fatalf("event: %v", err)
 	}
 	return event
+}
+
+func TestOwnerCreatesScopedOneTimeAdmissionInvite(t *testing.T) {
+	h := newHarness(t)
+	expires := baseUnix + 600
+	created := h.owner(t, Request{
+		Op: OpCreateAdmissionInvite, InvitedAgentID: senderID, InviteExpiresAtUnix: expires,
+	})
+	if !created.OK || created.AdmissionToken == "" {
+		t.Fatalf("create invite: %+v", created)
+	}
+	eventID := "evt_" + strings.Repeat("a", 64)
+	if fresh, err := h.journal.ClaimAdmissionInvite(
+		created.AdmissionToken, peerMEP, senderID, eventID, h.clock.Add(time.Minute),
+	); err != nil || !fresh {
+		t.Fatalf("claim invite: fresh=%v err=%v", fresh, err)
+	}
+	if _, err := h.journal.ClaimAdmissionInvite(
+		created.AdmissionToken, peerMEP, senderID, "evt_"+strings.Repeat("b", 64), h.clock.Add(2*time.Minute),
+	); err == nil {
+		t.Fatal("owner-created invite authorized two events")
+	}
 }
 
 func (h *harness) call(t *testing.T, request Request) Response {

@@ -38,13 +38,17 @@ func publicationFixture(t *testing.T, config *Config, now time.Time) (identity.D
 	if err != nil {
 		t.Fatalf("policy digest: %v", err)
 	}
+	inboxPolicy, err := config.AdmissionPolicy()
+	if err != nil {
+		t.Fatalf("admission policy: %v", err)
+	}
 	delegation := identity.Delegation{
 		Network: config.Network(), AgentID: config.AgentID, EndpointID: endpointID,
 		IdentityPublicKey: key.Public().(ed25519.PublicKey), AllowedProtocolVersions: []uint32{1},
 		AllowedOutboundEventClasses: []string{"text"}, NotBeforeUnix: uint64(now.Add(-time.Minute).Unix()),
 		ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()), MaximumSessionLifetimeSeconds: 3600,
 		ContactDescriptorPolicyDigest: policyDigest,
-		InboxAdmissionPolicyDigest:    "sha256:" + strings.Repeat("e", 64),
+		InboxAdmissionPolicyDigest:    inboxPolicy.Digest(),
 	}
 	if err := identity.Validate(delegation); err != nil {
 		t.Fatalf("delegation: %v", err)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/firewall"
+	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
 
@@ -35,6 +37,8 @@ type Config struct {
 	// only thing that distinguishes the owner from anything else running under
 	// the same Unix user.
 	OwnerKey ed25519.PublicKey
+	// LocalEndpointID scopes every admission invite minted by this server.
+	LocalEndpointID string
 	// ChallengeLifetime bounds how long an unanswered decision challenge
 	// stands.
 	ChallengeLifetime time.Duration
@@ -61,6 +65,9 @@ func NewServer(config Config) (*Server, error) {
 	}
 	if len(config.OwnerKey) != ed25519.PublicKeySize || canon.IsZero(config.OwnerKey) {
 		return nil, errors.New("the local API requires the owner's public key")
+	}
+	if !identity.EndpointPattern.MatchString(config.LocalEndpointID) {
+		return nil, errors.New("the local API requires its local endpoint identifier")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -184,8 +191,25 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.listMandates()
 	case OpChallenge:
 		return s.challenge(now)
+	case OpCreateAdmissionInvite:
+		return s.createAdmissionInvite(request, now)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
+}
+
+func (s *Server) createAdmissionInvite(request Request, now time.Time) Response {
+	var entropy [32]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return refuse(fault.CodeInternal, errors.New("generate admission invite"))
+	}
+	token, _, err := s.config.Journal.CreateAdmissionInvite(
+		entropy, s.config.LocalEndpointID, request.InvitedAgentID,
+		time.Unix(int64(request.InviteExpiresAtUnix), 0), now,
+	)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, AdmissionToken: token}
 }
 
 func (s *Server) pending(request Request, now time.Time) Response {

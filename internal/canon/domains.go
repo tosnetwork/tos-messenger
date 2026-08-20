@@ -53,6 +53,9 @@ const (
 	// DomainInboxPolicy namespaces the published identity of an inbox
 	// admission policy.
 	DomainInboxPolicy = "tos.messaging.inbox-policy.v1\x00"
+	// DomainAdmissionInvite namespaces the private digest of a random one-time
+	// inbox invitation. The bearer itself is never persisted.
+	DomainAdmissionInvite = "tos.messaging.admission-invite.v1\x00"
 	// DomainDescriptorPolicy namespaces what an Agent commits its endpoint may
 	// advertise.
 	DomainDescriptorPolicy = "tos.messaging.descriptor-policy.v1\x00"
@@ -197,6 +200,7 @@ var Domains = []string{
 	DomainLabMessage,
 	DomainPayload,
 	DomainInboxPolicy,
+	DomainAdmissionInvite,
 	DomainNegotiationRecord,
 	DomainBudget,
 	DomainMandateBudget,

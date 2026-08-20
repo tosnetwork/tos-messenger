@@ -47,7 +47,7 @@ func run(args []string, output io.Writer) error {
 	}
 	rest := global.Args()
 	if len(rest) == 0 {
-		return errors.New("usage: tos-messenger-owner [-socket PATH] <pending|prepare-grant|prepare-deny|sign|submit>")
+		return errors.New("usage: tos-messenger-owner [-socket PATH] <pending|prepare-grant|prepare-deny|prepare-invite|sign|submit>")
 	}
 	if rest[0] == "sign" {
 		return signCommand(rest[1:], output)
@@ -80,6 +80,16 @@ func run(args []string, output io.Writer) error {
 			return errors.New("usage: prepare-deny -reason TEXT ACTION_ID")
 		}
 		return prepare(client, localapi.Request{Op: localapi.OpDenyAction, ActionID: set.Arg(0), Reason: *reason}, output)
+	case "prepare-invite":
+		set := commandFlags("prepare-invite")
+		agentID := set.String("agent", "", "optional Agent identifier allowed to spend the invite")
+		expiresAt := set.Uint64("expires-at", 0, "absolute Unix expiry (maximum 30 days)")
+		if err := set.Parse(rest[1:]); err != nil || set.NArg() != 0 || *expiresAt == 0 {
+			return errors.New("usage: prepare-invite -expires-at UNIX [-agent AGENT_ID]")
+		}
+		return prepare(client, localapi.Request{
+			Op: localapi.OpCreateAdmissionInvite, InvitedAgentID: *agentID, InviteExpiresAtUnix: *expiresAt,
+		}, output)
 	case "submit":
 		set := commandFlags("submit")
 		path := set.String("decision", "", "signed decision JSON")

@@ -50,10 +50,29 @@ Production deployments should replace the file-backed offline example with a
 hardware or separately custodied Ed25519 signer. Keeping `owner.key` readable
 by the Agent runtime collapses the approval boundary even if its mode is 0600.
 
+First-contact invites use the same offline owner ceremony. The online host
+prepares an explicitly expiring, optionally Agent-scoped decision; only after
+the signed decision is submitted does the daemon generate and return the
+256-bit bearer:
+
+```sh
+tos-messenger-owner -socket /run/tos-messengerd/owner.sock \
+  prepare-invite -agent agent_... -expires-at 1900000000 > prepared.json
+tos-messenger-owner sign -key owner.key -decision prepared.json > signed.json
+tos-messenger-owner -socket /run/tos-messengerd/owner.sock \
+  submit -decision signed.json
+```
+
+Transmit the returned `invite_...` value out of band. The daemon persists only
+its domain-separated SHA-256 digest. The first valid authenticated event binds
+it durably to that sender and Event ID; an exact retry is idempotent, while any
+other event falls back to owner hold. Relay deposit signatures commit the
+opaque token, so a Relay cannot substitute it.
+
 When `publication.mode` is `prekeys`, the third socket exposes only the current
 fixed public generation and admission of one already Endpoint-signed public
 bundle. It exposes no approval operation, private material, other device's
-bundle, or authority to select a roster/window. The v4 config explicitly states
+bundle, or authority to select a roster/window. The v5 config explicitly states
 its clean absolute path, sorted 1–16-device roster (including this
 installation's device), algorithm identifier, 60-second-to-30-day lifetime,
 positive replenishment lead, and a check interval no longer than that lead.
@@ -94,6 +113,11 @@ nobody made:
   descriptor-policy files, with explicit refresh and HTTPS budgets;
 - **who this installation speaks for** — its Agent, endpoint and device — since
   an outbound event must say it came from here; and
+- the **inbox admission policy**, private known/blocked rosters, payload bound,
+  and clock-skew bound. The v1 recommended policy is `allow-list` with
+  `invite-or-hold`: a known Agent enters normally, a valid invite introduces
+  one event, and every other unknown Agent waits for the owner. Startup checks
+  that the public rule hashes to the digest in the finalized delegation;
 - the **owner's public key**, because the two sockets are not by themselves a
   boundary. Peer credentials establish which Unix user is calling, and the
   Agent runtime commonly runs as that same user, so a runtime that asked for an
@@ -114,10 +138,9 @@ misspelled setting that is silently dropped is a setting an operator believes
 is in force.
 
 `docs/daemon-config.example.json` is a complete file with placeholder values.
-Public prekey planning makes this schema `tos.messaging.daemon-config.v4`;
+Explicit inbox admission makes this schema `tos.messaging.daemon-config.v5`;
 older files are rejected instead of silently disabling discovery or public
-generation planning, or applying a daemon-wide descriptor policy peers never
-committed.
+generation planning, or applying an inbox policy the endpoint never committed.
 
 `-check` validates all of these bounds, endpoint URLs, code/hash pairs and
 paths without contacting the chain. Normal startup is fail-closed: after

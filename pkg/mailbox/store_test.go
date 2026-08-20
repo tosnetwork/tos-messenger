@@ -28,6 +28,7 @@ func relayEnvelope(messageByte byte) envelope.RelayEnvelope {
 		Ciphertext:      bytes.Repeat([]byte{messageByte}, 64),
 		ExpiresAtUnix:   uint64(mailboxNow + 3600),
 		StorageToken:    "quota-token.1",
+		AdmissionToken:  "invite_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 	}
 }
 
@@ -74,7 +75,8 @@ func TestStorePutIsDurableDeduplicatedAndSigned(t *testing.T) {
 	}
 	defer reopened.Close()
 	listed, err := reopened.List(value.OpaqueMailboxID, now, 10)
-	if err != nil || len(listed) != 1 || !bytes.Equal(listed[0].Ciphertext, value.Ciphertext) {
+	if err != nil || len(listed) != 1 || !bytes.Equal(listed[0].Ciphertext, value.Ciphertext) ||
+		listed[0].AdmissionToken != value.AdmissionToken {
 		t.Fatalf("listed=%v err=%v", listed, err)
 	}
 }
@@ -94,6 +96,11 @@ func TestStoreRefusesMessageIdentityConflict(t *testing.T) {
 	value.ExpiresAtUnix++
 	if _, _, err := store.Put(value, now); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expiry conflict=%v", err)
+	}
+	value = relayEnvelope('2')
+	value.AdmissionToken = "invite_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	if _, _, err := store.Put(value, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("admission-token conflict=%v", err)
 	}
 }
 

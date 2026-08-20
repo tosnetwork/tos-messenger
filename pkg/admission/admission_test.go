@@ -414,6 +414,97 @@ func TestAdmissionRefusalLeavesTheRemedyUsable(t *testing.T) {
 	}
 }
 
+// First-contact invitations are route-neutral authority. A token carried by a
+// direct session and the same token carried through a Relay must make the same
+// decision; changing route cannot mint or erase admission.
+func TestAdmissionInviteHasDirectRelayParityAndIsOneShot(t *testing.T) {
+	for _, firstRoute := range []Route{RouteDirect, RouteRelay} {
+		t.Run(string(firstRoute), func(t *testing.T) {
+			gate, journal, delegation, encoded := testGate(t, allowList(t, InviteOrAskOwner))
+			event := testEvent(t, delegation, nil)
+			local := testLocalDelegation(t, allowList(t, InviteOrAskOwner))
+			var entropy [32]byte
+			copy(entropy[:], bytes.Repeat([]byte{0x91}, len(entropy)))
+			token, _, err := journal.CreateAdmissionInvite(
+				entropy, local.EndpointID, senderID,
+				time.Unix(int64(baseUnix)+600, 0), time.Unix(int64(baseUnix)+30, 0),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := inbound(event, encoded)
+			request.Route = firstRoute
+			request.AdmissionToken = token
+			decision, err := gate.Admit(request)
+			if err != nil || decision.Outcome != Accepted {
+				t.Fatalf("first route=%s decision=%+v err=%v", firstRoute, decision, err)
+			}
+
+			if firstRoute == RouteDirect {
+				request.Route = RouteRelay
+			} else {
+				request.Route = RouteDirect
+			}
+			retry, err := gate.Admit(request)
+			if err != nil || retry.Outcome != Duplicate {
+				t.Fatalf("other-route retry=%+v err=%v", retry, err)
+			}
+
+			other := testEvent(t, delegation, func(e *envelope.Event) {
+				e.Content = textBody(t, "another event")
+			})
+			request.Event = other
+			spent, err := gate.Admit(request)
+			if err != nil || spent.Outcome != Held || spent.Code != fault.CodeApprovalRequired {
+				t.Fatalf("spent invite decision=%+v err=%v", spent, err)
+			}
+		})
+	}
+
+	for _, route := range []Route{RouteDirect, RouteRelay} {
+		t.Run("invalid-"+string(route), func(t *testing.T) {
+			gate, _, delegation, encoded := testGate(t, allowList(t, InviteOrAskOwner))
+			request := inbound(testEvent(t, delegation, nil), encoded)
+			request.Route = route
+			request.AdmissionToken = "invite_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+			decision, err := gate.Admit(request)
+			if err != nil || decision.Outcome != Held || decision.Code != fault.CodeApprovalRequired {
+				t.Fatalf("invalid invite route=%s decision=%+v err=%v", route, decision, err)
+			}
+		})
+	}
+}
+
+func TestMalformedEventDoesNotBurnAdmissionInvite(t *testing.T) {
+	gate, journal, delegation, encoded := testGate(t, allowList(t, InviteOrAskOwner))
+	local := testLocalDelegation(t, allowList(t, InviteOrAskOwner))
+	var entropy [32]byte
+	copy(entropy[:], bytes.Repeat([]byte{0x92}, len(entropy)))
+	token, _, err := journal.CreateAdmissionInvite(
+		entropy, local.EndpointID, senderID,
+		time.Unix(int64(baseUnix)+600, 0), time.Unix(int64(baseUnix)+30, 0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformed := testEvent(t, delegation, func(e *envelope.Event) {
+		e.Content = append(textBody(t, "bad"), 0)
+	})
+	request := inbound(malformed, encoded)
+	request.AdmissionToken = token
+	decision, err := gate.Admit(request)
+	if err != nil || decision.Code != fault.CodePayloadMalformed {
+		t.Fatalf("malformed decision=%+v err=%v", decision, err)
+	}
+
+	valid := testEvent(t, delegation, nil)
+	request.Event = valid
+	decision, err = gate.Admit(request)
+	if err != nil || decision.Outcome != Accepted {
+		t.Fatalf("valid retry decision=%+v err=%v", decision, err)
+	}
+}
+
 // An owner is asked once. A resend finds the claim and is acknowledged rather
 // than raising the same question again.
 func TestHeldEventAsksTheOwnerOnce(t *testing.T) {

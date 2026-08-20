@@ -57,6 +57,9 @@ func testConfig(t *testing.T) Config {
 		EndpointID:             "mep_" + strings.Repeat("3", 64),
 		DeviceID:               "dev_" + strings.Repeat("4", 64),
 		OwnerPublicKeyHex:      testOwnerPublicHex(),
+		Admission: AdmissionConfig{
+			Rule: "open-inbox", MaxContentBytes: envelope.MaxContentBytes, MaxClockSkewSeconds: 300,
+		},
 		Firewall: FirewallConfig{
 			UnattendedCeiling: "message", OwnInitiativeCeiling: "tool-call",
 		},
@@ -67,9 +70,13 @@ func testConfig(t *testing.T) Config {
 type acceptingVerifier struct{}
 
 func (acceptingVerifier) Verify(config Config, _ time.Time) (identity.Delegation, error) {
+	policy, err := config.AdmissionPolicy()
+	if err != nil {
+		return identity.Delegation{}, err
+	}
 	return identity.Delegation{
 		AgentID: config.AgentID, EndpointID: config.EndpointID,
-		AllowedOutboundEventClasses: []string{"text"},
+		AllowedOutboundEventClasses: []string{"text"}, InboxAdmissionPolicyDigest: policy.Digest(),
 	}, nil
 }
 
@@ -266,6 +273,14 @@ func TestFinalizedDelegationMustAuthorizeConfiguredEndpoint(t *testing.T) {
 		t.Fatalf("failed authority check retained state ownership: %v", err)
 	}
 	_ = journal.Close()
+	wrongPolicy := identity.Delegation{
+		AgentID: config.AgentID, EndpointID: config.EndpointID,
+		InboxAdmissionPolicyDigest: "sha256:" + strings.Repeat("f", 64),
+	}
+	if _, err := open(config, nil, fixedVerifier{delegation: wrongPolicy}); err == nil ||
+		!strings.Contains(err.Error(), "another inbox admission policy") {
+		t.Fatalf("a delegation for another inbox policy was accepted: %v", err)
+	}
 
 	if _, err := open(config, nil, fixedVerifier{err: errors.New("chain unavailable")}); err == nil ||
 		!strings.Contains(err.Error(), "verify finalized endpoint delegation") {
@@ -488,7 +503,20 @@ func TestConfigurationMustBeStated(t *testing.T) {
 		"overflowing directory duration": func(c *Config) { enableDiscovery(c); c.Discovery.RefreshIntervalSeconds = ^uint64(0) },
 		"excessive HTTPS timeout":        func(c *Config) { enableDiscovery(c); c.Discovery.HTTPSRequestTimeoutSeconds = 31 },
 		"no publication mode":            func(c *Config) { c.Publication.Mode = "" },
-		"unused disabled publication":    func(c *Config) { c.Publication.DeviceSocketPath = "/run/prekeys.sock" },
+		"no admission rule":              func(c *Config) { c.Admission.Rule = "" },
+		"no admission content bound":     func(c *Config) { c.Admission.MaxContentBytes = 0 },
+		"no admission clock bound":       func(c *Config) { c.Admission.MaxClockSkewSeconds = 0 },
+		"unused open-inbox roster": func(c *Config) {
+			c.Admission.KnownAgentIDs = []string{"agent_" + strings.Repeat("5", 64)}
+		},
+		"overlapping admission rosters": func(c *Config) {
+			c.Admission.Rule = "allow-list"
+			c.Admission.Unknown = "require-admission"
+			agentID := "agent_" + strings.Repeat("5", 64)
+			c.Admission.KnownAgentIDs = []string{agentID}
+			c.Admission.BlockedAgentIDs = []string{agentID}
+		},
+		"unused disabled publication": func(c *Config) { c.Publication.DeviceSocketPath = "/run/prekeys.sock" },
 		"relative publication socket": func(c *Config) {
 			enablePublication(c)
 			c.Publication.DeviceSocketPath = "run/prekeys.sock"
@@ -547,6 +575,8 @@ func TestConfigurationMustBeStated(t *testing.T) {
 			config.Registries = append([]RegistryConfig(nil), base.Registries...)
 			config.ChainEndpoints = append([]string(nil), base.ChainEndpoints...)
 			config.Publication.DeviceIDs = append([]string(nil), base.Publication.DeviceIDs...)
+			config.Admission.KnownAgentIDs = append([]string(nil), base.Admission.KnownAgentIDs...)
+			config.Admission.BlockedAgentIDs = append([]string(nil), base.Admission.BlockedAgentIDs...)
 			mutate(&config)
 			if name == "fast sweep" {
 				return
@@ -584,6 +614,7 @@ func TestUnknownConfigurationKeysAreRefused(t *testing.T) {
 		"endpoint_id": "mep_` + strings.Repeat("3", 64) + `",
 		"device_id": "dev_` + strings.Repeat("4", 64) + `",
 		"owner_public_key": "` + testOwnerPublicHex() + `",
+		"admission": {"rule": "open-inbox", "max_content_bytes": 65536, "max_clock_skew_seconds": 300},
 		"firewall": {"unattended_ceiling": "message", "own_initiative_ceiling": "tool-call"},
 		"transport": "none"
 	}`

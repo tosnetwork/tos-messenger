@@ -101,6 +101,10 @@ const (
 	// Agent has to know what it may spend before it negotiates, and reading is
 	// not deciding.
 	OpListMandates Operation = "mandates.list"
+	// OpCreateAdmissionInvite creates one random, expiring first-contact
+	// bearer. It is an owner decision because it grants an unknown sender the
+	// ability to place exactly one authenticated event in this inbox.
+	OpCreateAdmissionInvite Operation = "invites.create"
 )
 
 // Principal is which side of the boundary a connection speaks for.
@@ -130,6 +134,7 @@ var permitted = map[Principal]map[Operation]struct{}{
 		OpApprove: {}, OpDeny: {},
 		OpPendingActions: {}, OpGrantAction: {}, OpDenyAction: {},
 		OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {}, OpChallenge: {},
+		OpCreateAdmissionInvite: {},
 	},
 }
 
@@ -150,6 +155,7 @@ var operations = map[Operation]struct{}{
 	OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpPendingActions: {},
 	OpGrantAction: {}, OpDenyAction: {},
 	OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {}, OpChallenge: {},
+	OpCreateAdmissionInvite: {},
 }
 
 var (
@@ -160,6 +166,7 @@ var (
 	actionPattern      = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
 	idempotencyPattern = regexp.MustCompile(`^idem_[0-9a-f]{64}$`)
 	mandatePattern     = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
+	agentPattern       = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
 	challengePattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
@@ -202,6 +209,11 @@ type Request struct {
 	// MandateID names one already placed. A runtime proposing a spend names
 	// the mandate; it never supplies one.
 	MandateID string `json:"mandate_id,omitempty"`
+
+	// InvitedAgentID optionally scopes a new admission bearer to one Agent.
+	// InviteExpiresAtUnix is always explicit and owner-signed.
+	InvitedAgentID      string `json:"invited_agent_id,omitempty"`
+	InviteExpiresAtUnix uint64 `json:"invite_expires_at_unix,omitempty"`
 }
 
 // AssetIdentity names an asset the way the chain does.
@@ -334,6 +346,8 @@ type Response struct {
 	MandateID string `json:"mandate_id,omitempty"`
 	// Challenge is a freshly issued single-use decision nonce.
 	Challenge string `json:"challenge,omitempty"`
+	// AdmissionToken is returned exactly once when an owner creates an invite.
+	AdmissionToken string `json:"admission_token,omitempty"`
 }
 
 // WaitingAction is one decision the owner has not made yet.
@@ -460,6 +474,10 @@ func ValidateRequest(request Request) error {
 	} else if request.Challenge != "" || request.OwnerSignature != "" {
 		return errors.New("only an owner decision carries a challenge and a signature")
 	}
+	if request.Op != OpCreateAdmissionInvite &&
+		(request.InvitedAgentID != "" || request.InviteExpiresAtUnix != 0) {
+		return errors.New("only admission invite creation carries invite terms")
+	}
 	switch request.Op {
 	case OpPending, OpAwaitingAdmission:
 		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
@@ -540,6 +558,14 @@ func ValidateRequest(request Request) error {
 		return requireEmpty(request, "an owner decision", request.EventID, request.LeaseID, request.SessionID)
 	case OpListMandates, OpChallenge:
 		return requireEmpty(request, "a listing", request.EventID, request.LeaseID, request.SessionID)
+	case OpCreateAdmissionInvite:
+		if request.InvitedAgentID != "" && !agentPattern.MatchString(request.InvitedAgentID) {
+			return errors.New("an admission invite has an invalid Agent scope")
+		}
+		if request.InviteExpiresAtUnix == 0 {
+			return errors.New("an admission invite needs an expiry")
+		}
+		return requireEmpty(request, "admission invite creation", request.EventID, request.LeaseID, request.SessionID)
 	case OpActionStatus, OpClaimAction:
 		if !actionPattern.MatchString(request.ActionID) {
 			return errors.New("an action status needs an action")

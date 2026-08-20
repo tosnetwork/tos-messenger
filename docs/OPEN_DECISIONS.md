@@ -185,8 +185,6 @@ implementation of them:
 - enforcement of the selected single-authority room model, including signed
   authority transfer and offline reconciliation;
 - private-room transport, beyond the per-device fan-out default;
-- concrete one-time invite-token encoding and direct/Relay parity tests for the
-  selected allow-list/invite/owner-hold first-contact default;
 - stock-command assembly of operator-specific HTTPS root, Descriptor policy,
   DHT client, and external Endpoint signer configuration. The device API,
   generation planner, deterministic HTTPS→DHT scheduler, verified signer client,

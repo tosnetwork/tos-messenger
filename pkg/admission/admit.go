@@ -102,6 +102,11 @@ type Decision struct {
 type Inbound struct {
 	Event          envelope.Event
 	DelegationJSON []byte
+	// AdmissionToken is an optional recipient-issued one-time bearer. It is
+	// transported outside the encrypted Event so the recipient can apply its
+	// first-contact policy after authenticating the sender. A Relay sees only
+	// random opaque bytes and cannot substitute them under deposit signing.
+	AdmissionToken string
 	Route          Route
 	ReceivedAtUnix uint64
 }
@@ -304,6 +309,24 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 	// without claiming is what leaves the remedy usable. Denied senders are
 	// not written down either, which keeps a stranger from filling the journal.
 	admission := g.config.Policy.Admits(inbound.Event.SenderAgentID, inbound.Event.Kind)
+	usedInvite := false
+	if (admission == AdmitRequireAdmission || admission == AdmitInviteOrHold) && inbound.AdmissionToken != "" {
+		// Checking first prevents a stranger with a made-up token from using
+		// payload validation as an oracle. The durable claim happens only after
+		// the typed payload is valid, so a malformed event does not burn a real
+		// invitation. Claim repeats these checks atomically before acceptance.
+		if err := g.config.Journal.CheckAdmissionInvite(
+			inbound.AdmissionToken, g.config.LocalEndpointID,
+			inbound.Event.SenderAgentID, inbound.Event.EventID,
+			time.Unix(int64(inbound.ReceivedAtUnix), 0),
+		); err == nil {
+			admission = AdmitAllow
+			usedInvite = true
+		}
+	}
+	if admission == AdmitInviteOrHold {
+		admission = AdmitHoldForApproval
+	}
 	if admission != AdmitAllow && admission != AdmitHoldForApproval {
 		code, err := codeFor(admission)
 		if err != nil {
@@ -326,6 +349,17 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 		decision := g.refuse(inbound, fault.CodePayloadMalformed, class)
 		decision.Delegation = delegation
 		return decision, nil
+	}
+	if usedInvite {
+		if _, err := g.config.Journal.ClaimAdmissionInvite(
+			inbound.AdmissionToken, g.config.LocalEndpointID,
+			inbound.Event.SenderAgentID, inbound.Event.EventID,
+			time.Unix(int64(inbound.ReceivedAtUnix), 0),
+		); err != nil {
+			decision := g.refuse(inbound, fault.CodeAdmissionRequired, class)
+			decision.Delegation = delegation
+			return decision, nil
+		}
 	}
 
 	// The event itself is stored, not only its identity. A record that said

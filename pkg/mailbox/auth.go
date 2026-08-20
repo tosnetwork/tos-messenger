@@ -232,6 +232,7 @@ func DepositBodyDigest(value envelope.RelayEnvelope) (string, error) {
 	canon.Text(b, value.MessageID)
 	canon.Text(b, canon.Digest(value.Ciphertext))
 	canon.Text(b, canon.Digest([]byte(value.StorageToken)))
+	canon.Text(b, canon.Digest([]byte(value.AdmissionToken)))
 	canon.Uint64(b, value.ExpiresAtUnix)
 	return canon.Digest(b.Bytes()), nil
 }

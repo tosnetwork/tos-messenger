@@ -104,6 +104,15 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		_ = journal.Close()
 		return nil, errors.New("finalized delegation does not authorize the configured endpoint")
 	}
+	policy, err := config.AdmissionPolicy()
+	if err != nil {
+		_ = journal.Close()
+		return nil, err
+	}
+	if delegation.InboxAdmissionPolicyDigest != policy.Digest() {
+		_ = journal.Close()
+		return nil, errors.New("finalized delegation commits another inbox admission policy")
+	}
 
 	salt, err := loadOrCreateSalt(filepath.Join(config.StateDir, SaltFile))
 	if err != nil {
@@ -131,7 +140,7 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 	}
 	server, err := localapi.NewServer(localapi.Config{
 		Policy: config.FirewallPolicy(), OwnerKey: ownerKey,
-		Journal: journal, Dispatcher: dispatcher,
+		Journal: journal, Dispatcher: dispatcher, LocalEndpointID: config.EndpointID,
 	})
 	if err != nil {
 		_ = journal.Close()

@@ -42,6 +42,8 @@ const (
 	MinCiphertextBytes = 32
 	// MaxStorageTokenBytes bounds the optional opaque storage token.
 	MaxStorageTokenBytes = 256
+	// MaxAdmissionTokenBytes bounds an opaque recipient admission credential.
+	MaxAdmissionTokenBytes = 256
 	// MaxEnvelopeLifetimeSeconds bounds how long a Relay may be asked to hold
 	// ciphertext. Retention is a resource commitment, so it is never open ended.
 	MaxEnvelopeLifetimeSeconds = 30 * 24 * 60 * 60
@@ -62,6 +64,7 @@ type RelayEnvelope struct {
 	Ciphertext      []byte
 	ExpiresAtUnix   uint64
 	StorageToken    string
+	AdmissionToken  string
 }
 
 type wireRelayEnvelope struct {
@@ -72,6 +75,7 @@ type wireRelayEnvelope struct {
 	CiphertextSize   uint32 `json:"ciphertext_size"`
 	ExpiresAtUnix    uint64 `json:"expires_at_unix"`
 	StorageToken     string `json:"storage_token,omitempty"`
+	AdmissionToken   string `json:"admission_token,omitempty"`
 }
 
 // EncodeRelayJSON returns the transport representation of a valid envelope.
@@ -87,6 +91,7 @@ func EncodeRelayJSON(relayEnvelope RelayEnvelope) ([]byte, error) {
 		CiphertextSize:   uint32(len(relayEnvelope.Ciphertext)),
 		ExpiresAtUnix:    relayEnvelope.ExpiresAtUnix,
 		StorageToken:     relayEnvelope.StorageToken,
+		AdmissionToken:   relayEnvelope.AdmissionToken,
 	})
 }
 
@@ -121,6 +126,7 @@ func DecodeRelayJSON(raw []byte) (RelayEnvelope, error) {
 		Ciphertext:      ciphertext,
 		ExpiresAtUnix:   value.ExpiresAtUnix,
 		StorageToken:    value.StorageToken,
+		AdmissionToken:  value.AdmissionToken,
 	}
 	if err := ValidateRelay(relayEnvelope); err != nil {
 		return RelayEnvelope{}, err
@@ -148,6 +154,11 @@ func ValidateRelay(relayEnvelope RelayEnvelope) error {
 	if relayEnvelope.StorageToken != "" &&
 		(len(relayEnvelope.StorageToken) > MaxStorageTokenBytes || !storageTokenPattern.MatchString(relayEnvelope.StorageToken)) {
 		return errors.New("invalid relay envelope storage token")
+	}
+	if relayEnvelope.AdmissionToken != "" &&
+		(len(relayEnvelope.AdmissionToken) > MaxAdmissionTokenBytes ||
+			!storageTokenPattern.MatchString(relayEnvelope.AdmissionToken)) {
+		return errors.New("invalid relay envelope admission token")
 	}
 	return nil
 }

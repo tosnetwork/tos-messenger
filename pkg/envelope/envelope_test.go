@@ -40,6 +40,7 @@ func testRelayEnvelope(t *testing.T) RelayEnvelope {
 		Ciphertext:      bytes.Repeat([]byte{0x01, 0x02}, 64),
 		ExpiresAtUnix:   baseUnix + 3600,
 		StorageToken:    "quota-token.1",
+		AdmissionToken:  "invite_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 	}
 }
 
@@ -57,7 +58,8 @@ func TestRelayEnvelopeRoundTrip(t *testing.T) {
 		decoded.OpaqueMailboxID != original.OpaqueMailboxID ||
 		decoded.MessageID != original.MessageID ||
 		decoded.ExpiresAtUnix != original.ExpiresAtUnix ||
-		decoded.StorageToken != original.StorageToken {
+		decoded.StorageToken != original.StorageToken ||
+		decoded.AdmissionToken != original.AdmissionToken {
 		t.Fatal("relay envelope changed across transport")
 	}
 }
@@ -100,6 +102,10 @@ func TestValidateRelayRejectsMalformedEnvelopes(t *testing.T) {
 		"no expiry":       func(e *RelayEnvelope) { e.ExpiresAtUnix = 0 },
 		"long token":      func(e *RelayEnvelope) { e.StorageToken = strings.Repeat("t", MaxStorageTokenBytes+1) },
 		"malformed token": func(e *RelayEnvelope) { e.StorageToken = "token with spaces" },
+		"long invite":     func(e *RelayEnvelope) { e.AdmissionToken = strings.Repeat("i", MaxAdmissionTokenBytes+1) },
+		"malformed invite": func(e *RelayEnvelope) {
+			e.AdmissionToken = "invite token with spaces"
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

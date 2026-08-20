@@ -63,6 +63,7 @@ type record struct {
 	CiphertextBase64 string `json:"ciphertext_base64"`
 	CiphertextDigest string `json:"ciphertext_digest"`
 	StorageToken     string `json:"storage_token,omitempty"`
+	AdmissionToken   string `json:"admission_token,omitempty"`
 	StoredAtUnix     uint64 `json:"stored_at_unix"`
 	ExpiresAtUnix    uint64 `json:"expires_at_unix"`
 }
@@ -73,7 +74,8 @@ func (r record) relayEnvelope() (envelope.RelayEnvelope, error) {
 		return envelope.RelayEnvelope{}, errors.New("stored Relay ciphertext is corrupt")
 	}
 	value := envelope.RelayEnvelope{OpaqueMailboxID: r.MailboxID, MessageID: r.MessageID,
-		Ciphertext: ciphertext, StorageToken: r.StorageToken, ExpiresAtUnix: r.ExpiresAtUnix}
+		Ciphertext: ciphertext, StorageToken: r.StorageToken, AdmissionToken: r.AdmissionToken,
+		ExpiresAtUnix: r.ExpiresAtUnix}
 	if err := envelope.ValidateRelay(value); err != nil {
 		return envelope.RelayEnvelope{}, err
 	}
@@ -172,7 +174,8 @@ func (s *Store) Put(value envelope.RelayEnvelope, now time.Time) (fresh bool, ac
 	digest := canon.Digest(value.Ciphertext)
 	stored := record{Schema: recordSchema, MailboxID: value.OpaqueMailboxID, MessageID: value.MessageID,
 		CiphertextBase64: base64.StdEncoding.EncodeToString(value.Ciphertext), CiphertextDigest: digest,
-		StorageToken: value.StorageToken, StoredAtUnix: uint64(now.Unix()), ExpiresAtUnix: value.ExpiresAtUnix}
+		StorageToken: value.StorageToken, AdmissionToken: value.AdmissionToken,
+		StoredAtUnix: uint64(now.Unix()), ExpiresAtUnix: value.ExpiresAtUnix}
 	encoded, err := json.Marshal(stored)
 	if err != nil || len(encoded) > MaxRecordBytes {
 		return false, StoredAck{}, errors.New("encode Mailbox Relay record")
@@ -200,7 +203,9 @@ func (s *Store) Put(value envelope.RelayEnvelope, now time.Time) (fresh bool, ac
 		if readErr != nil {
 			return false, StoredAck{}, readErr
 		}
-		if existing.MailboxID != value.OpaqueMailboxID || existing.MessageID != value.MessageID || existing.CiphertextDigest != digest || existing.ExpiresAtUnix != value.ExpiresAtUnix || existing.StorageToken != value.StorageToken {
+		if existing.MailboxID != value.OpaqueMailboxID || existing.MessageID != value.MessageID ||
+			existing.CiphertextDigest != digest || existing.ExpiresAtUnix != value.ExpiresAtUnix ||
+			existing.StorageToken != value.StorageToken || existing.AdmissionToken != value.AdmissionToken {
 			return false, StoredAck{}, ErrConflict
 		}
 		stored = existing

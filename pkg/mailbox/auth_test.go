@@ -162,6 +162,12 @@ func TestAuthenticatedStoreRefusesPermissionBodyRelayAndAuthoritySubstitution(t 
 		t.Fatal("request authorized substituted ciphertext")
 	}
 
+	other = value
+	other.AdmissionToken = "invite_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	if _, _, err := authenticated.Put(context.Background(), all, request, other, now); err == nil {
+		t.Fatal("request authorized a substituted admission token")
+	}
+
 	wrongRelay := all
 	wrongRelay.RelayPublicKeyHex = hex.EncodeToString(mailboxCapabilityKey().Public().(ed25519.PublicKey))
 	wrongRelay, err = SignGrant(wrongRelay, mailboxEndpointKey())

@@ -1,5 +1,5 @@
 {
-  "schema": "tos.messaging.daemon-config.v4",
+  "schema": "tos.messaging.daemon-config.v5",
 
   "state_dir": "/var/lib/tos-messengerd",
   "socket_path": "/run/tos-messengerd/runtime.sock",
@@ -53,6 +53,15 @@
   "device_id": "dev_4444444444444444444444444444444444444444444444444444444444444444",
 
   "owner_public_key": "d8ba1b8b57cd5c9d5aa63c56e4ba0fa14d0fbbc9d3f5e0e9c11d0af9b4f4c2b7",
+
+  "admission": {
+    "rule": "allow-list",
+    "unknown": "invite-or-hold",
+    "known_agent_ids": [],
+    "blocked_agent_ids": [],
+    "max_content_bytes": 65536,
+    "max_clock_skew_seconds": 300
+  },
 
   "firewall": {
     "unattended_ceiling": "message",

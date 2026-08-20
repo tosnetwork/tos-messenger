@@ -53,3 +53,27 @@ func TestMandateDecisionCommitsTheCompleteNetworkIdentity(t *testing.T) {
 		t.Fatal("SDK-prefixed genesis hash accepted in an owner preimage")
 	}
 }
+
+func TestAdmissionInviteDecisionCommitsScopeAndExpiry(t *testing.T) {
+	request := Request{
+		Op: OpCreateAdmissionInvite, Challenge: strings.Repeat("a", 64),
+		InvitedAgentID: "agent_" + strings.Repeat("b", 64), InviteExpiresAtUnix: 1_900_000_000,
+	}
+	original, err := DecisionBytes(request, request.Challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedAgent := request
+	changedAgent.InvitedAgentID = "agent_" + strings.Repeat("c", 64)
+	changedExpiry := request
+	changedExpiry.InviteExpiresAtUnix++
+	for name, changed := range map[string]Request{"agent": changedAgent, "expiry": changedExpiry} {
+		encoded, err := DecisionBytes(changed, changed.Challenge)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(original, encoded) {
+			t.Fatalf("%s substitution retained owner signature preimage", name)
+		}
+	}
+}

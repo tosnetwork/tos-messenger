@@ -20,8 +20,10 @@ import (
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/ids"
+	"github.com/tosnetwork/tos-messenger/pkg/admission"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
+	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
@@ -31,7 +33,7 @@ import (
 )
 
 // ConfigSchema is the strict schema of a daemon configuration.
-const ConfigSchema = "tos.messaging.daemon-config.v4"
+const ConfigSchema = "tos.messaging.daemon-config.v5"
 
 // PublicationMode names the route-independent public material maintained by
 // this installation. It does not select an HTTPS, DHT, or message transport.
@@ -150,6 +152,11 @@ type Config struct {
 	// separate user's keyring, another machine -- or this check is theatre.
 	OwnerPublicKeyHex string `json:"owner_public_key"`
 
+	// Admission is the recipient's explicit first-contact policy. Its public
+	// document must hash to the digest in the finalized local delegation; the
+	// private rosters remain local and never enter that digest.
+	Admission AdmissionConfig `json:"admission"`
+
 	// Firewall is what the Agent may reach unattended. Like the transport it
 	// must be stated: an operator should have to write down what their Agent
 	// may do because a stranger asked, and a permissive value nobody chose is
@@ -163,6 +170,71 @@ type Config struct {
 	SweepIntervalSeconds       uint64 `json:"sweep_interval_seconds,omitempty"`
 	MaintenanceIntervalSeconds uint64 `json:"maintenance_interval_seconds,omitempty"`
 	RetentionSeconds           uint64 `json:"retention_seconds,omitempty"`
+}
+
+// AdmissionConfig is the daemon-owned form of the inbox policy and its
+// private roster. Sorted lists make configuration reviews deterministic.
+type AdmissionConfig struct {
+	Rule                admission.InboxRule         `json:"rule"`
+	Unknown             admission.UnknownSenderRule `json:"unknown,omitempty"`
+	KnownAgentIDs       []string                    `json:"known_agent_ids,omitempty"`
+	BlockedAgentIDs     []string                    `json:"blocked_agent_ids,omitempty"`
+	MaxContentBytes     int                         `json:"max_content_bytes"`
+	MaxClockSkewSeconds uint64                      `json:"max_clock_skew_seconds"`
+}
+
+func (a AdmissionConfig) Validate() error {
+	document := admission.InboxPolicyDocument{Rule: a.Rule, Unknown: a.Unknown}
+	if err := document.Validate(); err != nil {
+		return err
+	}
+	if a.MaxContentBytes <= 0 || a.MaxContentBytes > envelope.MaxContentBytes {
+		return errors.New("admission max_content_bytes is outside its bound")
+	}
+	if a.MaxClockSkewSeconds == 0 || a.MaxClockSkewSeconds > 3600 {
+		return errors.New("admission max_clock_skew_seconds is outside its bound")
+	}
+	if len(a.KnownAgentIDs)+len(a.BlockedAgentIDs) > 4096 ||
+		!sort.StringsAreSorted(a.KnownAgentIDs) || !sort.StringsAreSorted(a.BlockedAgentIDs) {
+		return errors.New("admission rosters must be bounded and sorted")
+	}
+	seen := make(map[string]struct{}, len(a.KnownAgentIDs)+len(a.BlockedAgentIDs))
+	for _, roster := range [][]string{a.KnownAgentIDs, a.BlockedAgentIDs} {
+		for _, agentID := range roster {
+			if !ids.Agent.MatchString(agentID) {
+				return errors.New("invalid Agent identifier in admission roster")
+			}
+			if _, exists := seen[agentID]; exists {
+				return errors.New("duplicate Agent identifier in admission rosters")
+			}
+			seen[agentID] = struct{}{}
+		}
+	}
+	if a.Rule == admission.RuleOpen && len(seen) != 0 {
+		return errors.New("open inbox cannot carry unused private rosters")
+	}
+	return nil
+}
+
+// AdmissionPolicy derives behavior and the published digest from the same
+// configuration, preventing a daemon from advertising one rule and enforcing
+// another.
+func (c Config) AdmissionPolicy() (admission.ContactPolicy, error) {
+	if err := c.Admission.Validate(); err != nil {
+		return admission.ContactPolicy{}, err
+	}
+	known := make(map[string]struct{}, len(c.Admission.KnownAgentIDs))
+	blocked := make(map[string]struct{}, len(c.Admission.BlockedAgentIDs))
+	for _, agentID := range c.Admission.KnownAgentIDs {
+		known[agentID] = struct{}{}
+	}
+	for _, agentID := range c.Admission.BlockedAgentIDs {
+		blocked[agentID] = struct{}{}
+	}
+	return admission.NewContactPolicy(
+		admission.InboxPolicyDocument{Rule: c.Admission.Rule, Unknown: c.Admission.Unknown},
+		admission.Roster{Known: known, Blocked: blocked},
+	)
 }
 
 // PublicationConfig fixes the complete roster and cadence of public prekey
@@ -526,6 +598,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.Publication.Validate(c.DeviceID, c.StateDir, c.SocketPath, c.OwnerSocketPath); err != nil {
+		return err
+	}
+	if _, err := c.AdmissionPolicy(); err != nil {
 		return err
 	}
 	if err := c.FirewallPolicy().Validate(); err != nil {

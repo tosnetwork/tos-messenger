@@ -35,6 +35,9 @@ const (
 	// AdmitHoldForApproval keeps the event for an owner decision. The sender
 	// is told nothing that distinguishes this from a refusal.
 	AdmitHoldForApproval Admission = "hold-for-approval"
+	// AdmitInviteOrHold lets the gate satisfy first contact with a valid
+	// one-time invite; without one, the event waits for the owner.
+	AdmitInviteOrHold Admission = "invite-or-hold"
 	// AdmitDeny refuses the sender outright.
 	AdmitDeny Admission = "deny"
 )
@@ -61,6 +64,9 @@ const (
 	TellThem UnknownSenderRule = "require-admission"
 	// AskTheOwner keeps the event for an owner decision.
 	AskTheOwner UnknownSenderRule = "hold-for-approval"
+	// InviteOrAskOwner is the v1 default: an invitation admits one event and
+	// every other unknown sender waits for an owner decision.
+	InviteOrAskOwner UnknownSenderRule = "invite-or-hold"
 )
 
 // InboxPolicyDocument is the published description of an inbox policy.
@@ -85,7 +91,7 @@ func (d InboxPolicyDocument) Validate() error {
 		}
 		return nil
 	case RuleAllowList:
-		if d.Unknown != TellThem && d.Unknown != AskTheOwner {
+		if d.Unknown != TellThem && d.Unknown != AskTheOwner && d.Unknown != InviteOrAskOwner {
 			return errors.New("an allow list must say what happens to an unknown sender")
 		}
 		return nil
@@ -177,6 +183,9 @@ func (p ContactPolicy) Admits(senderAgentID string, _ string) Admission {
 	}
 	if p.document.Unknown == AskTheOwner {
 		return AdmitHoldForApproval
+	}
+	if p.document.Unknown == InviteOrAskOwner {
+		return AdmitInviteOrHold
 	}
 	return AdmitRequireAdmission
 }
