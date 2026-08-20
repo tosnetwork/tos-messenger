@@ -131,10 +131,10 @@ func RunADNLSidecar(ctx context.Context, config Config) (Result, error) {
 		return instance.result, nil
 	}
 
-	instance.establishSidecar(ctx, sidecar, instance.result.PeerTransportKey,
+	err = instance.establishSidecar(ctx, sidecar, instance.result.PeerTransportKey,
 		local.Port, ipv4Candidates(peers))
 	sidecar.Close()
-	return instance.result, nil
+	return instance.result, err
 }
 
 // sidecarServableFamily reports whether the sidecar's IPv4-only bind can
@@ -164,6 +164,13 @@ func ipv4Candidates(peers []netip.AddrPort) []string {
 	return candidates
 }
 
+// sidecarUnsupportedCandidate is the sidecar's distinct refusal for a
+// candidate set that was non-empty but entirely outside what its
+// implementation can serve (address family, port validity). It is a tooling
+// vocabulary word, deliberately absent from the study's failure classes: a
+// trial must never be filed from it.
+const sidecarUnsupportedCandidate = "unsupported-candidate"
+
 // sidecarFailureClass maps the sidecar's failure vocabulary onto the study's.
 // The two match by construction; anything novel fails closed into the tooling
 // class rather than inventing a network finding.
@@ -184,20 +191,20 @@ func sidecarFailureClass(class string) reachability.FailureClass {
 // never touched the measured socket in the gateway runner and it does not
 // start here, because a layer must not carry its own test's control plane.
 func (r *runner) establishSidecar(ctx context.Context, sidecar *Sidecar,
-	peerKeyHex string, port int, candidates []string) {
+	peerKeyHex string, port int, candidates []string) error {
 	// The sidecar always binds the IPv4 wildcard; the bind address's role in
 	// its protocol is family selection and the port. The port is the
 	// rendezvous port, the one the peer's NAT mapping points at.
 	_, boundKey, err := sidecar.Listen(fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		r.result.Failure = reachability.FailureInternal
-		return
+		return nil
 	}
 	// The peer was told one transport key during pairing; a sidecar listening
 	// under any other key measures a session the pairing never described.
 	if boundKey != r.transportKeyHex {
 		r.result.Failure = reachability.FailureInternal
-		return
+		return nil
 	}
 
 	if directPeersForTest != nil {
@@ -209,7 +216,7 @@ func (r *runner) establishSidecar(ctx context.Context, sidecar *Sidecar,
 	}
 	if len(candidates) == 0 {
 		r.result.Failure = reachability.FailureNoCandidate
-		return
+		return nil
 	}
 	r.result.Failure = reachability.FailureHandshake
 
@@ -225,16 +232,27 @@ func (r *runner) establishSidecar(ctx context.Context, sidecar *Sidecar,
 	if err != nil {
 		// The sidecar broke protocol or died: tooling, never the network.
 		r.result.Failure = reachability.FailureInternal
-		return
+		return nil
 	}
 	if !session.Established {
+		// The sidecar's distinct refusal for a candidate set its
+		// implementation cannot serve is a statement about the tooling, not
+		// the network. This runner filters unservable candidates before they
+		// ever reach the sidecar, so seeing the class here means the two
+		// sides disagree about what is servable -- a contract surprise that
+		// must abort the run rather than be filed as a measured failure,
+		// because a trial built from it would pollute a network cell with an
+		// implementation limit.
+		if session.FailureClass == sidecarUnsupportedCandidate {
+			return errors.New("the sidecar refused every candidate as implementation-unsupported; no trial can be filed from an implementation limit")
+		}
 		r.result.Failure = sidecarFailureClass(session.FailureClass)
-		return
+		return nil
 	}
 	peerAddr, err := netip.ParseAddrPort(session.PeerAddr)
 	if err != nil {
 		r.result.Failure = reachability.FailureInternal
-		return
+		return nil
 	}
 	r.result.Established = true
 	r.result.Failure = reachability.FailureNone
@@ -312,4 +330,5 @@ func (r *runner) establishSidecar(ctx context.Context, sidecar *Sidecar,
 	// carry. The sidecar keeps the session until told to close, and the wait
 	// runs through the coordinator exactly as before.
 	r.awaitPeerDone(ctx, deadline.Add(measurementBudget(r.config)))
+	return nil
 }
