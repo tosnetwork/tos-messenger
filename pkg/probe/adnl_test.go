@@ -421,6 +421,28 @@ func TestEndToEndADNLEchoCrossCheck(t *testing.T) {
 	}
 }
 
+// The gateway library cannot parse the native peer's raw hash answer, so the
+// answer watch and Query completion can become ready together at the timeout
+// boundary. Go deliberately randomizes a select between ready cases; every
+// iteration must still prefer the cryptographically matched answer.
+func TestEchoAnswerWinsTheQueryCompletionRace(t *testing.T) {
+	for attempt := 0; attempt < 1000; attempt++ {
+		arrived := make(chan struct{}, 1)
+		queryDone := make(chan struct{}, 1)
+		arrived <- struct{}{}
+		queryDone <- struct{}{}
+		if !echoAnswerArrived(arrived, queryDone) {
+			t.Fatalf("verified answer lost to simultaneous query completion on attempt %d", attempt)
+		}
+	}
+
+	queryDone := make(chan struct{}, 1)
+	queryDone <- struct{}{}
+	if echoAnswerArrived(make(chan struct{}), queryDone) {
+		t.Fatal("query completion without an answer was accepted")
+	}
+}
+
 // An establishment-only run must keep its empty echo slice: nothing was
 // configured, so nothing may claim to have run.
 func TestADNLEchoNotRunUnlessConfigured(t *testing.T) {

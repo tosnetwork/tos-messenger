@@ -501,11 +501,22 @@ func echoBudget(config Config) time.Duration {
 // of the signed trial: the study's vocabulary is not grown from inside a
 // collector.
 func (r *runner) runEchoPhase(ctx context.Context, peer adnl.Peer) {
+	attemptWindow := r.config.PunchTimeout / echoAttempts
+	if attemptWindow <= 0 {
+		attemptWindow = r.config.PunchTimeout
+	}
 	for _, size := range r.config.EchoSizes {
 		if ctx.Err() != nil {
 			return
 		}
-		millis, ok := echoRoundTrip(ctx, peer, size, r.config.PunchTimeout)
+		var millis uint64
+		var ok bool
+		for attempt := 0; attempt < echoAttempts; attempt++ {
+			millis, ok = echoRoundTrip(ctx, peer, size, attemptWindow)
+			if ok || ctx.Err() != nil {
+				break
+			}
+		}
 		r.result.EchoResults = append(r.result.EchoResults, EchoResult{
 			Bytes: size, OK: ok, Millis: millis,
 		})

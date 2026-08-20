@@ -35,6 +35,10 @@ const (
 	// native sidecar's own confirmation payload, so the two implementations
 	// measure the same act.
 	echoConfirmBytes = 32
+	// echoAttempts bounds the number of fresh queries used for one configured
+	// size. All attempts share the caller's overall time window; a fresh query
+	// gets a fresh ID and multipart assembly state.
+	echoAttempts = 3
 )
 
 // echoQueryPayload is how the raw echo query becomes visible to this
@@ -200,18 +204,34 @@ func echoRoundTrip(ctx context.Context, peer adnl.Peer, size int, window time.Du
 		queryDone <- struct{}{}
 	}()
 
-	select {
-	case <-arrived:
+	if echoAnswerArrived(arrived, queryDone) {
 		cancelQuery()
 		elapsed := time.Since(started).Milliseconds()
 		if elapsed < 1 {
 			elapsed = 1
 		}
 		return uint64(elapsed), true
+	}
+	return 0, false
+}
+
+// echoAnswerArrived resolves the boundary race between the raw-answer watch
+// and Query's completion. A raw native answer is deliberately not parseable
+// by tosutils-go: its receive path logs the authenticated bytes (which fires
+// arrived), while Query can finish at the same deadline. If both channels are
+// ready, select may choose queryDone, so that branch must recheck arrived
+// before declaring the measurement failed.
+func echoAnswerArrived(arrived, queryDone <-chan struct{}) bool {
+	select {
+	case <-arrived:
+		return true
 	case <-queryDone:
-		// The resend loop ended without the watch firing: window elapsed or
-		// the run was torn down.
-		return 0, false
+		select {
+		case <-arrived:
+			return true
+		default:
+			return false
+		}
 	}
 }
 

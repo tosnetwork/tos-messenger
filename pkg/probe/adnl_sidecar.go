@@ -13,10 +13,6 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 )
 
-// sidecarEchoAttempts bounds how many single-query echo attempts one
-// configured size gets; the attempts share the size's overall window.
-const sidecarEchoAttempts = 3
-
 // RunADNLSidecar measures one endpoint of one ADNL establishment attempt with
 // the native ADNL stack, driven as a subprocess, instead of the in-process
 // tosutils-go gateway.
@@ -322,9 +318,9 @@ func (r *runner) establishSidecar(ctx context.Context, sidecar *Sidecar,
 	// single query, and one datagram lost to UDP or to the peer's concurrent
 	// channel rotation (its reconnect phase) would fail the verdict for a
 	// path that transports the payload fine, so a failed echo is retried
-	// inside the size's overall window; the gateway runner's own echo already
-	// resends on the library's cadence.
-	attemptWindow := r.config.PunchTimeout / sidecarEchoAttempts
+	// inside the size's overall window. The gateway runner uses the same fresh-
+	// query bound in addition to the library's per-query resend cadence.
+	attemptWindow := r.config.PunchTimeout / echoAttempts
 	if attemptWindow <= 0 {
 		attemptWindow = r.config.PunchTimeout
 	}
@@ -334,7 +330,7 @@ func (r *runner) establishSidecar(ctx context.Context, sidecar *Sidecar,
 		}
 		var echoed EchoResult
 		var echoErr error
-		for attempt := 0; attempt < sidecarEchoAttempts; attempt++ {
+		for attempt := 0; attempt < echoAttempts; attempt++ {
 			echoed, echoErr = sidecar.Echo(size, attemptWindow)
 			if echoErr != nil || echoed.OK {
 				break
