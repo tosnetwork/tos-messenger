@@ -281,9 +281,12 @@ anything else. A datagram getting through says nothing about whether an ADNL
 handshake completes, whether a channel stays up, whether keepalives survive a
 NAT, or whether a session recovers after a network change.
 
-**M0-R2, route decision.** An ADNL probe exercises the real handshake, session,
-keepalive, and reliable transfer, and only its evidence produces
-`direct-first`, `tunnel-first`, `hybrid-by-network-class`, or `relay-required`.
+**M0-R2, route decision.** An ADNL probe exercises the real handshake and
+session establishment, keepalive survival, and reconnect, and only its
+evidence produces `direct-first`, `tunnel-first`, `hybrid-by-network-class`,
+or `relay-required`. Reliable transfer is not yet measured -- every phase is
+ping-based -- and is planned as a bounded ADNL echo-query cross-check first,
+with RLDP acceptance belonging to the transport milestone.
 
 Trials are aggregated per probe and never mixed, and the report names both the
 probe and the kind of question it answered. `Report.SupportsRouteDecision`

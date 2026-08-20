@@ -174,6 +174,10 @@ make verify
 
 Continuous integration runs the same checks plus a cross-architecture build,
 the fuzz seed corpora, and a check that the committed vectors are unchanged.
+Branch protection enforcing those checks before merge is deferred by owner
+decision — not in place, and recorded here rather than left silent; the
+compensating control is a manually reproduced evidence bundle for the freeze
+(verify logs, binary hashes, and collector manifests on amd64 and arm64).
 Vectors are rewritten deliberately:
 
 ```sh
