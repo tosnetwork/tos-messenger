@@ -80,6 +80,17 @@ func TestOpenMLSControllerIntegrationPersistsBeforeRestartChat(t *testing.T) {
 	if err := controllers[2].Join(transition2.Next, groupID, charlie.State, welcomes2[charlieRef], charlieRef); err != nil {
 		t.Fatal(err)
 	}
+	template3 := group.Transition{Prior: transition2.Next, Next: group.State{RoomID: founder.RoomID, Clock: group.Clock{RoomEpoch: 1, MLSEpoch: 3}, MembershipDigest: founder.MembershipDigest}}
+	transition3, refreshCommit, refreshWelcomes, err := controllers[0].Commit(template3, nil)
+	if err != nil || len(refreshWelcomes) != 0 {
+		t.Fatalf("persist PCS refresh: welcomes=%d err=%v", len(refreshWelcomes), err)
+	}
+	if err := controllers[1].Apply(transition3, refreshCommit); err != nil {
+		t.Fatal(err)
+	}
+	if err := controllers[2].Apply(transition3, refreshCommit); err != nil {
+		t.Fatal(err)
+	}
 
 	aad := []byte("durable room/event/content binding")
 	message, err := controllers[1].Seal(founder.RoomID, aad, []byte("persist before publishing this ciphertext"))

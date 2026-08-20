@@ -39,6 +39,11 @@ func TestOpenMLSSidecarIntegrationThreeMemberRestartChat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	aad := []byte("room + event + content binding")
+	aliceState, beforeJoin, err := driver.Seal(aliceState, aad, []byte("founder history before Bob joined"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	bobRef := canon.Digest(bob.KeyPackage)
 	if _, _, _, err := driver.Commit(aliceState, []LeafOperation{{Kind: LeafAdd, Next: &Leaf{KeyPackageRef: bobRef, KeyPackage: bob.KeyPackage, CredentialIdentity: []byte("charlie-authority"), LeafSignaturePublicKey: bob.LeafSignaturePublicKey}}}); err == nil {
 		t.Fatal("authority-substituted add operation accepted")
@@ -55,11 +60,31 @@ func TestOpenMLSSidecarIntegrationThreeMemberRestartChat(t *testing.T) {
 	if _, err := driver.Apply(bobState, commit1); err == nil {
 		t.Fatal("Welcome commit replay accepted")
 	}
+	if _, _, err := driver.Open(bobState, aad, beforeJoin); err == nil {
+		t.Fatal("joiner decrypted pre-join history")
+	}
+	aliceExporter, err := driver.Export(aliceState, "tos-room-test", []byte("same context"), 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobExporter, err := driver.Export(bobState, "tos-room-test", []byte("same context"), 32)
+	if err != nil || !bytes.Equal(aliceExporter, bobExporter) {
+		t.Fatalf("members disagree on exporter: %v", err)
+	}
+	separated, err := driver.Export(bobState, "tos-room-test-other", []byte("same context"), 32)
+	if err != nil || bytes.Equal(aliceExporter, separated) {
+		t.Fatal("exporter label did not separate secrets")
+	}
 
 	charlieRef := canon.Digest(charlie.KeyPackage)
 	aliceState, commit2, welcomes2, err := driver.Commit(aliceState, []LeafOperation{{Kind: LeafAdd, Next: &Leaf{KeyPackageRef: charlieRef, KeyPackage: charlie.KeyPackage, CredentialIdentity: []byte("charlie-authority"), LeafSignaturePublicKey: charlie.LeafSignaturePublicKey}}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	forgedCommit := append([]byte(nil), commit2...)
+	forgedCommit[len(forgedCommit)-1] ^= 0x80
+	if _, err := driver.Apply(bobState, forgedCommit); err == nil {
+		t.Fatal("forged commit accepted")
 	}
 	bobState, err = driver.Apply(bobState, commit2)
 	if err != nil {
@@ -70,7 +95,39 @@ func TestOpenMLSSidecarIntegrationThreeMemberRestartChat(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	aad := []byte("room + event + content binding")
+	oldAliceState := append([]byte(nil), aliceState...)
+	beforeRefreshExporter, err := driver.Export(aliceState, "tos-room-test", []byte("same context"), 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceState, refreshCommit, refreshWelcomes, err := driver.Commit(aliceState, nil)
+	if err != nil || len(refreshWelcomes) != 0 {
+		t.Fatalf("self refresh: welcomes=%d err=%v", len(refreshWelcomes), err)
+	}
+	bobState, err = driver.Apply(bobState, refreshCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	charlieState, err = driver.Apply(charlieState, refreshCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterRefreshExporter, err := driver.Export(aliceState, "tos-room-test", []byte("same context"), 32)
+	if err != nil || bytes.Equal(beforeRefreshExporter, afterRefreshExporter) {
+		t.Fatal("self update did not rotate exporter secret")
+	}
+	charlieState, postRefresh, err := driver.Seal(charlieState, aad, []byte("post-compromise epoch"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := driver.Open(oldAliceState, aad, postRefresh); err == nil {
+		t.Fatal("pre-refresh state decrypted a post-refresh message")
+	}
+	aliceState, plaintext, err := driver.Open(aliceState, aad, postRefresh)
+	if err != nil || string(plaintext) != "post-compromise epoch" {
+		t.Fatalf("current state missed post-refresh message: %q %v", plaintext, err)
+	}
+
 	bobState, encrypted, err := driver.Seal(bobState, aad, []byte("hello from Bob after every sidecar process restarted"))
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +135,7 @@ func TestOpenMLSSidecarIntegrationThreeMemberRestartChat(t *testing.T) {
 	if _, _, err := driver.Open(charlieState, []byte("wrong event"), encrypted); err == nil {
 		t.Fatal("wrong authenticated data accepted")
 	}
-	charlieState, plaintext, err := driver.Open(charlieState, aad, encrypted)
+	charlieState, plaintext, err = driver.Open(charlieState, aad, encrypted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +207,9 @@ func TestOpenMLSSidecarIntegrationThreeMemberRestartChat(t *testing.T) {
 	_, finalMessage, err := driver.Seal(aliceState, aad, []byte("room survives removal"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, _, err := driver.Open(bobState, aad, finalMessage); err == nil {
+		t.Fatal("removed member decrypted a future message")
 	}
 	_, plaintext, err = driver.Open(charlieV2State, aad, finalMessage)
 	if err != nil || string(plaintext) != "room survives removal" {

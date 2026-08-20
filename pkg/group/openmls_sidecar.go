@@ -16,6 +16,7 @@ import (
 	"io"
 	"os/exec"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 )
@@ -56,6 +57,9 @@ type openMLSRequest struct {
 	Message          string   `json:"message,omitempty"`
 	AAD              string   `json:"aad,omitempty"`
 	Plaintext        string   `json:"plaintext,omitempty"`
+	Label            string   `json:"label,omitempty"`
+	Context          string   `json:"context,omitempty"`
+	Length           uint16   `json:"length,omitempty"`
 }
 
 type openMLSResponse struct {
@@ -70,6 +74,7 @@ type openMLSResponse struct {
 	Message    string  `json:"message,omitempty"`
 	Plaintext  string  `json:"plaintext,omitempty"`
 	GroupID    string  `json:"group_id,omitempty"`
+	Secret     string  `json:"secret,omitempty"`
 	Epoch      *uint64 `json:"epoch,omitempty"`
 }
 
@@ -85,6 +90,22 @@ func (d *OpenMLSSidecar) Inspect(state []byte) (MLSStateInfo, error) {
 		return MLSStateInfo{}, errors.New("invalid OpenMLS state binding")
 	}
 	return MLSStateInfo{GroupID: groupID, Epoch: *response.Epoch}, nil
+}
+
+// Export derives an RFC 9420 exporter secret without changing group state.
+func (d *OpenMLSSidecar) Export(state []byte, label string, context []byte, length uint16) ([]byte, error) {
+	if label == "" || len(label) > 255 || !utf8.ValidString(label) || length == 0 || len(context) > 4096 {
+		return nil, errors.New("invalid OpenMLS exporter request")
+	}
+	response, err := d.call(openMLSRequest{Operation: "export", State: b64(state), Label: label, Context: optionalB64(context), Length: length})
+	if err != nil {
+		return nil, err
+	}
+	secret, err := decodeOpenMLS("exporter secret", response.Secret, int(length))
+	if err != nil || len(secret) != int(length) {
+		return nil, errors.New("invalid OpenMLS exporter secret")
+	}
+	return secret, nil
 }
 
 func (d *OpenMLSSidecar) NewIdentity(identity []byte) (OpenMLSIdentity, error) {
@@ -135,8 +156,20 @@ func (d *OpenMLSSidecar) Join(identityState, welcome []byte) ([]byte, error) {
 }
 
 func (d *OpenMLSSidecar) Commit(state []byte, operations []LeafOperation) ([]byte, []byte, map[string][]byte, error) {
-	if len(operations) == 0 || len(operations) > 64 {
+	if len(operations) > 64 {
 		return nil, nil, nil, errors.New("invalid MLS leaf operation count")
+	}
+	if len(operations) == 0 {
+		response, err := d.call(openMLSRequest{Operation: "refresh", State: b64(state)})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		next, err := decodeOpenMLS("state", response.State, MaxOpenMLSStateBytes)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		commit, err := decodeOpenMLS("commit", response.Commit, MaxOpenMLSMessageBytes)
+		return next, commit, map[string][]byte{}, err
 	}
 	packages := make([]string, 0, len(operations))
 	removals := make([]string, 0, len(operations))

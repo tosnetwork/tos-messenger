@@ -121,10 +121,10 @@ Relays may deliver these bytes, but Relay order never chooses a commit.
 - independent review of the concrete OpenMLS Driver and its snapshot/process
   boundary;
 - the committed integration proves real founding, sequential joins, mixed
-  replacement/removal, removed-member send refusal, AAD/replay refusal,
-  bidirectional application encryption and full restart recovery. Dedicated
-  joiner-no-past, removed-member-no-future receive, forged/stale-authority,
-  exporter separation and explicit PCS vectors remain;
+  replacement/removal, joiner-no-past and removed-member-no-future secrecy,
+  forged-commit/AAD/replay refusal, bidirectional application encryption,
+  exporter agreement and label separation, explicit self-update PCS, and full
+  restart recovery. Stale and substituted Endpoint authority is also refused;
 - offline multi-Relay catch-up using the eventual post-M0-R transport;
 - independent cryptographic review and a second MLS implementation cross-check.
 

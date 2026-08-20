@@ -74,6 +74,12 @@ struct Request {
     aad: String,
     #[serde(default)]
     plaintext: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    length: u16,
 }
 
 #[derive(Default, Serialize)]
@@ -98,6 +104,8 @@ struct Response {
     plaintext: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     group_id: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    secret: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     epoch: Option<u64>,
 }
@@ -246,6 +254,24 @@ fn handle(req: Request) -> Result<Response, String> {
             out.group_id = B64.encode(group.group_id().as_slice());
             out.epoch = Some(group.epoch().as_u64());
         }
+        "export" => {
+            if req.label.is_empty() || req.label.len() > 255 || req.length == 0 {
+                return Err("invalid exporter request".into());
+            }
+            let context = if req.context.is_empty() {
+                Vec::new()
+            } else {
+                decode("exporter context", &req.context, 4096)?
+            };
+            let (provider, snapshot) = load_snapshot(&req.state)?;
+            let group = group(&provider, &snapshot)?;
+            let secret = group
+                .export_secret(provider.crypto(), &req.label, &context, req.length as usize)
+                .map_err(|_| "secret export failed")?;
+            out.secret = B64.encode(secret);
+            out.group_id = B64.encode(group.group_id().as_slice());
+            out.epoch = Some(group.epoch().as_u64());
+        }
         "validate" => {
             let expected_identity = decode("identity", &req.identity, MAX_IDENTITY)?;
             let expected_public = decode("public key", &req.public_key, 64)?;
@@ -379,6 +405,20 @@ fn handle(req: Request) -> Result<Response, String> {
             out.epoch = Some(group.epoch().as_u64());
             out.state = save_snapshot(&provider, signer.public(), Some(group.group_id()))?;
         }
+        "refresh" => {
+            let (provider, snapshot) = load_snapshot(&req.state)?;
+            let signer = signer(&provider, &snapshot)?;
+            let mut group = group(&provider, &snapshot)?;
+            let bundle = group
+                .self_update(&provider, &signer, LeafNodeParameters::default())
+                .map_err(|_| "self update failed")?;
+            group
+                .merge_pending_commit(&provider)
+                .map_err(|_| "self update merge failed")?;
+            out.commit = encode(&bundle.into_commit())?;
+            out.epoch = Some(group.epoch().as_u64());
+            out.state = save_snapshot(&provider, signer.public(), Some(group.group_id()))?;
+        }
         "join" => {
             let (provider, snapshot) = load_snapshot(&req.state)?;
             if !snapshot.group_id.is_empty() {
@@ -496,6 +536,9 @@ mod tests {
             message: String::new(),
             aad: String::new(),
             plaintext: String::new(),
+            label: String::new(),
+            context: String::new(),
+            length: 0,
         }
     }
 
