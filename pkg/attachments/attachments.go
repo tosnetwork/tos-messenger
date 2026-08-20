@@ -1,7 +1,8 @@
 // Package attachments implements the route-neutral private attachment profile.
 // It encrypts bounded, independently addressable chunks before any storage
-// adapter sees them. Storage and transport are intentionally outside this
-// package; commercial retention remains roadmap-locked.
+// adapter sees them and provides an optional local opaque-ciphertext cache.
+// Network storage and transport remain outside this package; commercial
+// retention remains roadmap-locked.
 package attachments
 
 import (
@@ -318,7 +319,7 @@ func validateManifest(m Manifest) error {
 	if err != nil || len(prefix) != NoncePrefixBytes || canon.IsZero(prefix) {
 		return errors.New("invalid attachment nonce prefix")
 	}
-	if m.PlaintextBytes == 0 || m.PlaintextBytes > MaxPlaintextBytes || m.ChunkBytes == 0 || m.ChunkBytes > MaxChunkBytes || !canon.ValidDigest(m.MetadataDigest) {
+	if m.PlaintextBytes == 0 || m.PlaintextBytes > MaxPlaintextBytes || m.ChunkBytes == 0 || m.ChunkBytes > MaxChunkBytes || !validContentDigest(m.MetadataDigest) {
 		return errors.New("invalid attachment bounds")
 	}
 	expected := (m.PlaintextBytes + uint64(m.ChunkBytes) - 1) / uint64(m.ChunkBytes)
@@ -326,11 +327,15 @@ func validateManifest(m Manifest) error {
 		return errors.New("invalid attachment chunk count")
 	}
 	for _, digest := range m.ChunkDigests {
-		if !canon.ValidDigest(digest) {
+		if !validContentDigest(digest) {
 			return errors.New("invalid attachment chunk digest")
 		}
 	}
 	return nil
+}
+
+func validContentDigest(value string) bool {
+	return strings.HasPrefix(value, "sha256:") && len(value) == len("sha256:")+64 && canon.ValidDigest(value)
 }
 
 func validateMetadata(m Metadata) error {

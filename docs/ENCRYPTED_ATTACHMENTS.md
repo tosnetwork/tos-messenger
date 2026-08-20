@@ -27,7 +27,12 @@ for one-to-one delivery, the existing per-device E2EE fan-out wraps it. No
 separate shared storage key is inferred.
 
 Downloads resume by comparing locally held ciphertext digests to the ordered
-manifest and fetching only missing objects. `Open` checks the local size/media
+manifest and fetching only missing objects. The optional local `Store` persists
+only opaque ciphertext objects plus expiry/reference leases in a private,
+single-writer directory. It verifies hashes on put/fetch, enforces bounded
+object/byte/retention quotas before writing, survives restart, refuses corrupt
+state, and removes unreferenced objects only after a lease is deleted or
+expires. `Open` checks the local size/media
 policy, expiry, every content digest, every expected chunk length, and every
 AEAD tag before returning any plaintext.
 
@@ -46,8 +51,8 @@ allow-list of canonical media types. These bounds stop allocation and content
 bombs at the attachment layer, but format-specific decompression ratios and
 parser limits belong to the eventual sandbox adapter.
 
-Expiry is enforced on open. Actual remote deletion, retention guarantees,
-locator authentication/SSRF policy, storage garbage collection, scanning, and
+Expiry is enforced on open and by local lease GC. Actual remote deletion,
+remote retention guarantees, locator authentication/SSRF policy, scanning, and
 commercial attachment service terms remain separate work. A content-addressed
 object may have been copied, so no storage API may promise cryptographic erasure
 it cannot prove.
