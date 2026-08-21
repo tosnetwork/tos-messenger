@@ -11,6 +11,12 @@ implemented **and** tested end to end; a package that exists but whose behaviour
 not yet closed end to end is 🟡 with the gap named. Nothing in this file changes
 gate status: this repository carries none and consumes no gate capacity.
 
+This roadmap is intentionally OpenFox-only. Desktop/Web, Android, and iOS
+Messenger products, UI, push integration, packaging, and client acceptance are
+not deliverables and are not counted in any completion denominator. CLI and
+owner APIs are operational authority surfaces for OpenFox, not a separate chat
+client product.
+
 **Last re-audited against the code: 2026-08-21.** The first-principles choices are recorded in [`FIRST_PRINCIPLES_DECISIONS.md`](FIRST_PRINCIPLES_DECISIONS.md): canonical genesis representation, approved one-to-one construction, minimal Rust evidence consumer, no pre-study route choice, scoped Mailbox capabilities, first-contact default, single-authority rooms, and OpenMLS suite `0x0001`. A closed choice is not automatically completed implementation or freeze evidence.
 
 ## Milestones (governing numbering)

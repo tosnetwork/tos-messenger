@@ -106,7 +106,8 @@ The critical path is:
 5. implement only the route selected by that finding and close S1;
 6. wire the integrated MLS Driver and single-writer room authority through real
    Relay delivery and OpenFox, then close S2;
-7. then add remote attachments, native clients, and public channels.
+7. then add remote attachments and public channels. Native Desktop/Web,
+   Android, and iOS client products are outside the OpenFox-only roadmap.
 
 Lines of code do not reorder this path. S1 and S2 remain incomplete until their
 real-network, independently operated scenarios close end to end.
