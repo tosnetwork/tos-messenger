@@ -18,8 +18,10 @@ pretending that Overlay membership grants application authority. Epoch 1 has no
 predecessor; every later profile commits the exact prior signed-profile digest.
 `VerifySuccessor` accepts only a single adjacent authority-signed transition,
 and `ProfilesConflict` identifies non-identical branches at the same epoch and
-predecessor without choosing by digest or arrival order. A durable rollback/fork
-ledger remains follow-up work.
+predecessor without choosing by digest or arrival order. `OpenStore` persists
+the exact signed profile before atomically advancing a single-writer checkpoint;
+exact replay is idempotent, while lower epochs, gaps and equal-epoch forks are
+refused.
 
 ## Events and convergence
 
@@ -48,10 +50,23 @@ signature/authority substitution, sequence forks, missing/future parents,
 unauthorized moderation, Event-ID mismatch and arrival-order divergence fail
 closed in the candidate tests.
 
+## Durable local state
+
+The candidate store writes verified Event objects and a canonical immutable
+history manifest before atomically replacing that profile epoch's head. A
+successor snapshot must contain every previously committed Event. Restart reads
+follow only the head, compare it byte-for-byte with its immutable manifest, and
+re-run full history verification over every referenced Event; orphan objects,
+history shrinkage, corrupted files and a second writer do not become accepted
+state. Directories are mode `0700`, records are mode `0600`, and profile epochs
+remain readable after a later profile becomes current.
+
+This is local durability, not evidence that an Overlay peer supplied a complete
+history. Remote heads and manifests remain untrusted inputs until the locally
+derived history matches them.
+
 ## Explicitly still open
 
-- durable profile rollback/fork state (pure adjacent succession/fork detection exists);
-- a crash-safe content-addressed local public-history store;
 - Overlay/RLDP/TOS Sites publication, fetch, peer limits and anti-spam policy;
 - independently operated convergence/failover evidence;
 - wire vectors, independent review and second implementation.
