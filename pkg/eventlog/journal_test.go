@@ -401,7 +401,10 @@ func TestUnmarkedOrSubstitutedStateIsRefusedWithoutMutation(t *testing.T) {
 			return os.WriteFile(path, []byte("tos.messaging.canonical-network-preimages.v999\n"), 0o600)
 		},
 		"public marker": func(path string) error {
-			return os.WriteFile(path, []byte(canonicalStateMarker), 0o644)
+			if err := os.WriteFile(path, []byte(canonicalStateMarker), 0o600); err != nil {
+				return err
+			}
+			return os.Chmod(path, 0o644)
 		},
 		"symlink": func(path string) error {
 			return os.Symlink("missing", path)
