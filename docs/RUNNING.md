@@ -219,6 +219,29 @@ DHT locator, descriptor, and prekeys can update the durable device ledger.
 Failures are reported, never extend stale state, and do not become transport.
 See [`DISCOVERY_BOOTSTRAP.md`](DISCOVERY_BOOTSTRAP.md).
 
+## Authenticated attachment storage service
+
+`tos-attachmentd` runs the bounded storage protocol on a private Unix socket;
+the same authenticated request/response objects are used by the strict HTTPS
+adapter. It needs the normal finalized-chain authority configuration, one or
+more exact Agent delegation files, a private state directory, and a mode-`0600`
+lowercase-hex Ed25519 storage key:
+
+```bash
+tos-attachmentd \
+  -authority-config /etc/tos-messenger/daemon.json \
+  -delegation agent_<64hex>=/etc/tos-messenger/agents/agent.json \
+  -storage-key /etc/tos-messenger/attachment-storage.key \
+  -state /var/lib/tos-messenger/attachments \
+  -socket /run/user/1000/tos-attachmentd.sock
+```
+
+Use `-check` to validate the complete authority/key/path assembly without
+opening the store or socket. The daemon never receives attachment keys or
+plaintext metadata. Its Unix carrier is local deployment plumbing; a public
+deployment must use the strict HTTPS locator/client policy and independently
+validate TLS, DNS, quotas, retention and restart evidence.
+
 ## What `"transport": "none"` means
 
 Outbound events are queued durably and never sealed. No route has been chosen,

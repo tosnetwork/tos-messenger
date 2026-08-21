@@ -58,6 +58,10 @@ type Payload interface {
 type codec struct {
 	schema string
 	decode func(*canon.Reader) Payload
+	// legacy contains read-only decoders for schemas that this build emitted
+	// previously. New events always use schema/decode above, but immutable
+	// history must remain readable after a schema advance.
+	legacy map[string]func(*canon.Reader) Payload
 }
 
 // domainFor namespaces a payload preimage by its schema, so bytes that parse
@@ -89,8 +93,30 @@ func Decode(kind string, content []byte) (Payload, error) {
 	if !known {
 		return nil, errors.New("no payload codec for event kind " + kind)
 	}
-	reader := canon.NewReader(domainFor(spec.schema), content)
-	value := spec.decode(reader)
+	return decodeSchema(spec, spec.schema, content)
+}
+
+// DecodeSchema parses content using the exact schema declared by an immutable
+// Event. It accepts the current schema and explicitly registered historical
+// schemas; it never guesses a schema from the bytes.
+func DecodeSchema(kind, schema string, content []byte) (Payload, error) {
+	spec, known := codecs[kind]
+	if !known {
+		return nil, errors.New("no payload codec for event kind " + kind)
+	}
+	return decodeSchema(spec, schema, content)
+}
+
+func decodeSchema(spec codec, schema string, content []byte) (Payload, error) {
+	decode := spec.decode
+	if schema != spec.schema {
+		decode = spec.legacy[schema]
+		if decode == nil {
+			return nil, errors.New("unsupported payload schema")
+		}
+	}
+	reader := canon.NewReader(domainFor(schema), content)
+	value := decode(reader)
 	if err := reader.Done(); err != nil {
 		return nil, err
 	}
@@ -101,6 +127,16 @@ func Decode(kind string, content []byte) (Payload, error) {
 		return nil, err
 	}
 	return value, nil
+}
+
+// SupportsSchema reports whether kind may carry schema. The current schema is
+// used for new Events; historical schemas are decoding compatibility only.
+func SupportsSchema(kind, schema string) bool {
+	spec, known := codecs[kind]
+	if !known {
+		return false
+	}
+	return schema == spec.schema || spec.legacy[schema] != nil
 }
 
 // Validate reports whether content is a well-formed body for its kind.

@@ -138,6 +138,38 @@ func TestCiphertextStoreCollectsExpiredLease(t *testing.T) {
 	}
 }
 
+func TestCiphertextStorePeriodicGCProtectsActiveMultiFrameUpload(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0)
+	_, chunks, _ := storedAttachment(t, now)
+	store, err := OpenStore(filepath.Join(t.TempDir(), "attachments"), DefaultStoreQuota())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.PutObjects(chunks[:1]); err != nil {
+		t.Fatal(err)
+	}
+	stagedAt := time.Unix(1_800_000_000, 0)
+	path := store.objectPath(chunks[0].Digest)
+	if err := os.Chtimes(path, stagedAt, stagedAt); err != nil {
+		t.Fatal(err)
+	}
+	report, err := store.GCWithStagingGrace(stagedAt.Add(DefaultStagingGrace/2), DefaultStagingGrace)
+	if err != nil || report.ObjectsRemoved != 0 {
+		t.Fatalf("active staging collection: %+v err=%v", report, err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("active staged chunk removed: %v", err)
+	}
+	report, err = store.GCWithStagingGrace(stagedAt.Add(DefaultStagingGrace+time.Second), DefaultStagingGrace)
+	if err != nil || report.ObjectsRemoved != 1 {
+		t.Fatalf("stale staging collection: %+v err=%v", report, err)
+	}
+	if _, err := store.GCWithStagingGrace(stagedAt, -time.Second); err == nil {
+		t.Fatal("negative staging grace accepted")
+	}
+}
+
 func TestCiphertextStoreEnforcesQuotaBeforeWriting(t *testing.T) {
 	now := time.Unix(1_900_000_000, 0)
 	ref, chunks, _ := storedAttachment(t, now)
@@ -155,4 +187,59 @@ func TestCiphertextStoreEnforcesQuotaBeforeWriting(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("quota failure left objects: count=%d err=%v", len(entries), err)
 	}
+}
+
+func TestCiphertextStoreGenerationFailsClosed(t *testing.T) {
+	t.Run("unmarked nonempty", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "attachments")
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "legacy"), []byte("state"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenStore(root, DefaultStoreQuota()); err == nil {
+			t.Fatal("unmarked nonempty attachment state opened")
+		}
+	})
+	t.Run("public marker", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "attachments")
+		store, err := OpenStore(root, DefaultStoreQuota())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(root, storeGenerationName), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenStore(root, DefaultStoreQuota()); err == nil {
+			t.Fatal("public attachment generation marker accepted")
+		}
+	})
+	t.Run("symlink marker", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "attachments")
+		store, err := OpenStore(root, DefaultStoreQuota())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(root, storeGenerationName)
+		target := filepath.Join(t.TempDir(), "marker")
+		if err := os.WriteFile(target, []byte(storeGenerationValue), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(marker); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, marker); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenStore(root, DefaultStoreQuota()); err == nil {
+			t.Fatal("symlink attachment generation marker accepted")
+		}
+	})
 }

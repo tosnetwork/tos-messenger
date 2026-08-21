@@ -1,8 +1,10 @@
 # Encrypted attachment profile candidate
 
-`pkg/attachments` implements the route-neutral cryptographic core of private
-Messenger attachments. It does not select a transport, storage operator, paid
-retention profile, parser, or malware scanner.
+`pkg/attachments` implements the route-neutral cryptographic core and the
+authenticated opaque-storage contract for private Messenger attachments;
+`pkg/attachmentapi` and `tos-attachmentd` expose its bounded Unix/HTTPS service
+boundary. This does not select a message route, paid retention profile, parser,
+or malware scanner.
 
 Each attachment gets a fresh random 256-bit AES-GCM key, 128-bit attachment ID,
 and 32-bit nonce prefix. The 96-bit nonce is that prefix followed by the
@@ -36,6 +38,56 @@ expires. `Open` checks the local size/media
 policy, expiry, every content digest, every expected chunk length, and every
 AEAD tag before returning any plaintext.
 
+## Authenticated remote storage boundary
+
+An Endpoint signs a bounded grant for one finalized Agent/Endpoint, one exact
+storage Ed25519 identity, one independent capability key, one manifest and
+ordered chunk set, exact ciphertext bytes, retention time, and a canonical
+subset of `upload`, `fetch`, and `delete`. Both genesis hashes remain lowercase
+bare hex in JSON and are raw 32-byte fields in the signed preimage. The grant
+contains no attachment key, filename, media type, plaintext digest, or other
+plaintext metadata.
+
+Every operation uses its own domain-separated body digest and a capability
+signature over the exact grant digest, operation, body, two-minute window, and
+fresh 256-bit nonce. The store rereads the committed delegation and finalized
+Agent state on every operation and persists the nonce before touching storage.
+Crashes therefore consume a request rather than reopening it; a retry uses a
+fresh nonce against idempotent content-addressed storage. Replay claims survive
+restart, and a private fsynced monotonic time watermark refuses wall-clock
+rollback before expired claims are collected. A private store-generation
+marker prevents a missing clock/claim set from being mistaken for fresh state;
+unmarked legacy or substituted state requires explicit migration and never
+opens implicitly. Cross-operation, body,
+storage-key, Endpoint, network, manifest,
+chunk, order, index, byte-count, expiry and signature substitution fail closed.
+
+Uploads are split into at most sixteen chunks per service frame. Objects are
+fsynced as inert unleased ciphertext, and the lease becomes visible only after
+all grant-named objects exist with the exact aggregate byte count. This gives
+interrupted upload recovery without allowing a partial manifest to look
+complete. Fetch uses the same sixteen-object bound, requests only exact grant
+members, and independently rechecks every returned digest and manifest index.
+
+The storage identity signs a `StoredAck` only for a complete durable lease and
+a `DeleteAck` after observing its local lease deletion. These are operational
+acknowledgements, not TOS commercial Receipts. A `DeleteAck` cannot prove that a
+backup, cache, another operator, recipient, or attacker destroyed its copy.
+
+The `artifact.encrypted` payload is now v2 and accepts only the canonical URL
+
+```text
+https://<lowercase-host>/.well-known/tos-messenger/attachments/<manifest-sha256-hex>
+```
+
+with no userinfo, explicit port, query, fragment, escaped path, or suffix. The
+HTTPS client ignores environment proxies, refuses redirects/compression, uses
+finite request/connect/header/body budgets, rejects an entire DNS answer set if
+any address is loopback, private, link-local, CGNAT, multicast or otherwise
+non-public, and dials only the checked address while TLS continues to verify the
+original hostname. The locator is an E2EE-authenticated retrieval hint, never a
+bearer credential or authority source; capability signatures remain mandatory.
+
 ## Content safety and remaining integration
 
 `Open` deliberately does not decompress archives, infer media types, render a
@@ -51,8 +103,11 @@ allow-list of canonical media types. These bounds stop allocation and content
 bombs at the attachment layer, but format-specific decompression ratios and
 parser limits belong to the eventual sandbox adapter.
 
-Expiry is enforced on open and by local lease GC. Actual remote deletion,
-remote retention guarantees, locator authentication/SSRF policy, scanning, and
-commercial attachment service terms remain separate work. A content-addressed
-object may have been copied, so no storage API may promise cryptographic erasure
-it cannot prove.
+Expiry is enforced on open and by lease GC. Authenticated remote operation,
+restart replay refusal, interrupted multi-frame upload, signed local deletion
+observation, and locator/SSRF policy are implemented and tested locally. Still
+open are an independently operated public-TLS deployment, measured interrupted
+wide-area transfer, independently audited retention behavior, sandbox/scanner
+integration, and commercial attachment service terms. A content-addressed
+object may have been copied, so no storage API promises cryptographic erasure it
+cannot prove.

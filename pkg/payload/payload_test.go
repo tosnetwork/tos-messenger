@@ -84,7 +84,11 @@ func sample(kind string) Payload {
 		if err != nil {
 			panic(err)
 		}
-		return EncryptedAttachment{ManifestDigest: digest, ReferenceJSON: raw, Locator: "relay://attachments.example"}
+		locator, err := attachments.HTTPSLocator("https://attachments.example", digest)
+		if err != nil {
+			panic(err)
+		}
+		return EncryptedAttachment{ManifestDigest: digest, ReferenceJSON: raw, Locator: locator}
 	case "service.quote.reference":
 		return QuoteReference{ChainReference: sampleChainReference()}
 	case "service.escrow.reference":
@@ -190,6 +194,31 @@ func TestBodiesRoundTrip(t *testing.T) {
 				t.Fatalf("kind %q decoded to schema %q", kind, decoded.Schema())
 			}
 		})
+	}
+}
+
+func TestEncryptedAttachmentV1HistoryRemainsDecodable(t *testing.T) {
+	legacy := sample("artifact.encrypted").(EncryptedAttachment)
+	legacy.schema = encryptedAttachmentV1Schema
+	legacy.Locator = "relay://legacy-opaque-hint"
+	encoded, err := Encode(legacy)
+	if err != nil {
+		t.Fatalf("encode legacy attachment: %v", err)
+	}
+	decoded, err := DecodeSchema("artifact.encrypted", encryptedAttachmentV1Schema, encoded)
+	if err != nil {
+		t.Fatalf("decode legacy attachment: %v", err)
+	}
+	attachment, ok := decoded.(EncryptedAttachment)
+	if !ok || attachment.Schema() != encryptedAttachmentV1Schema || attachment.Locator != legacy.Locator {
+		t.Fatalf("legacy attachment changed: %#v", decoded)
+	}
+	if _, err := Decode("artifact.encrypted", encoded); err == nil {
+		t.Fatal("legacy bytes were guessed as the current schema")
+	}
+	if !SupportsSchema("artifact.encrypted", encryptedAttachmentV1Schema) ||
+		SupportsSchema("artifact.encrypted", "tos.messaging.payload.encrypted-attachment.v999") {
+		t.Fatal("attachment schema allow-list is wrong")
 	}
 }
 

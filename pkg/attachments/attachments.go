@@ -1,8 +1,9 @@
 // Package attachments implements the route-neutral private attachment profile.
 // It encrypts bounded, independently addressable chunks before any storage
-// adapter sees them and provides an optional local opaque-ciphertext cache.
-// Network storage and transport remain outside this package; commercial
-// retention remains roadmap-locked.
+// adapter sees them, provides an optional opaque-ciphertext store, and defines
+// scoped authentication plus strict HTTPS locator policy for a remote storage
+// boundary. Public deployment evidence and commercial retention remain
+// separate roadmap gates.
 package attachments
 
 import (
