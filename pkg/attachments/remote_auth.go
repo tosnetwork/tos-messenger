@@ -109,6 +109,11 @@ func SignGrant(grant CapabilityGrant, endpointKey ed25519.PrivateKey) (Capabilit
 	if err != nil {
 		return CapabilityGrant{}, err
 	}
+	storage, capability, _ := validateGrant(grant)
+	endpointPublic := endpointKey.Public().(ed25519.PublicKey)
+	if bytes.Equal(storage, capability) || bytes.Equal(storage, endpointPublic) || bytes.Equal(capability, endpointPublic) {
+		return CapabilityGrant{}, errors.New("attachment Endpoint, storage, and capability keys must be distinct")
+	}
 	grant.EndpointSignatureHex = hex.EncodeToString(ed25519.Sign(endpointKey, preimage))
 	return grant, nil
 }
@@ -128,6 +133,13 @@ func VerifyGrant(grant CapabilityGrant, endpointKey, storageKey ed25519.PublicKe
 	}
 	if !bytes.Equal(bound, storageKey) {
 		return errors.New("attachment grant names another storage operator")
+	}
+	capability, err := decodeFixedHex(grant.CapabilityPublicKeyHex, ed25519.PublicKeySize)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(bound, capability) || bytes.Equal(bound, endpointKey) || bytes.Equal(capability, endpointKey) {
+		return errors.New("attachment Endpoint, storage, and capability keys are not separated")
 	}
 	if now.IsZero() || now.Unix() < 0 || uint64(now.Unix()) < grant.IssuedAtUnix || uint64(now.Unix()) >= grant.ExpiresAtUnix {
 		return errors.New("attachment grant is outside its validity window")

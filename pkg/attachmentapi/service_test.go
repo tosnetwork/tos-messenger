@@ -204,6 +204,13 @@ func TestServiceRefusesOperationBodyAuthorityAndShapeSubstitution(t *testing.T) 
 	if response := server.Handle(context.Background(), requestRaw); response.OK || response.Code != CodeDenied {
 		t.Fatalf("storage substitution response=%+v", response)
 	}
+
+	notSeparated := f.grant
+	notSeparated.StoragePublicKeyHex = notSeparated.CapabilityPublicKeyHex
+	notSeparated.EndpointSignatureHex = ""
+	if _, err := attachments.SignGrant(notSeparated, f.endpointKey); err == nil {
+		t.Fatal("storage/capability key reuse accepted")
+	}
 }
 
 func TestDeterministicAttachmentAuthenticationVector(t *testing.T) {

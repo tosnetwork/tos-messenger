@@ -22,6 +22,7 @@ func TestHTTPSLocatorIsExactAndNonBearer(t *testing.T) {
 		"https://attachments/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
 		"https://attächments.example/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
 		"https://-attachments.example/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
+		"https://127.0.0.01/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
 		"https://attachments.example:443/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
 		want + "?token=bearer",
 		want + "#fragment",
