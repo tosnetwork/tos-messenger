@@ -2,6 +2,8 @@ package payload
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
@@ -381,19 +383,25 @@ func decodeArtifactReference(reader *canon.Reader) Payload {
 // an untrusted retrieval hint. The outer Event must repeat ManifestDigest in
 // attachment_references; envelope validation enforces that equality.
 type EncryptedAttachment struct {
-	ManifestDigest string
-	ReferenceJSON  []byte
-	Locator        string
-	schema         string
+	ManifestDigest               string
+	ReferenceJSON                []byte
+	Locator                      string
+	FetchGrantJSON               []byte
+	FetchCapabilityPrivateKeyHex string
+	schema                       string
 }
 
-const encryptedAttachmentV1Schema = "tos.messaging.payload.encrypted-attachment.v1"
+const (
+	encryptedAttachmentV1Schema = "tos.messaging.payload.encrypted-attachment.v1"
+	encryptedAttachmentV2Schema = "tos.messaging.payload.encrypted-attachment.v2"
+	encryptedAttachmentV3Schema = "tos.messaging.payload.encrypted-attachment.v3"
+)
 
 func (a EncryptedAttachment) Schema() string {
 	if a.schema != "" {
 		return a.schema
 	}
-	return "tos.messaging.payload.encrypted-attachment.v2"
+	return encryptedAttachmentV3Schema
 }
 
 func (a EncryptedAttachment) Validate() error {
@@ -417,18 +425,79 @@ func (a EncryptedAttachment) Validate() error {
 	if len(a.Locator) == 0 || len(a.Locator) > MaxShortTextBytes {
 		return errors.New("invalid attachment locator size")
 	}
-	_, err = attachments.ParseHTTPSLocator(a.Locator, a.ManifestDigest)
-	return err
+	if _, err = attachments.ParseHTTPSLocator(a.Locator, a.ManifestDigest); err != nil {
+		return err
+	}
+	if a.Schema() == encryptedAttachmentV2Schema {
+		if len(a.FetchGrantJSON) != 0 || a.FetchCapabilityPrivateKeyHex != "" {
+			return errors.New("historical encrypted attachment carries fetch authority")
+		}
+		return nil
+	}
+	if a.Schema() != encryptedAttachmentV3Schema {
+		return errors.New("unsupported encrypted attachment schema")
+	}
+	grant, key, err := a.FetchAccess()
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+	if grant.ManifestDigest != a.ManifestDigest || grant.CiphertextBytes != reference.Manifest.PlaintextBytes+uint64(len(reference.Manifest.ChunkDigests))*16 ||
+		grant.RetainUntilUnix != reference.Metadata.ExpiresAtUnix || len(grant.ChunkDigests) != len(reference.Manifest.ChunkDigests) {
+		return errors.New("attachment fetch grant does not match its secret reference")
+	}
+	for index, digest := range reference.Manifest.ChunkDigests {
+		if grant.ChunkDigests[index] != digest {
+			return errors.New("attachment fetch grant substituted a ciphertext object")
+		}
+	}
+	if len(grant.Operations) != 1 || grant.Operations[0] != attachments.OperationFetch {
+		return errors.New("attachment recipient grant must be fetch-only")
+	}
+	return nil
+}
+
+// FetchAccess decodes the recipient's fetch-only authority. The capability
+// private key is carried only inside application E2EE with this payload; a
+// locator remains an untrusted routing hint and can never replace it.
+func (a EncryptedAttachment) FetchAccess() (attachments.CapabilityGrant, ed25519.PrivateKey, error) {
+	if a.Schema() != encryptedAttachmentV3Schema || len(a.FetchGrantJSON) == 0 || len(a.FetchGrantJSON) > MaxOpaqueBytes {
+		return attachments.CapabilityGrant{}, nil, errors.New("encrypted attachment has no bounded v3 fetch grant")
+	}
+	grant, err := attachments.DecodeGrantJSON(a.FetchGrantJSON)
+	if err != nil {
+		return attachments.CapabilityGrant{}, nil, err
+	}
+	key, err := hex.DecodeString(a.FetchCapabilityPrivateKeyHex)
+	if err != nil || len(key) != ed25519.PrivateKeySize || hex.EncodeToString(key) != a.FetchCapabilityPrivateKeyHex {
+		return attachments.CapabilityGrant{}, nil, errors.New("invalid attachment fetch capability private key")
+	}
+	public, err := hex.DecodeString(grant.CapabilityPublicKeyHex)
+	if err != nil || !ed25519.PrivateKey(key).Public().(ed25519.PublicKey).Equal(ed25519.PublicKey(public)) {
+		clear(key)
+		return attachments.CapabilityGrant{}, nil, errors.New("attachment fetch capability key does not match its grant")
+	}
+	return grant, ed25519.PrivateKey(key), nil
 }
 
 func (a EncryptedAttachment) encode(buffer *bytes.Buffer) {
 	canon.Text(buffer, a.ManifestDigest)
 	canon.Bytes(buffer, a.ReferenceJSON)
 	canon.Text(buffer, a.Locator)
+	if a.Schema() == encryptedAttachmentV3Schema {
+		canon.Bytes(buffer, a.FetchGrantJSON)
+		canon.Text(buffer, a.FetchCapabilityPrivateKeyHex)
+	}
 }
 
 func decodeEncryptedAttachment(reader *canon.Reader) Payload {
-	return EncryptedAttachment{ManifestDigest: reader.Text(MaxDigestBytes), ReferenceJSON: reader.Bytes(MaxOpaqueBytes), Locator: reader.Text(MaxShortTextBytes)}
+	return EncryptedAttachment{ManifestDigest: reader.Text(MaxDigestBytes), ReferenceJSON: reader.Bytes(MaxOpaqueBytes), Locator: reader.Text(MaxShortTextBytes),
+		FetchGrantJSON: reader.Bytes(MaxOpaqueBytes), FetchCapabilityPrivateKeyHex: reader.Text(2 * ed25519.PrivateKeySize)}
+}
+
+func decodeEncryptedAttachmentV2(reader *canon.Reader) Payload {
+	return EncryptedAttachment{ManifestDigest: reader.Text(MaxDigestBytes), ReferenceJSON: reader.Bytes(MaxOpaqueBytes),
+		Locator: reader.Text(MaxShortTextBytes), schema: encryptedAttachmentV2Schema}
 }
 
 func decodeEncryptedAttachmentV1(reader *canon.Reader) Payload {

@@ -510,6 +510,18 @@ func validateEventFields(event Event) error {
 		if !ok || len(event.AttachmentReferences) != 1 || event.AttachmentReferences[0] != attachment.ManifestDigest {
 			return errors.New("encrypted attachment event does not name its exact manifest")
 		}
+		if event.PayloadSchema == (payload.EncryptedAttachment{}).Schema() {
+			grant, key, err := attachment.FetchAccess()
+			if err != nil {
+				return err
+			}
+			clear(key)
+			if grant.NetworkID != event.Network.NetworkId || grant.GenesisRootHash != event.Network.GenesisRootHash ||
+				grant.GenesisFileHash != event.Network.GenesisFileHash || grant.AgentID != event.SenderAgentID ||
+				grant.EndpointID != event.SenderEndpointID || grant.IssuedAtUnix > event.CreatedAtUnix {
+				return errors.New("encrypted attachment fetch authority does not match its sender Event")
+			}
+		}
 	}
 	if event.ServiceBinding != "" && !bindingPattern.MatchString(event.ServiceBinding) {
 		return errors.New("invalid event service binding")

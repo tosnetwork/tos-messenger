@@ -14,6 +14,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/internal/localwire"
+	"github.com/tosnetwork/tos-messenger/pkg/attachmentadmission"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
@@ -21,6 +22,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
@@ -52,6 +54,13 @@ type Config struct {
 	// DeviceIDs is the complete, sorted current Endpoint roster. An empty
 	// roster disables owner-authorized history export.
 	DeviceIDs []string
+	// AttachmentAdmitter is optional. When absent, encrypted attachment Events
+	// remain daemon-reserved and no runtime can obtain their secret payload.
+	AttachmentAdmitter AttachmentAdmitter
+}
+
+type AttachmentAdmitter interface {
+	Admit(context.Context, envelope.Event) (attachmentadmission.Result, error)
 }
 
 // AddressedQuoteResolver treats a runtime-supplied escrow address only as a
@@ -203,6 +212,10 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.queue(request)
 	case OpCompose:
 		return s.compose(request)
+	case OpPendingAttachments:
+		return s.pendingAttachments(request, now)
+	case OpClaimAttachment:
+		return s.claimAttachment(ctx, request, now)
 	case OpAwaitingAdmission:
 		return s.awaitingAdmission(request, now)
 	case OpAdmit:
@@ -332,7 +345,7 @@ func (s *Server) pending(request Request, now time.Time) Response {
 
 func (s *Server) claim(request Request, now time.Time) Response {
 	record, err := s.config.Journal.ClaimForApplicationExceptKinds(request.EventID, request.LeaseID, now,
-		time.Duration(request.LeaseSeconds)*time.Second, []string{"agent.packet", "device.history.segment"})
+		time.Duration(request.LeaseSeconds)*time.Second, []string{"agent.packet", "device.history.segment", "artifact.encrypted"})
 	if err != nil {
 		return refuse(claimCode(err), err)
 	}
@@ -344,7 +357,74 @@ func (s *Server) claim(request Request, now time.Time) Response {
 }
 
 func daemonApplicationKind(kind string) bool {
-	return kind == "agent.packet" || kind == "device.history.segment"
+	return kind == "agent.packet" || kind == "device.history.segment" || kind == "artifact.encrypted"
+}
+
+func (s *Server) pendingAttachments(request Request, now time.Time) Response {
+	if s.config.AttachmentAdmitter == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("attachment admission is not configured"))
+	}
+	limit := request.Limit
+	if limit == 0 || limit > MaxEventsPerResponse {
+		limit = MaxEventsPerResponse
+	}
+	records, err := s.config.Journal.ListPending(now, 0)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	offers := make([]PendingAttachment, 0, len(records))
+	for _, record := range records {
+		pending, pendingErr := pendingEvent(record)
+		if pendingErr != nil {
+			continue
+		}
+		event, decodeErr := envelope.DecodeEventJSON(pending.Event)
+		if decodeErr != nil || event.Kind != "artifact.encrypted" ||
+			event.PayloadSchema != (payload.EncryptedAttachment{}).Schema() {
+			continue
+		}
+		offers = append(offers, PendingAttachment{EventID: pending.EventID, SenderEndpointID: pending.SenderEndpointID,
+			ConversationID: pending.ConversationID, ReceivedAtUnix: pending.ReceivedAtUnix})
+		if len(offers) == limit {
+			break
+		}
+	}
+	return Response{OK: true, Attachments: offers}
+}
+
+func (s *Server) claimAttachment(ctx context.Context, request Request, now time.Time) Response {
+	if s.config.AttachmentAdmitter == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("attachment admission is not configured"))
+	}
+	record, err := s.config.Journal.ClaimForApplicationKind(request.EventID, request.LeaseID, now,
+		time.Duration(request.LeaseSeconds)*time.Second, "artifact.encrypted")
+	if err != nil {
+		return refuse(claimCode(err), err)
+	}
+	raw, err := record.Payload()
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	event, err := envelope.DecodeEventJSON(raw)
+	if err != nil || event.EventID != record.EventID || event.SenderEndpointID != record.SenderEndpointID ||
+		event.ConversationID != record.ConversationID || event.PayloadSchema != (payload.EncryptedAttachment{}).Schema() {
+		return refuse(fault.CodeNotAuthentic, errors.New("stored attachment Event conflicts with its journal binding"))
+	}
+	admitted, err := s.config.AttachmentAdmitter.Admit(ctx, event)
+	if err != nil {
+		return refuse(fault.CodeInternal, errors.New("attachment admission failed: "+err.Error()))
+	}
+	scans := make([]AttachmentScan, 0, len(admitted.Report.Scans))
+	for _, scan := range admitted.Report.Scans {
+		scans = append(scans, AttachmentScan{ScannerID: scan.ScannerID, ScannerDigest: scan.ScannerDigest})
+	}
+	return Response{OK: true, Attachment: &AdmittedAttachment{EventID: event.EventID,
+		SenderAgentID: event.SenderAgentID, SenderEndpointID: event.SenderEndpointID,
+		SenderDeviceID: event.SenderDeviceID, ConversationID: event.ConversationID, RoomID: event.RoomID,
+		ReplyToEventID: event.ReplyToEventID, ReceivedAtUnix: record.ReceivedAtUnix,
+		Filename: admitted.Metadata.Filename, MediaType: admitted.Metadata.MediaType,
+		PlaintextDigest: admitted.Report.PlaintextDigest, SizeBytes: admitted.Report.SizeBytes,
+		Body: admitted.Body, Scans: scans}}
 }
 
 func (s *Server) complete(request Request, now time.Time) Response {

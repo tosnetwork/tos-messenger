@@ -3,6 +3,7 @@ package envelope
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -328,11 +329,31 @@ func TestEncryptedAttachmentEventBindsOuterManifestReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := payload.Encode(payload.EncryptedAttachment{ManifestDigest: manifestDigest, ReferenceJSON: referenceJSON, Locator: locator})
+	event := testEvent(t)
+	endpointKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x31}, ed25519.SeedSize))
+	storageKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x32}, ed25519.SeedSize))
+	capabilityKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x33}, ed25519.SeedSize))
+	grant, err := attachments.SignGrant(attachments.CapabilityGrant{NetworkID: event.Network.NetworkId,
+		GenesisRootHash: event.Network.GenesisRootHash, GenesisFileHash: event.Network.GenesisFileHash,
+		AgentID: event.SenderAgentID, EndpointID: event.SenderEndpointID,
+		StoragePublicKeyHex:    hex.EncodeToString(storageKey.Public().(ed25519.PublicKey)),
+		CapabilityPublicKeyHex: hex.EncodeToString(capabilityKey.Public().(ed25519.PublicKey)),
+		ManifestDigest:         manifestDigest, ChunkDigests: append([]string(nil), ref.Manifest.ChunkDigests...),
+		CiphertextBytes: uint64(len(plaintext) + 16), RetainUntilUnix: ref.Metadata.ExpiresAtUnix,
+		Operations: []attachments.Operation{attachments.OperationFetch}, IssuedAtUnix: baseUnix,
+		ExpiresAtUnix: ref.Metadata.ExpiresAtUnix}, endpointKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	event := testEvent(t)
+	grantJSON, err := attachments.EncodeGrantJSON(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := payload.Encode(payload.EncryptedAttachment{ManifestDigest: manifestDigest, ReferenceJSON: referenceJSON, Locator: locator,
+		FetchGrantJSON: grantJSON, FetchCapabilityPrivateKeyHex: hex.EncodeToString(capabilityKey)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	event.Kind = "artifact.encrypted"
 	event.PayloadSchema = ""
 	event.Content = body
@@ -340,6 +361,32 @@ func TestEncryptedAttachmentEventBindsOuterManifestReference(t *testing.T) {
 	if _, err := NewEvent(event); err != nil {
 		t.Fatalf("valid encrypted attachment event: %v", err)
 	}
+	t.Run("sender binding", func(t *testing.T) {
+		changedGrant := grant
+		changedGrant.AgentID = "agent_" + strings.Repeat("f", 64)
+		changedGrantJSON, encodeErr := attachments.EncodeGrantJSON(changedGrant)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		changedBody, encodeErr := payload.Encode(payload.EncryptedAttachment{ManifestDigest: manifestDigest,
+			ReferenceJSON: referenceJSON, Locator: locator, FetchGrantJSON: changedGrantJSON,
+			FetchCapabilityPrivateKeyHex: hex.EncodeToString(capabilityKey)})
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		changed := event
+		changed.Content = changedBody
+		if _, encodeErr := NewEvent(changed); encodeErr == nil {
+			t.Fatal("attachment fetch grant for another sender was accepted")
+		}
+	})
+	t.Run("issuance after Event", func(t *testing.T) {
+		changed := event
+		changed.CreatedAtUnix = baseUnix - 1
+		if _, encodeErr := NewEvent(changed); encodeErr == nil {
+			t.Fatal("attachment Event predating its fetch grant was accepted")
+		}
+	})
 	legacySchema := "tos.messaging.payload.encrypted-attachment.v1"
 	legacyBody := bytes.NewBufferString(canon.DomainPayload + legacySchema + "\x00")
 	canon.Text(legacyBody, manifestDigest)

@@ -21,6 +21,8 @@ import (
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/admission"
+	"github.com/tosnetwork/tos-messenger/pkg/attachmentapi"
+	"github.com/tosnetwork/tos-messenger/pkg/attachments"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
@@ -33,7 +35,7 @@ import (
 )
 
 // ConfigSchema is the strict schema of a daemon configuration.
-const ConfigSchema = "tos.messaging.daemon-config.v7"
+const ConfigSchema = "tos.messaging.daemon-config.v8"
 
 // PublicationMode names the route-independent public material maintained by
 // this installation. It does not select an HTTPS, DHT, or message transport.
@@ -180,9 +182,88 @@ type Config struct {
 	AgentPacketReceiverSocket         string `json:"agent_packet_receiver_socket,omitempty"`
 	AgentPacketReceiverTimeoutSeconds uint64 `json:"agent_packet_receiver_timeout_seconds,omitempty"`
 
+	// AttachmentAdmission enables daemon-owned fetch, AEAD opening and pinned
+	// scanning. When absent, artifact.encrypted stays reserved and no secret
+	// Reference or capability key is released through the runtime socket.
+	AttachmentAdmission *AttachmentAdmissionConfig `json:"attachment_admission,omitempty"`
+
 	SweepIntervalSeconds       uint64 `json:"sweep_interval_seconds,omitempty"`
 	MaintenanceIntervalSeconds uint64 `json:"maintenance_interval_seconds,omitempty"`
 	RetentionSeconds           uint64 `json:"retention_seconds,omitempty"`
+}
+
+type AttachmentScannerConfig struct {
+	ID               string   `json:"id"`
+	Executable       string   `json:"executable"`
+	ExecutableDigest string   `json:"executable_digest"`
+	Args             []string `json:"args,omitempty"`
+}
+
+type AttachmentAdmissionConfig struct {
+	MaxPlaintextBytes          uint64                    `json:"max_plaintext_bytes"`
+	AllowedMediaTypes          []string                  `json:"allowed_media_types"`
+	Scanners                   []AttachmentScannerConfig `json:"scanners"`
+	BubblewrapDigest           string                    `json:"bubblewrap_digest"`
+	PrlimitDigest              string                    `json:"prlimit_digest"`
+	ScannerTimeoutSeconds      uint64                    `json:"scanner_timeout_seconds,omitempty"`
+	AddressSpaceBytes          uint64                    `json:"address_space_bytes,omitempty"`
+	CPUSeconds                 uint64                    `json:"cpu_seconds,omitempty"`
+	MaxProcesses               uint64                    `json:"max_processes,omitempty"`
+	HTTPSRequestTimeoutSeconds uint64                    `json:"https_request_timeout_seconds,omitempty"`
+	HTTPSConnectTimeoutSeconds uint64                    `json:"https_connect_timeout_seconds,omitempty"`
+}
+
+func (a AttachmentAdmissionConfig) Policies() (attachments.Policy, attachments.AgentContentPolicy, attachmentapi.HTTPSConfig, error) {
+	// The admitted plaintext is eventually projected into an Event-sized
+	// OpenFox input. Refuse a larger operator promise here, during offline
+	// configuration validation, rather than discovering the mismatch after a
+	// remote object has already been fetched and opened.
+	if a.MaxPlaintextBytes == 0 || a.MaxPlaintextBytes > envelope.MaxContentBytes {
+		return attachments.Policy{}, attachments.AgentContentPolicy{}, attachmentapi.HTTPSConfig{},
+			errors.New("attachment admission max_plaintext_bytes must be within the Event content bound")
+	}
+	if len(a.AllowedMediaTypes) == 0 || !sort.StringsAreSorted(a.AllowedMediaTypes) {
+		return attachments.Policy{}, attachments.AgentContentPolicy{}, attachmentapi.HTTPSConfig{},
+			errors.New("attachment admission media types must be non-empty and sorted")
+	}
+	allowed := make(map[string]struct{}, len(a.AllowedMediaTypes))
+	for index, mediaType := range a.AllowedMediaTypes {
+		if index > 0 && a.AllowedMediaTypes[index-1] == mediaType {
+			return attachments.Policy{}, attachments.AgentContentPolicy{}, attachmentapi.HTTPSConfig{},
+				errors.New("attachment admission media types must be unique")
+		}
+		allowed[mediaType] = struct{}{}
+	}
+	scanners := make([]attachments.ScannerSpec, len(a.Scanners))
+	for index, scanner := range a.Scanners {
+		scanners[index] = attachments.ScannerSpec{ID: scanner.ID, Executable: scanner.Executable,
+			ExecutableDigest: scanner.ExecutableDigest, Args: append([]string(nil), scanner.Args...)}
+	}
+	content := attachments.AgentContentPolicy{MaxPlaintextBytes: a.MaxPlaintextBytes,
+		AllowedMediaTypes: allowed, Scanners: scanners, BubblewrapDigest: a.BubblewrapDigest,
+		PrlimitDigest: a.PrlimitDigest, ScannerTimeout: time.Duration(a.ScannerTimeoutSeconds) * time.Second,
+		AddressSpaceBytes: a.AddressSpaceBytes, CPUSeconds: a.CPUSeconds, MaxProcesses: a.MaxProcesses}
+	if err := attachments.ValidateAgentContentPolicy(content); err != nil {
+		return attachments.Policy{}, attachments.AgentContentPolicy{}, attachmentapi.HTTPSConfig{}, err
+	}
+	if _, ok := allowed["text/plain"]; !ok {
+		return attachments.Policy{}, attachments.AgentContentPolicy{}, attachmentapi.HTTPSConfig{},
+			errors.New("OpenFox attachment admission currently requires text/plain")
+	}
+	requestTimeout := time.Duration(a.HTTPSRequestTimeoutSeconds) * time.Second
+	connectTimeout := time.Duration(a.HTTPSConnectTimeoutSeconds) * time.Second
+	if requestTimeout == 0 {
+		requestTimeout = attachmentapi.DefaultTimeout
+	}
+	if connectTimeout == 0 {
+		connectTimeout = 5 * time.Second
+	}
+	if requestTimeout < time.Second || requestTimeout > 5*time.Minute || connectTimeout < time.Second || connectTimeout > time.Minute {
+		return attachments.Policy{}, attachments.AgentContentPolicy{}, attachmentapi.HTTPSConfig{},
+			errors.New("attachment HTTPS timeout is outside its bound")
+	}
+	return attachments.Policy{MaxPlaintextBytes: a.MaxPlaintextBytes, AllowedMediaTypes: allowed}, content,
+		attachmentapi.HTTPSConfig{RequestTimeout: requestTimeout, ConnectTimeout: connectTimeout}, nil
 }
 
 // AdmissionConfig is the daemon-owned form of the inbox policy and its
@@ -664,6 +745,11 @@ func (c Config) Validate() error {
 		}
 		if timeout := c.AgentPacketReceiverTimeout(); timeout < time.Second || timeout > 5*time.Minute {
 			return errors.New("Agent Packet receiver timeout is outside 1s..5m")
+		}
+	}
+	if c.AttachmentAdmission != nil {
+		if _, _, _, err := c.AttachmentAdmission.Policies(); err != nil {
+			return err
 		}
 	}
 	if c.SweepInterval() < MinSweepInterval {

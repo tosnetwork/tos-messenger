@@ -195,7 +195,7 @@ misspelled setting that is silently dropped is a setting an operator believes
 is in force.
 
 `docs/daemon-config.example.json` is a complete file with placeholder values.
-Finalized Quote verification makes this schema `tos.messaging.daemon-config.v7`;
+Finalized Quote verification is retained in schema `tos.messaging.daemon-config.v8`;
 older files are rejected instead of silently disabling discovery or public
 generation planning, applying an inbox policy the endpoint never committed, or
 leaving the native buyer without its finalized-Quote check.
@@ -266,9 +266,31 @@ the pin. Scanner files must be regular, executable, non-writable and not
 symlinks.
 
 `tos-attachment-text-scanner` is a parser-free reference inspector, not a
-production malware product. It refuses every non-text type. OpenFox does not
-yet fetch or consume `artifact.encrypted`, so this boundary is reference
-Messenger integration rather than a completed OpenFox attachment feature.
+production malware product. It refuses every non-text type. To enable the
+daemon-owned OpenFox path, add the following to daemon config v8 after replacing
+all three digest placeholders with the reviewed lowercase `sha256:` values:
+
+```json
+"attachment_admission": {
+  "max_plaintext_bytes": 131072,
+  "allowed_media_types": ["text/plain"],
+  "scanners": [{
+    "id": "reference-text",
+    "executable": "/usr/local/libexec/tos-attachment-text-scanner",
+    "executable_digest": "sha256:<scanner>"
+  }],
+  "bubblewrap_digest": "sha256:<bubblewrap>",
+  "prlimit_digest": "sha256:<prlimit>",
+  "scanner_timeout_seconds": 30,
+  "https_request_timeout_seconds": 30,
+  "https_connect_timeout_seconds": 5
+}
+```
+
+Startup re-hashes every configured executable before opening the runtime
+socket. OpenFox's `tos_messenger` settings must set
+`"enable_attachments": true`; it then uses local request v4/response v2 and
+receives only admitted `text/plain`, never the Reference or fetch key.
 Production deployment still needs a reviewed scanner selection and corpus,
 hard resource isolation where required, and independently operated evidence.
 

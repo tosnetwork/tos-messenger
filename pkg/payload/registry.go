@@ -39,7 +39,8 @@ var codecs = map[string]codec{
 	"artifact.offer":     {schema: ArtifactOffer{}.Schema(), decode: decodeArtifactOffer},
 	"artifact.reference": {schema: ArtifactReference{}.Schema(), decode: decodeArtifactReference},
 	"artifact.encrypted": {schema: EncryptedAttachment{}.Schema(), decode: decodeEncryptedAttachment,
-		legacy: map[string]func(*canon.Reader) Payload{encryptedAttachmentV1Schema: decodeEncryptedAttachmentV1}},
+		legacy: map[string]func(*canon.Reader) Payload{encryptedAttachmentV1Schema: decodeEncryptedAttachmentV1,
+			encryptedAttachmentV2Schema: decodeEncryptedAttachmentV2}},
 
 	"service.quote.reference":   {schema: QuoteReference{}.Schema(), decode: decodeQuoteReference},
 	"service.escrow.reference":  {schema: EscrowReference{}.Schema(), decode: decodeEscrowReference},
