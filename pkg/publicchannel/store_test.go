@@ -147,7 +147,7 @@ func committedStoreFixture(t *testing.T) (*Store, Profile, identity.Delegation, 
 	return store, profile, authority, delegations, event
 }
 
-func storeFixture(t *testing.T) (Profile, identity.Delegation, ed25519.PrivateKey, identity.Delegation, ed25519.PrivateKey, map[string]identity.Delegation) {
+func storeFixture(t testing.TB) (Profile, identity.Delegation, ed25519.PrivateKey, identity.Delegation, ed25519.PrivateKey, map[string]identity.Delegation) {
 	t.Helper()
 	network := channelNetwork()
 	authority, authorityKey := channelDelegation(t, network, 'a')

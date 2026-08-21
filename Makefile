@@ -1,4 +1,4 @@
-.PHONY: verify fmt-check vet test-race test-openmls test-storage-live build
+.PHONY: verify fmt-check vet test-race test-openmls test-storage-live calibrate-public-channel build
 
 verify: fmt-check vet test-race test-adnl test-openmls build
 
@@ -28,6 +28,11 @@ test-openmls:
 test-storage-live:
 	@test -n "$$TOS_STORAGE_LIVE_DAEMON" -a -n "$$TOS_STORAGE_LIVE_CLI" -a -n "$$TOS_STORAGE_LIVE_KEY_TOOL" -a -n "$$TOS_STORAGE_LIVE_GLOBAL_CONFIG" || { echo "set TOS_STORAGE_LIVE_DAEMON, TOS_STORAGE_LIVE_CLI, TOS_STORAGE_LIVE_KEY_TOOL, and TOS_STORAGE_LIVE_GLOBAL_CONFIG"; exit 1; }
 	GOWORK=off go test -count=1 -run TestStorageCLILiveTwoDaemonCatchUp -v ./pkg/publicchannel
+
+# Opt-in, single-core resource evidence. The protocol-maximum Storage cases
+# create and verify 65,536 immutable Event files and can take several minutes.
+calibrate-public-channel:
+	GOMAXPROCS=1 GOWORK=off go test -run '^$$' -bench 'BenchmarkPublicChannel' -benchmem -benchtime=1x -count=1 ./pkg/publicchannel
 
 build:
 	GOWORK=off go build ./...

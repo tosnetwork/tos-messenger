@@ -20,6 +20,136 @@ const (
 
 var ErrSyncStalled = errors.New("public channel synchronization cannot discover the claimed history")
 
+// FetchCursor incrementally walks one untrusted head. It avoids rebuilding and
+// sorting the complete known Event set after every bounded fetch response.
+// The cursor grants no validity: VerifySyncedHistory remains mandatory after
+// it has discovered the claimed count.
+type FetchCursor struct {
+	head    Head
+	known   map[string]Event
+	pending map[string]struct{}
+}
+
+func NewFetchCursor(head Head, known []Event) (*FetchCursor, error) {
+	if err := validateHead(head); err != nil || len(known) > int(head.EventCount) {
+		return nil, errors.New("invalid public channel fetch cursor")
+	}
+	cursor := &FetchCursor{head: cloneHead(head), known: make(map[string]Event, len(known)),
+		pending: make(map[string]struct{}, len(head.Tips))}
+	for _, tip := range head.Tips {
+		cursor.pending[tip] = struct{}{}
+	}
+	for _, event := range known {
+		id, err := event.ID()
+		if err != nil {
+			return nil, err
+		}
+		if err := cursor.add(event, id); err != nil {
+			return nil, err
+		}
+	}
+	return cursor, nil
+}
+
+func (c *FetchCursor) Next() (FetchRequest, bool, error) {
+	if c == nil || validateHead(c.head) != nil || len(c.known) > int(c.head.EventCount) {
+		return FetchRequest{}, false, errors.New("invalid public channel fetch cursor")
+	}
+	if len(c.known) == int(c.head.EventCount) {
+		return FetchRequest{}, false, nil
+	}
+	ids := make([]string, 0, len(c.pending))
+	for id := range c.pending {
+		if _, found := c.known[id]; !found {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return FetchRequest{}, false, ErrSyncStalled
+	}
+	if len(ids) > MaxFetchEvents {
+		ids = ids[:MaxFetchEvents]
+	}
+	return FetchRequest{Schema: FetchRequestSchema, ChannelID: c.head.ChannelID,
+		ProfileDigest: c.head.ProfileDigest, EventIDs: ids}, true, nil
+}
+
+func (c *FetchCursor) Merge(fetched []Event) error {
+	if c == nil || len(fetched) == 0 || len(fetched) > MaxFetchEvents {
+		return errors.New("invalid public channel fetch-cursor merge")
+	}
+	if len(c.known)+len(fetched) > int(c.head.EventCount) {
+		return errors.New("public channel fetch cursor exceeds claimed Event count")
+	}
+	ids := make([]string, len(fetched))
+	seen := make(map[string]struct{}, len(fetched))
+	for index, event := range fetched {
+		if event.ChannelID != c.head.ChannelID || event.ProfileDigest != c.head.ProfileDigest {
+			return errors.New("public channel fetch-cursor Event is bound to another head")
+		}
+		id, err := event.ID()
+		if err != nil {
+			return err
+		}
+		if _, duplicate := c.known[id]; duplicate {
+			return errors.New("duplicate public channel fetch-cursor Event")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return errors.New("duplicate public channel fetch-cursor Event")
+		}
+		if _, requested := c.pending[id]; !requested {
+			return errors.New("public channel fetch cursor received an unrequested Event")
+		}
+		seen[id] = struct{}{}
+		ids[index] = id
+	}
+	for index, event := range fetched {
+		if err := c.add(event, ids[index]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *FetchCursor) Events() []Event {
+	if c == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(c.known))
+	for id := range c.known {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	events := make([]Event, 0, len(ids))
+	for _, id := range ids {
+		events = append(events, cloneEvent(c.known[id]))
+	}
+	return events
+}
+
+func (c *FetchCursor) add(event Event, id string) error {
+	if event.ChannelID != c.head.ChannelID || event.ProfileDigest != c.head.ProfileDigest {
+		return errors.New("public channel fetch-cursor Event is bound to another head")
+	}
+	if _, duplicate := c.known[id]; duplicate {
+		return errors.New("duplicate public channel fetch-cursor Event")
+	}
+	c.known[id] = cloneEvent(event)
+	delete(c.pending, id)
+	for _, parent := range event.Parents {
+		if _, found := c.known[parent]; !found {
+			c.pending[parent] = struct{}{}
+		}
+	}
+	if event.TargetEventID != "" {
+		if _, found := c.known[event.TargetEventID]; !found {
+			c.pending[event.TargetEventID] = struct{}{}
+		}
+	}
+	return nil
+}
+
 type FetchRequest struct {
 	Schema        string   `json:"schema"`
 	ChannelID     string   `json:"channel_id"`
@@ -39,55 +169,11 @@ type fetchResponse struct {
 // causal IDs. A head that claims more Events but exposes no next ID fails
 // instead of granting a Relay completeness authority.
 func NextFetch(head Head, known []Event) (FetchRequest, bool, error) {
-	if err := validateHead(head); err != nil {
-		return FetchRequest{}, false, err
-	}
-	if len(known) > int(head.EventCount) {
-		return FetchRequest{}, false, errors.New("public channel sync exceeds the claimed Event count")
-	}
-	knownIDs := make(map[string]struct{}, len(known))
-	for _, event := range known {
-		if event.ChannelID != head.ChannelID || event.ProfileDigest != head.ProfileDigest {
-			return FetchRequest{}, false, errors.New("public channel sync Event is bound to another head")
-		}
-		id, err := event.ID()
-		if err != nil {
-			return FetchRequest{}, false, err
-		}
-		if _, duplicate := knownIDs[id]; duplicate {
-			return FetchRequest{}, false, errors.New("duplicate public channel sync Event")
-		}
-		knownIDs[id] = struct{}{}
-	}
-	if len(known) == int(head.EventCount) {
-		return FetchRequest{}, false, nil
-	}
-	wanted := map[string]struct{}{}
-	for _, tip := range head.Tips {
-		if _, found := knownIDs[tip]; !found {
-			wanted[tip] = struct{}{}
-		}
-	}
-	missing, err := MissingReferences(known)
+	cursor, err := NewFetchCursor(head, known)
 	if err != nil {
 		return FetchRequest{}, false, err
 	}
-	for _, id := range missing {
-		wanted[id] = struct{}{}
-	}
-	ids := make([]string, 0, len(wanted))
-	for id := range wanted {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	if len(ids) == 0 {
-		return FetchRequest{}, false, ErrSyncStalled
-	}
-	if len(ids) > MaxFetchEvents {
-		ids = ids[:MaxFetchEvents]
-	}
-	return FetchRequest{Schema: FetchRequestSchema, ChannelID: head.ChannelID,
-		ProfileDigest: head.ProfileDigest, EventIDs: ids}, true, nil
+	return cursor.Next()
 }
 
 func EncodeFetchRequestJSON(request FetchRequest) ([]byte, error) {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -134,4 +135,147 @@ func TestPublicChannelSyncRefusesPartitionAndCompletenessSubstitution(t *testing
 	if err := VerifyFetchedEvents(profile, []Event{forged}, authority, delegations, now); err == nil {
 		t.Fatal("fetched publisher-signature substitution verified")
 	}
+}
+
+func TestFetchCursorIncrementallyWalksCausalHistory(t *testing.T) {
+	profile, authority, authorityKey, publisher, publisherKey, delegations := storeFixture(t)
+	digest, _ := profile.Digest()
+	first := signedPost(t, profile, digest, publisher, publisherKey, 1, "", nil, channelNow, "cursor root")
+	firstID, _ := first.ID()
+	hide, err := SignEvent(Event{ChannelID: profile.ChannelID, ProfileDigest: digest,
+		PublisherAgentID: authority.AgentID, PublisherEndpointID: authority.EndpointID,
+		Sequence: 1, Parents: []string{firstID}, PublishedAtUnix: channelNow + 1,
+		Kind: KindHide, TargetEventID: firstID}, authorityKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hideID, _ := hide.ID()
+	now := time.Unix(int64(channelNow+2), 0)
+	want, err := VerifyHistory(profile, []Event{hide, first}, authority, delegations, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := NewFetchCursor(want.Head(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, needed, err := cursor.Next()
+	if err != nil || !needed || len(request.EventIDs) != 1 || request.EventIDs[0] != hideID {
+		t.Fatalf("initial cursor request: %+v needed=%v err=%v", request, needed, err)
+	}
+	if err := cursor.Merge([]Event{hide}); err != nil {
+		t.Fatal(err)
+	}
+	request, needed, err = cursor.Next()
+	if err != nil || !needed || len(request.EventIDs) != 1 || request.EventIDs[0] != firstID {
+		t.Fatalf("parent cursor request: %+v needed=%v err=%v", request, needed, err)
+	}
+	if err := cursor.Merge([]Event{first}); err != nil {
+		t.Fatal(err)
+	}
+	if _, needed, err = cursor.Next(); err != nil || needed {
+		t.Fatalf("complete cursor requested more Events: needed=%v err=%v", needed, err)
+	}
+	got, err := VerifySyncedHistory(want.Head(), profile, cursor.Events(), authority, delegations, now)
+	if err != nil || got.Digest() != want.Digest() {
+		t.Fatalf("cursor history mismatch: digest=%q err=%v", got.Digest(), err)
+	}
+}
+
+func TestFetchCursorRefusesUnsolicitedDuplicateAndFalseHead(t *testing.T) {
+	profile, authority, authorityKey, publisher, publisherKey, delegations := storeFixture(t)
+	digest, _ := profile.Digest()
+	first := signedPost(t, profile, digest, publisher, publisherKey, 1, "", nil, channelNow, "cursor root")
+	firstID, _ := first.ID()
+	hide, err := SignEvent(Event{ChannelID: profile.ChannelID, ProfileDigest: digest,
+		PublisherAgentID: authority.AgentID, PublisherEndpointID: authority.EndpointID,
+		Sequence: 1, Parents: []string{firstID}, PublishedAtUnix: channelNow + 1,
+		Kind: KindHide, TargetEventID: firstID}, authorityKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(int64(channelNow+2), 0)
+	history, err := VerifyHistory(profile, []Event{first, hide}, authority, delegations, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("unsolicited", func(t *testing.T) {
+		cursor, err := NewFetchCursor(history.Head(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cursor.Merge([]Event{first}); err == nil {
+			t.Fatal("cursor accepted an Event that was not requested")
+		}
+		if err := cursor.Merge([]Event{hide, first}); err == nil {
+			t.Fatal("cursor accepted a batch containing an unrequested Event")
+		}
+		request, needed, err := cursor.Next()
+		if err != nil || !needed {
+			t.Fatalf("rejected batch mutated cursor: request=%+v needed=%v err=%v", request, needed, err)
+		}
+		hideID, _ := hide.ID()
+		if len(request.EventIDs) != 1 || request.EventIDs[0] != hideID {
+			t.Fatalf("rejected batch changed pending IDs: %+v", request.EventIDs)
+		}
+	})
+
+	t.Run("duplicate", func(t *testing.T) {
+		cursor, err := NewFetchCursor(history.Head(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cursor.Merge([]Event{hide}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cursor.Merge([]Event{hide}); err == nil {
+			t.Fatal("cursor accepted a duplicate fetched Event")
+		}
+	})
+
+	t.Run("wrong binding", func(t *testing.T) {
+		cursor, err := NewFetchCursor(history.Head(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrong := hide
+		wrong.ProfileDigest = "sha256:" + strings.Repeat("0", 64)
+		if err := cursor.Merge([]Event{wrong}); err == nil {
+			t.Fatal("cursor accepted an Event bound to another head")
+		}
+	})
+
+	t.Run("count overflow", func(t *testing.T) {
+		falseHead := history.Head()
+		falseHead.EventCount = 1
+		cursor, err := NewFetchCursor(falseHead, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cursor.Merge([]Event{hide}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cursor.Merge([]Event{first}); err == nil {
+			t.Fatal("cursor exceeded the head's claimed Event count")
+		}
+	})
+
+	t.Run("stalled false head", func(t *testing.T) {
+		falseHead := history.Head()
+		falseHead.EventCount++
+		cursor, err := NewFetchCursor(falseHead, history.Events())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := cursor.Next(); !errors.Is(err, ErrSyncStalled) {
+			t.Fatalf("false head error = %v", err)
+		}
+	})
+
+	t.Run("duplicate known", func(t *testing.T) {
+		if _, err := NewFetchCursor(history.Head(), []Event{first, first}); err == nil {
+			t.Fatal("cursor accepted duplicate known Events")
+		}
+	})
 }

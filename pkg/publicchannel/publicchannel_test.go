@@ -204,7 +204,7 @@ func TestPublicChannelProfileAndEventsFailClosed(t *testing.T) {
 	}
 }
 
-func signedPost(t *testing.T, profile Profile, digest string, publisher identity.Delegation, key ed25519.PrivateKey,
+func signedPost(t testing.TB, profile Profile, digest string, publisher identity.Delegation, key ed25519.PrivateKey,
 	sequence uint64, previous string, parents []string, published uint64, content string) Event {
 	t.Helper()
 	event, err := SignEvent(Event{ChannelID: profile.ChannelID, ProfileDigest: digest,
@@ -231,7 +231,7 @@ func channelNetwork() *nativev1.NetworkDomain {
 	return &nativev1.NetworkDomain{NetworkId: "tos-public-test", GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)}
 }
 
-func channelDelegation(t *testing.T, network *nativev1.NetworkDomain, marker byte) (identity.Delegation, ed25519.PrivateKey) {
+func channelDelegation(t testing.TB, network *nativev1.NetworkDomain, marker byte) (identity.Delegation, ed25519.PrivateKey) {
 	t.Helper()
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{marker}, ed25519.SeedSize))
 	agentID := "agent_" + strings.Repeat(string(marker), 64)

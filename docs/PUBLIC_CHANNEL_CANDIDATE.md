@@ -67,7 +67,11 @@ Fetched Events independently recheck the finalized profile, publisher
 delegation, role and signature before joining local staging.
 
 Synchronization begins with the untrusted head's tips, then recursively asks
-for exact missing causal parents. Exact response replay merges idempotently. A
+for exact missing causal parents. `NativeNode` retains one incremental
+`FetchCursor` for the attempt rather than rebuilding and sorting the complete
+known set after every response. The cursor atomically refuses duplicates,
+unsolicited IDs, wrong bindings and count overflow, but grants no authority.
+Exact compatibility-path response replay merges idempotently. A
 claimed Event count with no discoverable tip/parent fails as a stalled/dishonest
 head. Only `VerifySyncedHistory` over the complete bounded set, followed by an
 exact derived-head match, permits the durable store to commit it. This protocol
@@ -88,8 +92,12 @@ Heads are ordered for fetch work by distinct-peer support and then a stable
 digest tie-break. This grants neither validity nor commit authority: even a
 many-peer candidate must reproduce through `VerifySyncedHistory`. The guard
 contains transport noise without adding unmeasured PoW, stake or payment rules,
-and authorized publication remains governed by the finalized profile. Default
-calibration against the real M0-R carrier and abuse measurements is still open.
+and authorized publication remains governed by the finalized profile. Local
+single-core history, cursor and Storage-snapshot calibration now covers 1 to
+65,536 Events in
+[`PUBLIC_CHANNEL_CALIBRATION_2026-08-21.md`](evidence/PUBLIC_CHANNEL_CALIBRATION_2026-08-21.md).
+Representative low-cost hardware, concurrent peers, the real M0-R carrier and
+abuse measurements are still required before production defaults are frozen.
 
 ## Native TOS Overlay/RLDP carrier
 
@@ -238,7 +246,9 @@ derived history matches them.
 
 ## Explicitly still open
 
-- measured production calibration of the candidate peer/resource limits;
+- representative-device and multi-peer production calibration of the
+  candidate peer/resource limits (local protocol-maximum computation and
+  snapshot measurements are recorded);
 - live independently operated/public-network Storage and
   convergence/failover evidence;
 - independent vector consumption/review and a second implementation.

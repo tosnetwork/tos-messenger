@@ -496,9 +496,13 @@ func (n *NativeNode) syncHead(peerID string, head Head) {
 	}()
 	ctx, cancel := context.WithTimeout(n.syncContext, 5*time.Minute)
 	defer cancel()
-	var known []Event
+	cursor, err := NewFetchCursor(head, nil)
+	if err != nil {
+		n.log("public channel sync cursor rejected peer=%s: %v", peerID, err)
+		return
+	}
 	for {
-		request, needed, err := NextFetch(head, known)
+		request, needed, err := cursor.Next()
 		if err != nil {
 			n.log("public channel sync rejected peer=%s: %v", peerID, err)
 			return
@@ -511,12 +515,12 @@ func (n *NativeNode) syncHead(peerID string, head Head) {
 			n.log("public channel sync incomplete peer=%s unavailable=%d err=%v", peerID, len(unavailable), err)
 			return
 		}
-		known, err = MergeFetchedEvents(known, fetched)
-		if err != nil {
+		if err = cursor.Merge(fetched); err != nil {
 			n.log("public channel sync merge rejected peer=%s: %v", peerID, err)
 			return
 		}
 	}
+	known := cursor.Events()
 	if _, err := VerifySyncedHistory(head, n.profile, known, n.authority, n.delegations, n.now()); err != nil {
 		n.log("public channel sync head did not reproduce peer=%s: %v", peerID, err)
 		return
