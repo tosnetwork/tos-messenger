@@ -155,6 +155,11 @@ func TestOpenMLSSidecarIntegrationThreeMemberRestartChat(t *testing.T) {
 	if err != nil || string(plaintext) != "Charlie replies to the founder" {
 		t.Fatalf("founder did not receive reply: %q %v", plaintext, err)
 	}
+	aliceState, beforeReplacement, err := driver.Seal(aliceState, aad,
+		[]byte("room history before Charlie replaces the device"))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	charlieV2, err := driver.NewIdentity([]byte("charlie-authority-v2"))
 	if err != nil {
@@ -179,6 +184,9 @@ func TestOpenMLSSidecarIntegrationThreeMemberRestartChat(t *testing.T) {
 	charlieV2State, err := driver.Join(charlieV2.State, replacementWelcomes[charlieV2Ref])
 	if err != nil {
 		t.Fatalf("new Charlie join: %v", err)
+	}
+	if _, _, err := driver.Open(charlieV2State, aad, beforeReplacement); err == nil {
+		t.Fatal("replacement device decrypted pre-replacement room history")
 	}
 	charlieV2State, reply, err = driver.Seal(charlieV2State, aad, []byte("replacement device is live"))
 	if err != nil {

@@ -142,6 +142,21 @@ Relay roots for conversation plaintext and every member's private snapshot.
 This closes the local multi-Relay/catch-up acceptance vector, not live operator
 or post-M0-R transport evidence.
 
+## Prior-history policy
+
+V1 is join-forward only. A join or device replacement installs a new leaf at
+the authenticated Welcome epoch and conveys no earlier plaintext, application
+secret, or exporter secret. An existing leaf may catch up ordered opaque
+ciphertext only across the interval in which it was a member. The direct-device
+history API cannot name a Room ID and rejects room Events on import, so it is
+not an alternate plaintext backfill channel. The complete authority and
+versioning rules are in [`ROOM_HISTORY_POLICY.md`](ROOM_HISTORY_POLICY.md).
+
+The OpenMLS integration checks both boundaries cryptographically: an ordinary
+joiner cannot open pre-join ciphertext, and a replacement device cannot open
+ciphertext sealed before its replacement Commit. Event-log adversarial tests
+check the matching application export/import refusal.
+
 Private-room powers are now separate from MLS and transport authority.
 `pkg/room.RolePolicy` binds at most four administrators and sixteen moderators
 to the exact membership epoch/digest and current finalized room authority;
@@ -158,7 +173,7 @@ history UI retraction remains open.
 - independent review of the concrete OpenMLS Driver and its snapshot/process
   boundary;
 - the committed integration proves real founding, sequential joins, mixed
-  replacement/removal, joiner-no-past and removed-member-no-future secrecy,
+  replacement/removal, joiner/replacement-no-past and removed-member-no-future secrecy,
   forged-commit/AAD/replay refusal, bidirectional application encryption,
   exporter agreement and label separation, explicit self-update PCS, and full
   restart recovery. Stale and substituted Endpoint authority is also refused;

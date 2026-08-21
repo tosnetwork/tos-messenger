@@ -6,10 +6,10 @@ one-to-one Event transport, not a second encryption construction: the
 `device.history.segment` Event is sealed under the pair's existing Double
 Ratchet session with the same network/conversation/device associated data.
 
-Version 1 deliberately excludes room and MLS history. A new MLS leaf has no
-right to old epoch secrets, and importing plaintext room history would silently
-override the room's join-history policy. Room backfill therefore needs an
-explicit room-authority policy and a separately reviewed design.
+Version 1 deliberately excludes room and MLS history. The frozen
+[private-room prior-history policy](ROOM_HISTORY_POLICY.md) is join-forward
+only: a new or replacement MLS leaf has no right to earlier plaintext or epoch
+secrets. A future backfill design requires a new version and separate review.
 
 ## Authority boundary
 
