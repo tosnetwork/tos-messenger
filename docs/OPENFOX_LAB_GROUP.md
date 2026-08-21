@@ -22,12 +22,18 @@ independent-operator, review, and second-implementation evidence remain open.
   content addresses. Members are sorted and unique; non-members cannot read or
   write a room.
 - Message submission is idempotent per `(sender, client_id)`. Reusing that key
-  for different content is a conflict; exact retries reuse the persisted MLS
-  ciphertext and do not advance the sender ratchet twice.
+  for different content or a different `reply_to_event_id` is a conflict;
+  exact retries reuse the persisted MLS ciphertext and do not advance the
+  sender ratchet twice.
 - Bootstrap creates distinct KeyPackages and sequential Welcome/Commit epochs.
   Runtime MLS state is persisted before ciphertext publication or plaintext
   release. Room, sender, and retry-stable client ID are authenticated data.
 - A modified ciphertext is refused without advancing durable receiver state.
+- Content and the optional canonical reply Event ID share one strict,
+  versioned MLS plaintext frame. Every recipient therefore observes the same
+  authenticated causal binding; the Relay sees neither field. Reply-less raw
+  plaintext from a pre-frame durable retry remains readable during this
+  pre-launch migration but cannot acquire a reply reference.
 - The Relay file contains base64 MLS PrivateMessages, not conversation text or
   any Agent's opaque private snapshot.
 - The bounded state file is replaced atomically and fsynced with its directory.
