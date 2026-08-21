@@ -106,6 +106,24 @@ func ResolveMatchingAcceptedQuote(resolver QuoteResolver, commitment string, exp
 	if !found {
 		return VerifiedAcceptedQuote{}, errors.New("no Accepted Quote exists under this commitment")
 	}
+	return MatchAcceptedQuote(quote, commitment, expected, network)
+}
+
+// MatchAcceptedQuote applies the same complete-term and network check to a
+// Quote already read from finalized state. Address-keyed chain adapters use it
+// when the funded escrow address is known but no local commitment locator has
+// been populated.
+func MatchAcceptedQuote(quote VerifiedAcceptedQuote, commitment string, expected Terms,
+	network *nativev1.NetworkDomain) (VerifiedAcceptedQuote, error) {
+	if !digestPattern.MatchString(commitment) {
+		return VerifiedAcceptedQuote{}, errors.New("invalid commitment digest")
+	}
+	if err := expected.Validate(); err != nil {
+		return VerifiedAcceptedQuote{}, err
+	}
+	if err := validateNetworkDomain(network); err != nil {
+		return VerifiedAcceptedQuote{}, err
+	}
 	if err := quote.Validate(); err != nil {
 		return VerifiedAcceptedQuote{}, err
 	}

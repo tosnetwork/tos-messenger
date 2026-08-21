@@ -40,6 +40,21 @@ type fakeReader struct {
 	err    error
 }
 
+type addressCheckingReader struct {
+	want   string
+	escrow *toschain.FinalizedEscrowV1
+}
+
+func (r addressCheckingReader) ResolveFinalized(
+	_ context.Context,
+	address string,
+) (*toschain.FinalizedEscrowV1, bool, error) {
+	if address != r.want {
+		return nil, false, errors.New("unexpected escrow address")
+	}
+	return r.escrow, true, nil
+}
+
 func (f fakeReader) ResolveFinalized(context.Context, string) (*toschain.FinalizedEscrowV1, bool, error) {
 	return f.escrow, f.found, f.err
 }
@@ -141,6 +156,28 @@ func TestResolveMapsAFinalizedQuote(t *testing.T) {
 	}
 	if err := quote.Validate(); err != nil {
 		t.Fatalf("a mapped quote failed the Messenger's own validation: %v", err)
+	}
+}
+
+func TestResolveAtVerifiesFinalizedEscrowWithoutLocalLocator(t *testing.T) {
+	resolver, err := New(
+		addressCheckingReader{want: testAddress, escrow: finalizedEscrow(testCommitment)},
+		NewMapLocator(), testNetwork())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.decode = decodeTo(validProposal())
+	if _, found, err := resolver.ResolveAcceptedQuote(testCommitment); err != nil || found {
+		t.Fatalf("digest lookup unexpectedly had a locator: found=%v err=%v", found, err)
+	}
+	quote, found, err := resolver.ResolveAcceptedQuoteAt(
+		context.Background(), testCommitment, testAddress, testClass)
+	if err != nil || !found || quote.Reference.Account != testAddress || quote.Terms.CapabilityClass != testClass {
+		t.Fatalf("addressed finalized read: quote=%+v found=%v err=%v", quote, found, err)
+	}
+	if _, _, err := resolver.ResolveAcceptedQuoteAt(
+		context.Background(), testCommitment, "0:"+strings.Repeat("1", 64), testClass); err == nil {
+		t.Fatal("an escrow-address substitution was not sent through the finalized reader")
 	}
 }
 

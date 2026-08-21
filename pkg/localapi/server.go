@@ -45,8 +45,16 @@ type Config struct {
 	ChallengeLifetime time.Duration
 	Now               func() time.Time
 	Timeout           time.Duration
-	QuoteResolver     negotiation.QuoteResolver
+	QuoteResolver     AddressedQuoteResolver
 	Network           *nativev1.NetworkDomain
+}
+
+// AddressedQuoteResolver treats a runtime-supplied escrow address only as a
+// candidate locator and returns a Quote only after reading that exact account
+// from finalized, code-authenticated chain state.
+type AddressedQuoteResolver interface {
+	ResolveAcceptedQuoteAt(ctx context.Context, commitment, escrowAddress,
+		capabilityClass string) (negotiation.VerifiedAcceptedQuote, bool, error)
 }
 
 // Server answers calls on the owner-private socket.
@@ -208,18 +216,27 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 	case OpRecordEscrowLocation:
 		return s.recordEscrowLocation(request)
 	case OpVerifyAcceptedQuote:
-		return s.verifyAcceptedQuote(request)
+		return s.verifyAcceptedQuote(ctx, request)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
 }
 
-func (s *Server) verifyAcceptedQuote(request Request) Response {
+func (s *Server) verifyAcceptedQuote(ctx context.Context, request Request) Response {
 	if s.config.QuoteResolver == nil {
 		return refuse(fault.CodeClassNotDelegated, errors.New("finalized Quote verification is not configured"))
 	}
-	expected := toTerms(request.ExpectedQuoteTerms)
-	quote, err := negotiation.ResolveMatchingAcceptedQuote(
-		s.config.QuoteResolver, request.QuoteCommitment, *expected, s.config.Network)
+	quote, found, err := s.config.QuoteResolver.ResolveAcceptedQuoteAt(
+		ctx, request.QuoteCommitment, request.EscrowAddress, request.CapabilityClass)
+	if err == nil && !found {
+		err = errors.New("the funded escrow is not finalized")
+	}
+	if err == nil {
+		quote, err = negotiation.MatchAcceptedQuote(
+			quote, request.QuoteCommitment, *toTerms(request.ExpectedQuoteTerms), s.config.Network)
+	}
+	if err == nil && quote.Reference.Account != request.EscrowAddress {
+		err = errors.New("the finalized Quote evidence names another escrow account")
+	}
 	if err != nil {
 		return refuse(fault.CodeNotAuthentic, err)
 	}

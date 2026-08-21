@@ -24,6 +24,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -82,6 +83,15 @@ type fixedQuoteResolver struct {
 }
 
 func (r fixedQuoteResolver) ResolveAcceptedQuote(string) (negotiation.VerifiedAcceptedQuote, bool, error) {
+	return r.quote, r.found, r.err
+}
+
+func (r fixedQuoteResolver) ResolveAcceptedQuoteAt(
+	context.Context,
+	string,
+	string,
+	string,
+) (negotiation.VerifiedAcceptedQuote, bool, error) {
 	return r.quote, r.found, r.err
 }
 
@@ -1016,13 +1026,27 @@ func TestRuntimeVerifiesExactFinalizedQuoteWithoutReceivingAuthority(t *testing.
 	}
 	h.server.config.QuoteResolver = fixedQuoteResolver{quote: quote, found: true}
 	h.server.config.Network = testNetwork()
-	request := Request{Op: OpVerifyAcceptedQuote, QuoteCommitment: commitment, ExpectedQuoteTerms: expected}
+	request := Request{Op: OpVerifyAcceptedQuote, QuoteCommitment: commitment,
+		EscrowAddress: quote.Reference.Account, CapabilityClass: expected.CapabilityClass,
+		ExpectedQuoteTerms: expected}
 	verified := h.call(t, request)
 	if !verified.OK || verified.Authorised || verified.FinalizedQuote == nil ||
 		verified.FinalizedQuote.Commitment != commitment || verified.FinalizedQuote.FinalizedCheckpoint != 99 ||
 		verified.FinalizedQuote.EscrowAccount != quote.Reference.Account {
 		t.Fatalf("finalized Quote verification: %+v", verified)
 	}
+	if _, _, found, err := h.journal.LocateEscrow(commitment); err != nil || found {
+		t.Fatalf("read-only verification created an escrow locator: found=%v err=%v", found, err)
+	}
+	wrongAccount := quote
+	wrongReference := proto.Clone(quote.Reference).(*nativev1.ChainReference)
+	wrongReference.Account = "0:" + strings.Repeat("f", 64)
+	wrongAccount.Reference = wrongReference
+	h.server.config.QuoteResolver = fixedQuoteResolver{quote: wrongAccount, found: true}
+	if response := h.call(t, request); response.OK {
+		t.Fatal("finalized evidence for another escrow account matched the candidate address")
+	}
+	h.server.config.QuoteResolver = fixedQuoteResolver{quote: quote, found: true}
 
 	substituted := *expected
 	substituted.ProviderAgentID = "agent_" + strings.Repeat("e", 64)

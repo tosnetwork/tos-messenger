@@ -147,7 +147,7 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		_ = journal.Close()
 		return nil, err
 	}
-	var quoteResolver negotiation.QuoteResolver
+	var quoteResolver *chainquote.Resolver
 	if config.EscrowCodeHash != "" {
 		adapter, adapterErr := config.ChainAdapter()
 		if adapterErr != nil {
@@ -165,9 +165,9 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 	serverConfig := localapi.Config{
 		Policy: config.FirewallPolicy(), OwnerKey: ownerKey,
 		Journal: journal, Dispatcher: dispatcher, LocalEndpointID: config.EndpointID,
-		QuoteResolver: quoteResolver,
 	}
 	if quoteResolver != nil {
+		serverConfig.QuoteResolver = quoteResolver
 		serverConfig.Network = config.Network()
 	}
 	server, err := localapi.NewServer(serverConfig)

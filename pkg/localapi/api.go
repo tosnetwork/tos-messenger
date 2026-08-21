@@ -113,8 +113,9 @@ const (
 	// chain resolver must read. A runtime may not create this authority map.
 	OpRecordEscrowLocation Operation = "escrow-locations.record"
 	// OpVerifyAcceptedQuote resolves one commitment from finalized state and
-	// accepts it only when every caller-supplied purchase term and this
-	// installation's complete network identity match.
+	// accepts the supplied escrow address only when that finalized account holds
+	// the commitment and every expected purchase term plus this installation's
+	// complete network identity matches.
 	OpVerifyAcceptedQuote Operation = "quotes.verify"
 )
 
@@ -524,8 +525,9 @@ func ValidateRequest(request Request) error {
 	if request.Op != OpRecordEscrowLocation && request.Op != OpVerifyAcceptedQuote && request.QuoteCommitment != "" {
 		return errors.New("only escrow recording or Quote verification carries a Quote commitment")
 	}
-	if request.Op != OpRecordEscrowLocation && (request.EscrowAddress != "" || request.CapabilityClass != "") {
-		return errors.New("only escrow-location recording carries funded escrow terms")
+	if request.Op != OpRecordEscrowLocation && request.Op != OpVerifyAcceptedQuote &&
+		(request.EscrowAddress != "" || request.CapabilityClass != "") {
+		return errors.New("only escrow recording or Quote verification carries funded escrow locators")
 	}
 	if request.Op != OpVerifyAcceptedQuote && request.ExpectedQuoteTerms != nil {
 		return errors.New("only Quote verification carries expected Quote terms")
@@ -651,8 +653,10 @@ func ValidateRequest(request Request) error {
 		}
 		return requireEmpty(request, "escrow-location recording", request.EventID, request.LeaseID, request.SessionID)
 	case OpVerifyAcceptedQuote:
-		if !quotePattern.MatchString(request.QuoteCommitment) || request.ExpectedQuoteTerms == nil {
-			return errors.New("Quote verification needs a commitment and complete expected terms")
+		if !quotePattern.MatchString(request.QuoteCommitment) || request.EscrowAddress == "" ||
+			len(request.EscrowAddress) > 80 || request.CapabilityClass == "" ||
+			len(request.CapabilityClass) > 64 || request.ExpectedQuoteTerms == nil {
+			return errors.New("Quote verification needs an escrow locator, commitment, and complete expected terms")
 		}
 		if terms := toTerms(request.ExpectedQuoteTerms); terms == nil || terms.Validate() != nil {
 			return errors.New("Quote verification carries invalid expected terms")

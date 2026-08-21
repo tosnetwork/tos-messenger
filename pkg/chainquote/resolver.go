@@ -11,12 +11,13 @@
 // authority, and a resolver written here consumes it rather than offering a
 // second opinion about what it says.
 //
-// The chain is addressed by account, not by commitment, so a commitment cannot
-// be resolved without first learning where its escrow lives. That mapping -- and
-// the capability class, which the canonical quote omits because the capability
-// identifier already determines it -- is produced when the escrow is prepared
-// and funded, by the party that set it up. Both are therefore locally attested
-// through an EscrowLocator, not read from the chain.
+// The chain is addressed by account, not by commitment. Negotiation-only callers
+// may use an owner-attested EscrowLocator. A funded buyer that already knows the
+// deterministic escrow address may instead submit it as a candidate locator;
+// the resolver still trusts only the finalized code-authenticated account and
+// requires that account to carry the commitment asked for. The capability class
+// is supplied separately because the canonical quote omits it; the capability
+// identifier and the buyer's previously authorized complete terms bind its use.
 package chainquote
 
 import (
@@ -129,7 +130,22 @@ func (r *Resolver) ResolveAcceptedQuote(commitment string) (negotiation.Verified
 		return negotiation.VerifiedAcceptedQuote{}, false, errors.New("the locator returned no escrow address")
 	}
 
-	escrow, found, err := r.reader.ResolveFinalized(context.Background(), address)
+	return r.ResolveAcceptedQuoteAt(context.Background(), commitment, address, capabilityClass)
+}
+
+// ResolveAcceptedQuoteAt reads a caller-known escrow address directly. The
+// address is only a locator candidate: the finalized contract code, canonical
+// StateInit and the commitment held by that account are still independently
+// verified by the chain reader before any Quote is returned.
+func (r *Resolver) ResolveAcceptedQuoteAt(ctx context.Context, commitment, address,
+	capabilityClass string) (negotiation.VerifiedAcceptedQuote, bool, error) {
+	if r == nil || ctx == nil {
+		return negotiation.VerifiedAcceptedQuote{}, false, errors.New("invalid addressed quote resolution request")
+	}
+	if commitment == "" || address == "" || capabilityClass == "" {
+		return negotiation.VerifiedAcceptedQuote{}, false, errors.New("addressed quote resolution needs complete locators")
+	}
+	escrow, found, err := r.reader.ResolveFinalized(ctx, address)
 	if err != nil {
 		return negotiation.VerifiedAcceptedQuote{}, false, err
 	}

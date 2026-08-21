@@ -97,14 +97,17 @@ funded—it neither funds the escrow nor replaces the finalized chain read.
 
 Set both `escrow_code_hash` and the daemon-owned
 `escrow_checkpoint_path` to enable runtime `quotes.verify`. After funding has
-reached finality, OpenFox submits the commitment and the complete terms it
-authorized. The daemon resolves the mapped escrow through the strict chain
+reached finality, OpenFox submits the commitment, deterministic escrow address,
+Capability class, and the complete terms it authorized. The daemon treats the
+address only as a candidate and resolves that exact account through the strict chain
 adapter and returns transaction/code/checkpoint evidence only when commitment,
 provider, capability, manifest, transport, asset, price, escrow/dispute terms,
 expiry, network ID, and both bare genesis hashes all match. The operation is
 read-only: it cannot create a locator, approve spending, sign, fund, or dispatch
-a task. Omitting both fields disables the operation; configuring only one is a
-startup error.
+a task or persist a runtime-supplied locator. Thus the funded execution path
+does not require a prior owner locator write, while digest-only negotiation may
+still use the owner-attested mapping. Omitting both fields disables the
+operation; configuring only one is a startup error.
 
 When `publication.mode` is `prekeys`, the third socket exposes only the current
 fixed public generation and admission of one already Endpoint-signed public
