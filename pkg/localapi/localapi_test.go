@@ -962,6 +962,33 @@ func (h *harness) placeMandate(t *testing.T) string {
 	return h.placeMandateWithTotal(t, "1000", "500")
 }
 
+func TestOwnerRecordsFundedEscrowLocationCrashSafely(t *testing.T) {
+	h := newHarness(t)
+	commitment := "tvm-cell-sha256:" + strings.Repeat("a", 64)
+	address := "0:" + strings.Repeat("b", 64)
+	request := Request{Op: OpRecordEscrowLocation, QuoteCommitment: commitment,
+		EscrowAddress: address, CapabilityClass: "software.audit"}
+	first := h.owner(t, request)
+	if !first.OK || !first.Fresh {
+		t.Fatalf("record escrow location: %+v", first)
+	}
+	storedAddress, class, found, err := h.journal.LocateEscrow(commitment)
+	if err != nil || !found || storedAddress != address || class != "software.audit" {
+		t.Fatalf("stored escrow location: address=%q class=%q found=%v err=%v", storedAddress, class, found, err)
+	}
+	if retry := h.owner(t, request); !retry.OK || retry.Fresh {
+		t.Fatalf("exact owner retry was not idempotent: %+v", retry)
+	}
+	redirect := request
+	redirect.EscrowAddress = "0:" + strings.Repeat("c", 64)
+	if response := h.owner(t, redirect); response.OK {
+		t.Fatal("owner retry redirected one Quote commitment to another escrow")
+	}
+	if response := h.runtimeAttempt(t, request); response.OK {
+		t.Fatal("runtime wrote the owner/wallet escrow locator")
+	}
+}
+
 // placeMandateWithTotal places a mandate with a chosen ceiling, so a test can
 // make the sum of a few purchases cross MaxTotal without needing large amounts.
 func (h *harness) placeMandateWithTotal(t *testing.T, maxTotal, approvalAbove string) string {

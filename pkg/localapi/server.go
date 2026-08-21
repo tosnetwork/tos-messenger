@@ -195,8 +195,19 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.challenge(now)
 	case OpCreateAdmissionInvite:
 		return s.createAdmissionInvite(request, now)
+	case OpRecordEscrowLocation:
+		return s.recordEscrowLocation(request)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
+}
+
+func (s *Server) recordEscrowLocation(request Request) Response {
+	fresh, err := s.config.Journal.RecordEscrowLocation(
+		request.QuoteCommitment, request.EscrowAddress, request.CapabilityClass)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, Fresh: fresh}
 }
 
 func (s *Server) createAdmissionInvite(request Request, now time.Time) Response {

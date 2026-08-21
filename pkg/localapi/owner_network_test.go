@@ -77,3 +77,32 @@ func TestAdmissionInviteDecisionCommitsScopeAndExpiry(t *testing.T) {
 		}
 	}
 }
+
+func TestEscrowLocationDecisionCommitsEveryFundingBinding(t *testing.T) {
+	request := Request{Op: OpRecordEscrowLocation, Challenge: strings.Repeat("a", 64),
+		QuoteCommitment: "tvm-cell-sha256:" + strings.Repeat("b", 64),
+		EscrowAddress:   "0:" + strings.Repeat("c", 64), CapabilityClass: "software.audit"}
+	original, err := DecisionBytes(request, request.Challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]Request{}
+	changed := request
+	changed.QuoteCommitment = "tvm-cell-sha256:" + strings.Repeat("d", 64)
+	mutations["commitment"] = changed
+	changed = request
+	changed.EscrowAddress = "0:" + strings.Repeat("e", 64)
+	mutations["escrow"] = changed
+	changed = request
+	changed.CapabilityClass = "software.build"
+	mutations["class"] = changed
+	for name, mutation := range mutations {
+		encoded, err := DecisionBytes(mutation, mutation.Challenge)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(original, encoded) {
+			t.Fatalf("%s substitution retained owner signature preimage", name)
+		}
+	}
+}

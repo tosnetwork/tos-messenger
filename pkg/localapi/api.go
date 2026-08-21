@@ -108,6 +108,10 @@ const (
 	// bearer. It is an owner decision because it grants an unknown sender the
 	// ability to place exactly one authenticated event in this inbox.
 	OpCreateAdmissionInvite Operation = "invites.create"
+	// OpRecordEscrowLocation lets the owner-side funding/wallet workflow bind
+	// the finalized Quote commitment it funded to the exact escrow account the
+	// chain resolver must read. A runtime may not create this authority map.
+	OpRecordEscrowLocation Operation = "escrow-locations.record"
 )
 
 // Principal is which side of the boundary a connection speaks for.
@@ -138,6 +142,7 @@ var permitted = map[Principal]map[Operation]struct{}{
 		OpPendingActions: {}, OpGrantAction: {}, OpDenyAction: {},
 		OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {}, OpChallenge: {},
 		OpCreateAdmissionInvite: {},
+		OpRecordEscrowLocation:  {},
 	},
 }
 
@@ -159,6 +164,7 @@ var operations = map[Operation]struct{}{
 	OpGrantAction: {}, OpDenyAction: {},
 	OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {}, OpChallenge: {},
 	OpCreateAdmissionInvite: {},
+	OpRecordEscrowLocation:  {},
 }
 
 var (
@@ -173,6 +179,7 @@ var (
 	mandatePattern      = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
 	agentPattern        = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
 	challengePattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	quotePattern        = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
 )
 
 // Request is one call over the local socket.
@@ -226,6 +233,10 @@ type Request struct {
 	// InviteExpiresAtUnix is always explicit and owner-signed.
 	InvitedAgentID      string `json:"invited_agent_id,omitempty"`
 	InviteExpiresAtUnix uint64 `json:"invite_expires_at_unix,omitempty"`
+
+	QuoteCommitment string `json:"quote_commitment,omitempty"`
+	EscrowAddress   string `json:"escrow_address,omitempty"`
+	CapabilityClass string `json:"capability_class,omitempty"`
 }
 
 // AssetIdentity names an asset the way the chain does.
@@ -491,6 +502,10 @@ func ValidateRequest(request Request) error {
 		(request.InvitedAgentID != "" || request.InviteExpiresAtUnix != 0) {
 		return errors.New("only admission invite creation carries invite terms")
 	}
+	if request.Op != OpRecordEscrowLocation &&
+		(request.QuoteCommitment != "" || request.EscrowAddress != "" || request.CapabilityClass != "") {
+		return errors.New("only escrow-location recording carries funded escrow terms")
+	}
 	if request.Op != OpCompose && (request.ConversationID != "" || request.RoomID != "" ||
 		request.ReplyToEventID != "" || request.MembershipEpoch != 0 || request.MediaType != "" ||
 		request.Body != "" || request.IdempotencyKey != "") {
@@ -604,6 +619,13 @@ func ValidateRequest(request Request) error {
 			return errors.New("an admission invite needs an expiry")
 		}
 		return requireEmpty(request, "admission invite creation", request.EventID, request.LeaseID, request.SessionID)
+	case OpRecordEscrowLocation:
+		if !quotePattern.MatchString(request.QuoteCommitment) ||
+			request.EscrowAddress == "" || len(request.EscrowAddress) > 80 || request.CapabilityClass == "" ||
+			len(request.CapabilityClass) > 64 {
+			return errors.New("recording an escrow location needs canonical funded escrow terms")
+		}
+		return requireEmpty(request, "escrow-location recording", request.EventID, request.LeaseID, request.SessionID)
 	case OpActionStatus, OpClaimAction:
 		if !actionPattern.MatchString(request.ActionID) {
 			return errors.New("an action status needs an action")

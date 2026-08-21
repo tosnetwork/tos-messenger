@@ -32,6 +32,7 @@ var deciding = map[Operation]struct{}{
 	OpGrantAction: {}, OpDenyAction: {},
 	OpPlaceMandate: {}, OpRevokeMandate: {},
 	OpCreateAdmissionInvite: {},
+	OpRecordEscrowLocation:  {},
 }
 
 // Deciding reports whether an operation needs the owner's signature.
@@ -123,6 +124,11 @@ func DecisionBytes(request Request, challenge string) ([]byte, error) {
 	canon.Text(buffer, request.Reason)
 	canon.Text(buffer, request.InvitedAgentID)
 	canon.Uint64(buffer, request.InviteExpiresAtUnix)
+	if request.Op == OpRecordEscrowLocation {
+		canon.Text(buffer, request.QuoteCommitment)
+		canon.Text(buffer, request.EscrowAddress)
+		canon.Text(buffer, request.CapabilityClass)
+	}
 	// A mandate is placed by value, so what is signed is the authorisation
 	// itself rather than a name for it.
 	if request.Mandate != nil {

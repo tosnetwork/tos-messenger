@@ -47,7 +47,7 @@ func run(args []string, output io.Writer) error {
 	}
 	rest := global.Args()
 	if len(rest) == 0 {
-		return errors.New("usage: tos-messenger-owner [-socket PATH] <pending|prepare-grant|prepare-deny|prepare-invite|sign|submit>")
+		return errors.New("usage: tos-messenger-owner [-socket PATH] <pending|prepare-grant|prepare-deny|prepare-invite|prepare-escrow-location|sign|submit>")
 	}
 	if rest[0] == "sign" {
 		return signCommand(rest[1:], output)
@@ -90,6 +90,17 @@ func run(args []string, output io.Writer) error {
 		return prepare(client, localapi.Request{
 			Op: localapi.OpCreateAdmissionInvite, InvitedAgentID: *agentID, InviteExpiresAtUnix: *expiresAt,
 		}, output)
+	case "prepare-escrow-location":
+		set := commandFlags("prepare-escrow-location")
+		commitment := set.String("commitment", "", "finalized Quote commitment")
+		address := set.String("escrow", "", "funded escrow account address")
+		class := set.String("capability-class", "", "attested Capability class")
+		if err := set.Parse(rest[1:]); err != nil || set.NArg() != 0 ||
+			*commitment == "" || *address == "" || *class == "" {
+			return errors.New("usage: prepare-escrow-location -commitment DIGEST -escrow ADDRESS -capability-class CLASS")
+		}
+		return prepare(client, localapi.Request{Op: localapi.OpRecordEscrowLocation,
+			QuoteCommitment: *commitment, EscrowAddress: *address, CapabilityClass: *class}, output)
 	case "submit":
 		set := commandFlags("submit")
 		path := set.String("decision", "", "signed decision JSON")

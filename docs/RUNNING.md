@@ -76,10 +76,30 @@ it durably to that sender and Event ID; an exact retry is idempotent, while any
 other event falls back to owner hold. Relay deposit signatures commit the
 opaque token, so a Relay cannot substitute it.
 
+A wallet/funding process records the escrow it actually prepared through the
+same owner ceremony; configuration is deliberately not accepted as funding
+evidence:
+
+```sh
+tos-messenger-owner -socket /run/tos-messengerd/owner.sock \
+  prepare-escrow-location \
+  -commitment tvm-cell-sha256:... -escrow 0:... \
+  -capability-class software.audit > prepared.json
+tos-messenger-owner sign -key owner.key -decision prepared.json > signed.json
+tos-messenger-owner -socket /run/tos-messengerd/owner.sock \
+  submit -decision signed.json
+```
+
+The decision signs the exact Quote commitment, escrow account and caller-
+attested Capability class. An exact funding retry is idempotent; redirecting
+one commitment to another account conflicts. This records what the wallet
+funded—it neither funds the escrow nor replaces the finalized chain read.
+
 When `publication.mode` is `prekeys`, the third socket exposes only the current
 fixed public generation and admission of one already Endpoint-signed public
 bundle. It exposes no approval operation, private material, other device's
-bundle, or authority to select a roster/window. The v5 config explicitly states
+bundle, or authority to select a roster/window. The v6 config retains the v5
+roster/window contract and explicitly states
 its clean absolute path, sorted 1–16-device roster (including this
 installation's device), algorithm identifier, 60-second-to-30-day lifetime,
 positive replenishment lead, and a check interval no longer than that lead.
