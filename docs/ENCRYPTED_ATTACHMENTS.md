@@ -3,8 +3,10 @@
 `pkg/attachments` implements the route-neutral cryptographic core and the
 authenticated opaque-storage contract for private Messenger attachments;
 `pkg/attachmentapi` and `tos-attachmentd` expose its bounded Unix/HTTPS service
-boundary. This does not select a message route, paid retention profile, parser,
-or malware scanner.
+boundary. `OpenForAgent` adds an explicit Linux content-admission boundary and
+`tos-attachment-text-scanner` supplies a minimal reference UTF-8 inspector.
+This does not select a message route, paid retention profile, production
+malware product, or parser for arbitrary formats.
 
 Each attachment gets a fresh random 256-bit AES-GCM key, 128-bit attachment ID,
 and 32-bit nonce prefix. The 96-bit nonce is that prefix followed by the
@@ -95,7 +97,45 @@ filename as a path, parse a document, or invoke a scanner. Display filenames
 reject path separators, control-line breaks, surrounding whitespace, invalid
 UTF-8, and parent paths. A runtime must keep the returned bytes inert until its
 own sandbox/scanner policy admits them; authenticated content is still
-untrusted content.
+untrusted content. Agent integrations must call `OpenForAgent`, not expose the
+lower-level `Open` result to a model or tool.
+
+`OpenForAgent` requires a non-empty canonical media allow-list, a nonzero
+plaintext ceiling, and an ordered set of one to four scanners. Every scanner
+binary, `/usr/bin/bwrap`, and `/usr/bin/prlimit` is pinned by SHA-256 and copied
+from its validated open file into one private per-admission directory; later
+path replacement cannot change the inode used for that attempt. Writable,
+relative, symlinked, substituted, or oversized executables fail closed.
+The exact authenticated plaintext is placed in a sealed Linux `memfd` rather
+than a persistent file. Bubblewrap receives that descriptor as read-only
+`/work/input`, unshares all supported namespaces including the network, drops
+all capabilities, clears the environment, exposes only a copied scanner plus
+read-only system runtime directories, and gives it fresh `/proc`, `/dev`,
+`/tmp`, and `/work` views. The scanner runs behind wall-clock, virtual-address,
+CPU, file-descriptor, output-size and `RLIMIT_NPROC` ceilings.
+
+The only accepted stdout is one strict bounded JSON verdict. It must bind the
+scanner ID and binary digest, exact plaintext SHA-256 and size, and identical
+declared/detected media types. Unknown fields, trailing JSON, a timeout,
+nonzero exit, output overflow, any mismatch, or one denial in a multi-scanner
+policy releases no plaintext. Scanner stderr is bounded and not returned to
+the caller because an untrusted scanner may copy content into an error.
+
+The reference scanner admits only non-empty `text/plain` and `text/markdown`
+that are valid UTF-8 and contain no NUL, carriage return, escape, or other
+control characters except newline and tab. It is intentionally parser-free.
+It is not a malware scanner and gives no safety claim for scripts, prompt
+injection, URLs, markup semantics, archives, office documents, PDFs, images,
+audio, video, decompression, or parser exploits. Those types remain refused
+unless operators install another reviewed, digest-pinned scanner under the
+same all-must-allow boundary.
+
+The address-space ceiling bounds virtual mappings, while fixed `GOMEMLIMIT`
+and `GOMAXPROCS` values constrain the reference Go scanner. `RLIMIT_NPROC` is a
+per-real-user limit on many Linux systems, not an isolated per-scan cgroup
+budget. Deployments needing hard RSS, process or I/O isolation must add an
+independently reviewed service/cgroup/container boundary; this implementation
+does not claim one.
 
 The profile bounds plaintext to 512 MiB, chunks to 1 MiB (256 KiB by default),
 and count to 2,048; the recipient may set a smaller plaintext limit and an
@@ -105,9 +145,11 @@ parser limits belong to the eventual sandbox adapter.
 
 Expiry is enforced on open and by lease GC. Authenticated remote operation,
 restart replay refusal, interrupted multi-frame upload, signed local deletion
-observation, and locator/SSRF policy are implemented and tested locally. Still
-open are an independently operated public-TLS deployment, measured interrupted
-wide-area transfer, independently audited retention behavior, sandbox/scanner
-integration, and commercial attachment service terms. A content-addressed
-object may have been copied, so no storage API promises cryptographic erasure it
-cannot prove.
+observation, locator/SSRF policy, sealed-input sandboxing, strict verdict
+binding, and the reference text inspector are implemented and tested locally.
+Still open are an independently operated public-TLS deployment, measured
+interrupted wide-area transfer, independently audited retention behavior,
+OpenFox attachment-fetch/application wiring, a selected production malware
+scanner and representative hostile corpus, hard cgroup-level resource evidence,
+and commercial attachment service terms. A content-addressed object may have
+been copied, so no storage API promises cryptographic erasure it cannot prove.

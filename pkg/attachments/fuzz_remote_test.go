@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -76,6 +77,25 @@ func FuzzDecodeAttachmentAccessRequest(f *testing.F) {
 		}
 		if _, err := DecodeAccessRequestJSON(reencoded); err != nil {
 			t.Fatalf("access request round trip: %v", err)
+		}
+	})
+}
+
+func FuzzDecodeScanVerdict(f *testing.F) {
+	f.Add([]byte(`{"schema":"tos.messaging.attachment-scan-verdict.v1","scanner_id":"reference-text","scanner_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","plaintext_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size_bytes":4,"declared_media_type":"text/plain","detected_media_type":"text/plain","decision":"allow","reason_code":"utf8_text"}`))
+	f.Add([]byte(`{}`))
+	f.Add([]byte(`null`))
+	f.Fuzz(func(t *testing.T, value []byte) {
+		verdict, err := decodeScanVerdict(value)
+		if err != nil {
+			return
+		}
+		raw, err := json.Marshal(verdict)
+		if err != nil {
+			t.Fatalf("accepted verdict did not re-encode: %v", err)
+		}
+		if _, err := decodeScanVerdict(raw); err != nil {
+			t.Fatalf("scan verdict round trip: %v", err)
 		}
 	})
 }

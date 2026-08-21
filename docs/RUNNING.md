@@ -242,6 +242,36 @@ plaintext metadata. Its Unix carrier is local deployment plumbing; a public
 deployment must use the strict HTTPS locator/client policy and independently
 validate TLS, DNS, quotas, retention and restart evidence.
 
+### Agent attachment content admission
+
+Do not pass bytes returned by the lower-level `attachments.Open` API to an
+Agent, model, renderer, parser, or tool. On Linux, build the reference text
+inspector and record all three executable identities in the local
+`attachments.AgentContentPolicy`:
+
+```bash
+go build -trimpath -o /usr/local/libexec/tos-attachment-text-scanner \
+  ./cmd/tos-attachment-text-scanner
+chmod 0555 /usr/local/libexec/tos-attachment-text-scanner
+sha256sum /usr/local/libexec/tos-attachment-text-scanner \
+  /usr/bin/bwrap /usr/bin/prlimit
+```
+
+Prefix each printed lowercase digest with `sha256:`. Configure an absolute,
+canonical scanner path, scanner ID `reference-text`, its digest, the bubblewrap
+and prlimit digests, a nonzero plaintext ceiling, and only `text/plain` and/or
+`text/markdown` in the media allow-list. A package upgrade changing bubblewrap
+or prlimit deliberately stops admission until an operator reviews and updates
+the pin. Scanner files must be regular, executable, non-writable and not
+symlinks.
+
+`tos-attachment-text-scanner` is a parser-free reference inspector, not a
+production malware product. It refuses every non-text type. OpenFox does not
+yet fetch or consume `artifact.encrypted`, so this boundary is reference
+Messenger integration rather than a completed OpenFox attachment feature.
+Production deployment still needs a reviewed scanner selection and corpus,
+hard resource isolation where required, and independently operated evidence.
+
 ## What `"transport": "none"` means
 
 Outbound events are queued durably and never sealed. No route has been chosen,

@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/tosnetwork/tos-service-protocol v0.0.0-20260820090236-2a06d05b29db
 	github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef
+	golang.org/x/sys v0.46.0
 	google.golang.org/protobuf v1.36.11
 )
 
