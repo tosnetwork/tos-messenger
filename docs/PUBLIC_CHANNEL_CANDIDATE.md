@@ -170,7 +170,8 @@ Bag never proves chain authority.
 
 `StorageCLIPublisher` invokes `storage-daemon-cli` directly without a shell,
 copies the snapshot into an uploaded TOS Storage Bag, bounds process time and
-output, and accepts only the canonical lowercase 256-bit BagID. A private
+output, and normalizes the stock CLI's uniform uppercase 256-bit BagID to the
+canonical lowercase wire form while refusing mixed case. A private
 single-writer receipt makes exact restart replay idempotent and fails closed on
 damage. Once a receipt exists, `NativeNode` sends a strict bounded `SitesHint`
 over the authenticated Overlay connection. The hint is only an availability
@@ -189,6 +190,11 @@ complete but its receipt is absent is recovered only by fully re-verifying the
 snapshot. A different BagID claiming an already verified history cannot replace
 the durable locator.
 
+The stock CLI prints a directory name with one trailing `/`; the boundary
+accepts only the exact expected history-digest directory with or without that
+single suffix. It does not accept another basename, nested path or mixed-case
+BagID.
+
 The real two-node UDP integration starts with one empty ledger, synchronizes
 and commits it over RLDP, exports and passes its snapshot to an injected Bag
 publisher, propagates the returned BagID to the other node, then reopens the
@@ -204,6 +210,16 @@ status boundary; it is not a live independently operated storage-daemon
 download. Tests also cover second writers, damaged and missing receipts, an
 alternative BagID, extra snapshot objects, noncanonical manifests,
 finalized-delegation substitution and malformed hints/status fields.
+
+An explicit `make test-storage-live` acceptance goes beyond those fixtures. It
+starts two real `storage-daemon` processes, derives a locally signed DHT
+bootstrap from the first daemon's generated private identity, publishes the
+verified snapshot on daemon A, downloads and re-verifies it on daemon B, then
+stops B and proves receipt replay needs no live Storage process. The 2026-08-21
+run and exact boundary are recorded in
+[`evidence/PUBLIC_CHANNEL_STORAGE_LIVE_2026-08-21.md`](evidence/PUBLIC_CHANNEL_STORAGE_LIVE_2026-08-21.md).
+This is same-host real-binary evidence, not independent administration or
+public-network evidence.
 
 ## Durable local state
 
@@ -223,7 +239,7 @@ derived history matches them.
 ## Explicitly still open
 
 - measured production calibration of the candidate peer/resource limits;
-- live independently operated Storage publication/download and
+- live independently operated/public-network Storage and
   convergence/failover evidence;
 - independent vector consumption/review and a second implementation.
 

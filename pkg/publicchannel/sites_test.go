@@ -174,8 +174,11 @@ func TestStorageCLIPublisherParsesCanonicalBagID(t *testing.T) {
 	if _, err := SitesSnapshotBagID(got); err != nil {
 		t.Fatal(err)
 	}
-	if parseStorageBagID("BagID = "+strings.ToUpper(bagID)) != "" {
-		t.Fatal("accepted noncanonical uppercase BagID")
+	if parseStorageBagID("BagID = "+strings.ToUpper(bagID)) != bagID {
+		t.Fatal("did not normalize stock uppercase BagID")
+	}
+	if parseStorageBagID("BagID = "+"Ab"+bagID[2:]) != "" {
+		t.Fatal("accepted mixed-case BagID")
 	}
 }
 
@@ -202,4 +205,46 @@ func TestSitesHintStrictRoundTrip(t *testing.T) {
 			t.Fatalf("accepted invalid Sites hint %q", invalid)
 		}
 	}
+}
+
+// TestStorageCLILivePublishSnapshot is an opt-in compatibility test against a
+// real locally running TOS storage-daemon. It is excluded from the default
+// gate because independently provisioned daemon keys and a live control port
+// are operator evidence, not hermetic unit-test inputs.
+func TestStorageCLILivePublishSnapshot(t *testing.T) {
+	command := os.Getenv("TOS_STORAGE_LIVE_CLI")
+	address := os.Getenv("TOS_STORAGE_LIVE_ADDRESS")
+	clientKey := os.Getenv("TOS_STORAGE_LIVE_CLIENT_KEY")
+	serverKey := os.Getenv("TOS_STORAGE_LIVE_SERVER_KEY")
+	if command == "" && address == "" && clientKey == "" && serverKey == "" {
+		t.Skip("set TOS_STORAGE_LIVE_{CLI,ADDRESS,CLIENT_KEY,SERVER_KEY} for live daemon evidence")
+	}
+	if command == "" || address == "" || clientKey == "" || serverKey == "" {
+		t.Fatal("live Storage CLI configuration is partial")
+	}
+	profile, authority, _, publisher, publisherKey, delegations := storeFixture(t)
+	profileDigest, _ := profile.Digest()
+	event := signedPost(t, profile, profileDigest, publisher, publisherKey, 1, "", nil, channelNow, "live storage")
+	now := time.Unix(int64(channelNow+2), 0)
+	history, err := VerifyHistory(profile, []Event{event}, authority, delegations, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(t.TempDir(), "snapshots")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _, err := ExportSitesSnapshot(parent, profile, history, authority, delegations, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bagID, err := (StorageCLIPublisher{Command: command, ServerAddress: address,
+		ClientPrivateKey: clientKey, ServerPublicKey: serverKey, Timeout: 30 * time.Second}).Publish(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sitesBagPattern.MatchString(bagID) {
+		t.Fatalf("live Storage daemon BagID is not canonical after boundary normalization: %q", bagID)
+	}
+	t.Logf("live_storage_bag_id=%s history_digest=%s", bagID, history.Digest())
 }

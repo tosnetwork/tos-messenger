@@ -322,7 +322,11 @@ func parseStorageCLIStatus(output string) (storageCLIStatus, error) {
 		line := strings.TrimSpace(raw)
 		switch {
 		case strings.HasPrefix(line, "BagID = "):
-			if err := set(&status.bagID, strings.TrimSpace(strings.TrimPrefix(line, "BagID = "))); err != nil {
+			candidate := strings.TrimSpace(strings.TrimPrefix(line, "BagID = "))
+			if !storageCLIBagPattern.MatchString(candidate) {
+				return storageCLIStatus{}, errors.New("invalid TOS Storage CLI BagID")
+			}
+			if err := set(&status.bagID, strings.ToLower(candidate)); err != nil {
 				return storageCLIStatus{}, err
 			}
 		case strings.HasPrefix(line, "Root dir: "):
@@ -351,8 +355,9 @@ func parseStorageCLIStatus(output string) (storageCLIStatus, error) {
 
 func validateStorageDownloadStatus(status storageCLIStatus, hint SitesHint, destination string) error {
 	wantDir := strings.TrimPrefix(hint.HistoryDigest, "sha256:")
+	dirMatches := status.dirName == wantDir || status.dirName == wantDir+"/"
 	if status.bagID != hint.BagID || status.rootDir != destination ||
-		status.dirName != "" && status.dirName != wantDir || status.completed && (!status.downloaded || status.dirName != wantDir) {
+		status.dirName != "" && !dirMatches || status.completed && (!status.downloaded || !dirMatches) {
 		return errors.New("TOS Storage CLI status does not reproduce download request")
 	}
 	return nil

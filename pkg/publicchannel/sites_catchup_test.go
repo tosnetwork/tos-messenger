@@ -155,7 +155,7 @@ func TestStorageCLIDownloaderUsesExactBoundedCommands(t *testing.T) {
 	}
 	for _, output := range []string{
 		"BagID = " + strings.Repeat("ff", 32) + "\nDownloaded: 1/1 (completed)\nDir name: " + dirName + "\nRoot dir: " + destination,
-		"BagID = " + strings.ToUpper(bagID) + "\nRoot dir: " + destination,
+		"BagID = " + "Ab" + bagID[2:] + "\nRoot dir: " + destination,
 		"BagID = " + bagID + "\nBagID = " + bagID + "\nRoot dir: " + destination,
 		"BagID = " + bagID + "\nFATAL ERROR: damage\nRoot dir: " + destination,
 	} {
@@ -163,6 +163,11 @@ func TestStorageCLIDownloaderUsesExactBoundedCommands(t *testing.T) {
 		if parseErr == nil && validateStorageDownloadStatus(status, hint, destination) == nil {
 			t.Fatalf("accepted substituted Storage CLI status %q", output)
 		}
+	}
+	uppercase := "BagID = " + strings.ToUpper(bagID) + "\nDownloaded: 1/1 (completed)\nDir name: " + dirName + "/\nRoot dir: " + destination
+	status, err := parseStorageCLIStatus(uppercase)
+	if err != nil || validateStorageDownloadStatus(status, hint, destination) != nil || status.bagID != bagID {
+		t.Fatalf("did not normalize stock Storage CLI status: %#v err=%v", status, err)
 	}
 }
 

@@ -35,6 +35,7 @@ const (
 )
 
 var sitesBagPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var storageCLIBagPattern = regexp.MustCompile(`^([0-9a-f]{64}|[0-9A-F]{64})$`)
 
 type SitesDelegationRecord struct {
 	EndpointID string `json:"messaging_endpoint_id"`
@@ -551,8 +552,8 @@ func parseStorageBagID(output string) string {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, marker) {
 			candidate := strings.TrimSpace(strings.TrimPrefix(line, marker))
-			if sitesBagPattern.MatchString(candidate) {
-				return candidate
+			if storageCLIBagPattern.MatchString(candidate) {
+				return strings.ToLower(candidate)
 			}
 		}
 	}
