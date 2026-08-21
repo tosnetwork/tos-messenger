@@ -127,12 +127,6 @@ func admitPlaintext(ctx context.Context, plaintext []byte, metadata Metadata, po
 	if runtime.GOOS != "linux" {
 		return AdmissionReport{}, errors.New("attachment scanner sandbox requires Linux")
 	}
-	if err := verifyPinnedExecutable(bubblewrapPath, policy.BubblewrapDigest); err != nil {
-		return AdmissionReport{}, fmt.Errorf("verify bubblewrap: %w", err)
-	}
-	if err := verifyPinnedExecutable(prlimitPath, policy.PrlimitDigest); err != nil {
-		return AdmissionReport{}, fmt.Errorf("verify prlimit: %w", err)
-	}
 	digest := canon.Digest(plaintext)
 	directory, err := os.MkdirTemp("", ".tos-attachment-scan-")
 	if err != nil {
@@ -141,6 +135,14 @@ func admitPlaintext(ctx context.Context, plaintext []byte, metadata Metadata, po
 	defer os.RemoveAll(directory)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		return AdmissionReport{}, errors.New("protect attachment scan directory")
+	}
+	sandboxPath, err := stagePinnedExecutable(directory, "bubblewrap", bubblewrapPath, policy.BubblewrapDigest)
+	if err != nil {
+		return AdmissionReport{}, fmt.Errorf("stage bubblewrap: %w", err)
+	}
+	resourceLimiterPath, err := stagePinnedExecutable(directory, "prlimit", prlimitPath, policy.PrlimitDigest)
+	if err != nil {
+		return AdmissionReport{}, fmt.Errorf("stage prlimit: %w", err)
 	}
 	input, err := newSealedScanInput(plaintext)
 	if err != nil {
@@ -158,7 +160,7 @@ func admitPlaintext(ctx context.Context, plaintext []byte, metadata Metadata, po
 		if err != nil {
 			return AdmissionReport{}, err
 		}
-		verdict, err := runSandboxedScanner(ctx, input, scannerPath, scanner, metadata,
+		verdict, err := runSandboxedScanner(ctx, input, sandboxPath, resourceLimiterPath, scannerPath, scanner, metadata,
 			digest, uint64(len(plaintext)), policy)
 		if err != nil {
 			return AdmissionReport{}, err
@@ -241,7 +243,8 @@ func validateContentPolicy(policy AgentContentPolicy, metadata Metadata, plainte
 	return nil
 }
 
-func runSandboxedScanner(parent context.Context, input *os.File, scannerPath string, scanner ScannerSpec,
+func runSandboxedScanner(parent context.Context, input *os.File, sandboxPath, resourceLimiterPath,
+	scannerPath string, scanner ScannerSpec,
 	metadata Metadata, plaintextDigest string, plaintextBytes uint64, policy AgentContentPolicy) (ScanVerdict, error) {
 	if _, err := input.Seek(0, 0); err != nil {
 		return ScanVerdict{}, errors.New("rewind attachment scanner input")
@@ -270,14 +273,15 @@ func runSandboxedScanner(parent context.Context, input *os.File, scannerPath str
 		"--ro-bind", "/usr", "/usr", "--ro-bind-try", "/lib", "/lib",
 		"--ro-bind-try", "/lib64", "/lib64", "--proc", "/proc", "--dev", "/dev",
 		"--tmpfs", "/tmp", "--dir", "/work", "--ro-bind-data", "0", "/work/input",
-		"--ro-bind", scannerPath, "/scanner", "--chdir", "/work", "--hostname", "tos-attachment-scan", "--",
-		prlimitPath, fmt.Sprintf("--as=%d", addressSpace), fmt.Sprintf("--cpu=%d", cpuSeconds),
+		"--ro-bind", scannerPath, "/scanner", "--ro-bind", resourceLimiterPath, "/prlimit",
+		"--chdir", "/work", "--hostname", "tos-attachment-scan", "--",
+		"/prlimit", fmt.Sprintf("--as=%d", addressSpace), fmt.Sprintf("--cpu=%d", cpuSeconds),
 		fmt.Sprintf("--nproc=%d", maxProcesses), "--nofile=64", "--fsize=1048576", "--core=0", "--", "/scanner",
 	}
 	arguments = append(arguments, scanner.Args...)
 	arguments = append(arguments, "--tos-scanner-id", scanner.ID, "--tos-declared-media-type", metadata.MediaType,
 		"--tos-input", "/work/input")
-	command := exec.CommandContext(ctx, bubblewrapPath, arguments...)
+	command := exec.CommandContext(ctx, sandboxPath, arguments...)
 	command.Env = []string{}
 	command.Dir = "/"
 	command.Stdin = input
@@ -337,12 +341,23 @@ func canonicalMediaType(value string) bool {
 }
 
 func copyPinnedScanner(directory string, index int, scanner ScannerSpec) (string, error) {
-	source, err := openPinnedExecutable(scanner.Executable)
+	path, err := stagePinnedExecutable(directory, fmt.Sprintf("scanner-%d", index), scanner.Executable, scanner.ExecutableDigest)
 	if err != nil {
-		return "", fmt.Errorf("open attachment scanner %s: %w", scanner.ID, err)
+		return "", fmt.Errorf("stage attachment scanner %s: %w", scanner.ID, err)
+	}
+	return path, nil
+}
+
+// stagePinnedExecutable copies from the already validated open file, then
+// verifies the copied bytes. Later pathname replacement cannot change the
+// private inode used for this admission attempt.
+func stagePinnedExecutable(directory, name, sourcePath, expectedDigest string) (string, error) {
+	source, err := openPinnedExecutable(sourcePath)
+	if err != nil {
+		return "", err
 	}
 	defer source.Close()
-	targetPath := filepath.Join(directory, fmt.Sprintf("scanner-%d", index))
+	targetPath := filepath.Join(directory, name)
 	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o500)
 	if err != nil {
 		return "", errors.New("create private attachment scanner copy")
@@ -361,21 +376,10 @@ func copyPinnedScanner(directory string, index int, scanner ScannerSpec) (string
 		return "", errors.New("close attachment scanner executable")
 	}
 	actual := "sha256:" + hex.EncodeToString(hash.Sum(nil))
-	if actual != scanner.ExecutableDigest {
-		return "", errors.New("attachment scanner executable digest mismatch")
+	if actual != expectedDigest {
+		return "", errors.New("executable digest mismatch")
 	}
 	return targetPath, nil
-}
-
-func verifyPinnedExecutable(path, expected string) error {
-	actual, err := ExecutableDigest(path)
-	if err != nil {
-		return err
-	}
-	if actual != expected {
-		return errors.New("executable digest mismatch")
-	}
-	return nil
 }
 
 // ExecutableDigest computes the SHA-256 identity of a bounded regular

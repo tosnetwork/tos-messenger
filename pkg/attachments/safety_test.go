@@ -251,6 +251,41 @@ func TestExecutableDigestRefusesUnsafePaths(t *testing.T) {
 	}
 }
 
+func TestStagedExecutableKeepsVerifiedInodeAfterPathReplacement(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, "source")
+	verified := []byte("reviewed executable")
+	if err := os.WriteFile(source, verified, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := ExecutableDigest(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := stagePinnedExecutable(staging, "launcher", source, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(directory, "replacement")
+	if err := os.WriteFile(replacement, []byte("unreviewed replacement"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, source); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, verified) {
+		t.Fatalf("staged launcher changed after source replacement: %q", got)
+	}
+}
+
 // TestSandboxScannerHelperProcess is re-executed as the pinned scanner inside
 // bubblewrap. It exits directly so the Go test harness adds no stdout around
 // the one strict verdict object.

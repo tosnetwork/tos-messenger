@@ -102,8 +102,10 @@ lower-level `Open` result to a model or tool.
 
 `OpenForAgent` requires a non-empty canonical media allow-list, a nonzero
 plaintext ceiling, and an ordered set of one to four scanners. Every scanner
-binary, `/usr/bin/bwrap`, and `/usr/bin/prlimit` is pinned by SHA-256; writable,
-relative, symlinked, substituted, or oversized scanner executables fail closed.
+binary, `/usr/bin/bwrap`, and `/usr/bin/prlimit` is pinned by SHA-256 and copied
+from its validated open file into one private per-admission directory; later
+path replacement cannot change the inode used for that attempt. Writable,
+relative, symlinked, substituted, or oversized executables fail closed.
 The exact authenticated plaintext is placed in a sealed Linux `memfd` rather
 than a persistent file. Bubblewrap receives that descriptor as read-only
 `/work/input`, unshares all supported namespaces including the network, drops
