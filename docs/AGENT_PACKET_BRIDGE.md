@@ -40,7 +40,14 @@ uses a proxy-free bounded HTTP client, and treats every non-`202` result as a
 receiver failure so the Messenger claim remains pending. The OpenFox peer
 socket is owner-private and independently runs the protocol's finalized
 signature verifier before the shared Gate; neither side converts packet bytes
-to model text or trusts untyped channel metadata. Assembly of this receiver
-into the production daemon's future admitted `agent.packet` route remains to
-add after the transport is selected; live Messenger transport remains blocked
-on M0-R.
+to model text or trusts untyped channel metadata.
+
+Daemon config v6 assembles that receiver without selecting a network route. A
+configured daemon leases admitted `agent.packet` Events only after an atomic
+kind check, invokes the receiver, and completes the Event application state
+only after packet/provider completion. Receiver failure remains retryable after
+lease expiry; completed packet claims close the crash window before Event
+completion. The general runtime filters this kind from pending listings and is
+also refused at atomic claim time, so guessing an Event ID cannot route packet
+bytes into AgentLoop. Live Messenger transport and independent operation remain
+blocked on M0-R and external evidence.
