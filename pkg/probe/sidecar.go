@@ -3,10 +3,12 @@ package probe
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"sync"
@@ -373,6 +375,119 @@ func (s *Sidecar) Echo(size int, window time.Duration) (EchoResult, error) {
 	return result, nil
 }
 
+// RLDP runs one native segmented-transfer command. The completion is treated
+// as measurement evidence, so every frozen shape field and every success
+// invariant is decoded strictly; a missing, fractional, substituted, or
+// internally inconsistent field is a tooling error rather than a failed
+// network sample.
+func (s *Sidecar) RLDP(plan RLDPTransferPlan, window time.Duration) (RLDPResult, error) {
+	if err := validateSidecarRLDPPlan(plan); err != nil {
+		return RLDPResult{}, err
+	}
+	if window < time.Millisecond || window > sidecarMaxTimeout || window%time.Millisecond != 0 {
+		return RLDPResult{}, errors.New("rldp: timeout must be a whole millisecond in [1ms, 120s]")
+	}
+	completion, err := s.command(window+sidecarCompletionGrace, "rldp", map[string]any{
+		"bytes":                 plan.PayloadBytes,
+		"interrupt_after_bytes": plan.InterruptAfterBytes,
+		"interruption_ms":       plan.Interruption.Milliseconds(),
+		"timeout_ms":            window.Milliseconds(),
+	})
+	if err != nil {
+		return RLDPResult{}, err
+	}
+	if err := expectEvent(completion, "rldp", "rldp_transferred"); err != nil {
+		return RLDPResult{}, err
+	}
+
+	fields := []struct {
+		name string
+		max  uint64
+	}{
+		{"bytes", MaxRLDPPayloadBytes},
+		{"part_size_bytes", MaxRLDPPayloadBytes},
+		{"expected_parts", MaxRLDPPayloadBytes/RLDPPartSizeBytes + 1},
+		{"interrupt_after_bytes", MaxRLDPPayloadBytes},
+		{"planned_interruption_ms", uint64(maxRLDPInterruption / time.Millisecond)},
+		{"interruption_ms", uint64(sidecarMaxTimeout / time.Millisecond)},
+		{"suppressed_messages", (1 << 53) - 1},
+		{"millis", uint64((sidecarMaxTimeout + sidecarCompletionGrace) / time.Millisecond)},
+	}
+	decoded := make(map[string]uint64, len(fields))
+	for _, field := range fields {
+		value, fieldErr := strictSidecarUint(completion, field.name, field.max)
+		if fieldErr != nil {
+			return RLDPResult{}, fmt.Errorf("rldp: %w", fieldErr)
+		}
+		decoded[field.name] = value
+	}
+	ok, err := strictSidecarBool(completion, "ok")
+	if err != nil {
+		return RLDPResult{}, fmt.Errorf("rldp: %w", err)
+	}
+	attempted, err := strictSidecarBool(completion, "interruption_attempted")
+	if err != nil {
+		return RLDPResult{}, fmt.Errorf("rldp: %w", err)
+	}
+	resumed, err := strictSidecarBool(completion, "same_transfer_resumed")
+	if err != nil {
+		return RLDPResult{}, fmt.Errorf("rldp: %w", err)
+	}
+
+	expectedParts := uint64((plan.PayloadBytes + RLDPPartSizeBytes - 1) / RLDPPartSizeBytes)
+	if decoded["bytes"] != uint64(plan.PayloadBytes) || decoded["part_size_bytes"] != RLDPPartSizeBytes ||
+		decoded["expected_parts"] != expectedParts || decoded["interrupt_after_bytes"] != plan.InterruptAfterBytes ||
+		decoded["planned_interruption_ms"] != uint64(plan.Interruption/time.Millisecond) {
+		return RLDPResult{}, errors.New("rldp: sidecar substituted the predeclared transfer shape")
+	}
+	digest := stringField(completion, "sha256_hex")
+	rawDigest, decodeErr := hex.DecodeString(digest)
+	if decodeErr != nil || len(rawDigest) != 32 || hex.EncodeToString(rawDigest) != digest {
+		return RLDPResult{}, errors.New("rldp: sidecar reported a non-canonical payload digest")
+	}
+	failure := ""
+	if value, present := completion["error"]; present {
+		var valid bool
+		failure, valid = value.(string)
+		if !valid || failure == "" {
+			return RLDPResult{}, errors.New("rldp: sidecar reported an invalid failure")
+		}
+	}
+	if resumed != ok {
+		return RLDPResult{}, errors.New("rldp: same-transfer recovery disagrees with the transfer verdict")
+	}
+	if ok {
+		if !attempted || decoded["interruption_ms"] < decoded["planned_interruption_ms"] ||
+			decoded["suppressed_messages"] == 0 || decoded["millis"] == 0 || failure != "" {
+			return RLDPResult{}, errors.New("rldp: successful verdict lacks complete interruption evidence")
+		}
+	} else if failure == "" {
+		return RLDPResult{}, errors.New("rldp: failed verdict does not name its failure")
+	}
+	roundTripMillis := decoded["millis"]
+	if !ok {
+		// The trial schema reserves latency for a completed exact transfer.
+		// Native elapsed time on a negative verdict remains diagnostic only.
+		roundTripMillis = 0
+	}
+
+	return RLDPResult{
+		PayloadBytes:              plan.PayloadBytes,
+		PayloadSHA256:             "sha256:" + digest,
+		PartSizeBytes:             uint32(decoded["part_size_bytes"]),
+		ExpectedParts:             uint32(decoded["expected_parts"]),
+		Succeeded:                 ok,
+		RoundTripMillis:           roundTripMillis,
+		InterruptionAttempted:     attempted,
+		InterruptAfterBytes:       decoded["interrupt_after_bytes"],
+		PlannedInterruptionMillis: decoded["planned_interruption_ms"],
+		InterruptionMillis:        decoded["interruption_ms"],
+		SuppressedMessages:        decoded["suppressed_messages"],
+		SameTransferResumed:       resumed,
+		Failure:                   failure,
+	}, nil
+}
+
 // Close asks for a clean shutdown, then guarantees the process is gone either
 // way.
 func (s *Sidecar) Close() {
@@ -438,4 +553,20 @@ func numberField(fields map[string]any, key string) uint64 {
 		return 0
 	}
 	return uint64(value)
+}
+
+func strictSidecarUint(fields map[string]any, key string, max uint64) (uint64, error) {
+	value, ok := fields[key].(float64)
+	if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value != math.Trunc(value) || value > float64(max) {
+		return 0, fmt.Errorf("field %q is not a bounded unsigned integer", key)
+	}
+	return uint64(value), nil
+}
+
+func strictSidecarBool(fields map[string]any, key string) (bool, error) {
+	value, ok := fields[key].(bool)
+	if !ok {
+		return false, fmt.Errorf("field %q is not a boolean", key)
+	}
+	return value, nil
 }

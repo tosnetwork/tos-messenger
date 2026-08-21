@@ -282,6 +282,82 @@ func TestADNLSidecarTrialEndToEnd(t *testing.T) {
 	}
 }
 
+// A native-only pair proves that the sidecar's exact transfer evidence reaches
+// the endpoint signature boundary unchanged. This is separate from the mixed
+// ADNL/echo matrix above: the two RLDP probe-query encodings are deliberately
+// not treated as cross-implementation conformance evidence.
+func TestADNLNativeRLDPSignedTrialEndToEnd(t *testing.T) {
+	if probe.RaceEnabled {
+		t.Skip("native process acceptance runs in the dedicated non-race pass")
+	}
+	binary := os.Getenv("TOS_ADNL_PROBE_BIN")
+	if binary == "" {
+		t.Skip("set TOS_ADNL_PROBE_BIN to run native RLDP signed-trial acceptance")
+	}
+	coordinatorAddress, coordinatorID := startCoordinator(t)
+	session := "ses_0123456789abcdeffedcba9876543210"
+	labels := [2]declared{
+		{operator: "native-one", site: "native-site-one", carrier: "consumer-isp",
+			udpPolicy: "allowed", mobility: "stationary", class: "desktop", assistance: "none"},
+		{operator: "native-two", site: "native-site-two", carrier: "datacenter",
+			udpPolicy: "allowed", mobility: "stationary", class: "server", assistance: "none"},
+	}
+	plan := probe.RLDPTransferPlan{PayloadBytes: 4_000_001,
+		InterruptAfterBytes: probe.RLDPPartSizeBytes, Interruption: 150 * time.Millisecond}
+	phases := sessionPhases{adnlProbe: binary, rldpTransfers: []probe.RLDPTransferPlan{plan}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	type outcome struct {
+		trial     reachability.Trial
+		artifacts measured
+		err       error
+	}
+	results := make(chan outcome, 2)
+	for index, role := range []string{"a", "b"} {
+		go func(index int, role string) {
+			trial, artifacts, err := measure(ctx, coordinatorAddress, session, role, "127.0.0.1:0",
+				strings.Repeat(string('a'+rune(index)), 40), identityFile(t), reachability.ProbeADNL,
+				10*time.Second, 10*time.Second, phases, labels[index])
+			results <- outcome{trial: trial, artifacts: artifacts, err: err}
+		}(index, role)
+	}
+
+	policy := testPolicyWith(coordinatorID)
+	trials := make(map[reachability.Role]reachability.Trial, 2)
+	for index := 0; index < 2; index++ {
+		received := <-results
+		if received.err != nil {
+			t.Fatalf("native measure: %v", received.err)
+		}
+		if received.artifacts.manifest.ADNLImplementation != "tos-native-adnl" {
+			t.Fatalf("native trial named the wrong implementation: %+v", received.artifacts.manifest)
+		}
+		if err := reachability.VerifyTrial(policy, received.trial); err != nil {
+			t.Fatalf("native RLDP trial does not verify: %v", err)
+		}
+		if len(received.trial.RLDPTransfers) != 1 {
+			t.Fatalf("native result was not signed exactly once: %+v", received.trial.RLDPTransfers)
+		}
+		transfer := received.trial.RLDPTransfers[0]
+		if transfer.PayloadBytes != uint32(plan.PayloadBytes) || transfer.PartSizeBytes != probe.RLDPPartSizeBytes ||
+			transfer.ExpectedParts != 3 || !transfer.Succeeded || transfer.RoundTripMillis == 0 ||
+			!transfer.InterruptionAttempted || transfer.InterruptAfterBytes != probe.RLDPPartSizeBytes ||
+			transfer.PlannedInterruptionMillis != 150 || transfer.InterruptionMillis < 150 ||
+			transfer.SuppressedMessages == 0 || !transfer.SameTransferResumed {
+			t.Fatalf("signed native RLDP evidence is incomplete: %+v", transfer)
+		}
+		trials[received.trial.Role] = received.trial
+		t.Logf("role %s signed native RLDP digest=%s suppressed=%d round_trip=%dms",
+			received.trial.Role, transfer.PayloadSHA256, transfer.SuppressedMessages, transfer.RoundTripMillis)
+	}
+	a, b := trials[reachability.RoleA], trials[reachability.RoleB]
+	if a.LocalManifestDigest != b.PeerManifestDigest || a.PeerManifestDigest != b.LocalManifestDigest {
+		t.Fatalf("native signed trials do not cross their manifests: a=%q/%q b=%q/%q",
+			a.LocalManifestDigest, a.PeerManifestDigest, b.LocalManifestDigest, b.PeerManifestDigest)
+	}
+}
+
 // classify is the single translation from what the probe measured to the
 // trial vocabulary the schema validates, so its cases are pinned directly.
 func TestClassifyOutcomes(t *testing.T) {

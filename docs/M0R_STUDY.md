@@ -171,7 +171,7 @@ only paired directions and requires every predeclared size to meet both its
 sample floor and operator-balanced success threshold before `direct-first` can
 qualify. A failed maximum-size echo can therefore veto a path that only carries
 small control traffic.
-The in-process collector then runs each predeclared RLDPv2 plan. Responses are
+The collector then runs each predeclared RLDPv2 plan. Responses are
 deterministic and digest-checked, bounded to 16 MiB, and must exceed the pinned
 2,000,000-byte FEC part size. For an interrupted plan, the receiver first
 observes a complete part, suppresses both inbound and outbound RLDP custom
@@ -181,9 +181,15 @@ after the window with the exact payload. It never issues an application retry.
 The two directions occupy separate bounded slots so one endpoint's induced
 outage cannot masquerade as the other's. Pairing again requires both signed
 directions; success and same-transfer recovery join by AND, latency by the
-slower half. The native sidecar currently exposes ADNL echo but no RLDP command,
-so a sidecar run loudly refuses RLDP plans rather than claiming a cross-check it
-did not perform.
+slower half. The native sidecar now runs the canonical decision-bearing plan
+through the node's real RLDPv2 actor: its observer is bound to the exact
+complementary response transfer ID, its dedicated UDP manager counts packets
+suppressed in both directions, and the Go driver rejects substituted or
+internally inconsistent completions before trial signing. Native-native local
+acceptance covers both directions; the real multi-operator study and public
+network execution remain unperformed. Mixed native/in-process peers remain an
+ADNL/echo matrix, not qualifying RLDP evidence, because their probe-query
+encodings differ.
 With a hold window configured the hold phase also runs over the tunneled
 session, reported through its own status booleans; the survival span stays a
 direct-session measurement, because a relayed lifetime would measure the

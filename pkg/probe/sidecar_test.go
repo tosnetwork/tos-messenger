@@ -47,6 +47,18 @@ func fakeHello() map[string]any {
 	}
 }
 
+func fakeRLDPCompletion(id any, command map[string]any) map[string]any {
+	return map[string]any{
+		"id": id, "event": "rldp_transferred", "ok": true,
+		"bytes": command["bytes"], "part_size_bytes": RLDPPartSizeBytes, "expected_parts": 3,
+		"interrupt_after_bytes":   command["interrupt_after_bytes"],
+		"planned_interruption_ms": command["interruption_ms"],
+		"interruption_attempted":  true, "interruption_ms": 151,
+		"suppressed_messages": 23, "same_transfer_resumed": true,
+		"sha256_hex": strings.Repeat("ee", 32), "millis": 487,
+	}
+}
+
 // runFakeSidecar speaks one scripted behavior per mode.
 func runFakeSidecar(mode string) {
 	switch mode {
@@ -74,7 +86,8 @@ func runFakeSidecar(mode string) {
 		id := command["id"]
 		name, _ := command["cmd"].(string)
 		switch mode {
-		case "happy":
+		case "happy", "rldp-wrong-shape", "rldp-wrong-digest", "rldp-success-no-loss",
+			"rldp-failure-no-error", "rldp-noninteger", "rldp-failed":
 			switch name {
 			case "identity":
 				emitLine(map[string]any{"id": id, "event": "identity",
@@ -95,6 +108,26 @@ func runFakeSidecar(mode string) {
 			case "echo":
 				emitLine(map[string]any{"id": id, "event": "echoed", "ok": true,
 					"sha256_hex": strings.Repeat("ee", 32), "millis": 5})
+			case "rldp":
+				completion := fakeRLDPCompletion(id, command)
+				switch mode {
+				case "rldp-wrong-shape":
+					completion["bytes"] = 4_000_002
+				case "rldp-wrong-digest":
+					completion["sha256_hex"] = strings.Repeat("E", 64)
+				case "rldp-success-no-loss":
+					completion["suppressed_messages"] = 0
+				case "rldp-failure-no-error":
+					completion["ok"] = false
+					completion["same_transfer_resumed"] = false
+				case "rldp-noninteger":
+					completion["interruption_ms"] = 150.5
+				case "rldp-failed":
+					completion["ok"] = false
+					completion["same_transfer_resumed"] = false
+					completion["error"] = "query timeout"
+				}
+				emitLine(completion)
 			case "close":
 				emitLine(map[string]any{"id": id, "event": "closed"})
 				os.Exit(0)
@@ -178,7 +211,45 @@ func TestSidecarDriverHappyPath(t *testing.T) {
 	if err != nil || !echoed.OK || echoed.Millis != 5 || echoed.Bytes != 1024 {
 		t.Fatalf("echo: %+v err=%v", echoed, err)
 	}
+	plan := RLDPTransferPlan{PayloadBytes: 4_000_001, InterruptAfterBytes: RLDPPartSizeBytes,
+		Interruption: 150 * time.Millisecond}
+	transferred, err := sidecar.RLDP(plan, 20*time.Second)
+	if err != nil || !transferred.Succeeded || !transferred.SameTransferResumed ||
+		transferred.PayloadBytes != plan.PayloadBytes || transferred.ExpectedParts != 3 ||
+		transferred.InterruptionMillis != 151 || transferred.SuppressedMessages != 23 ||
+		transferred.PayloadSHA256 != "sha256:"+strings.Repeat("ee", 32) {
+		t.Fatalf("rldp: %+v err=%v", transferred, err)
+	}
 	sidecar.Close()
+}
+
+func TestSidecarRLDPCompletionIsStrict(t *testing.T) {
+	plan := RLDPTransferPlan{PayloadBytes: 4_000_001, InterruptAfterBytes: RLDPPartSizeBytes,
+		Interruption: 150 * time.Millisecond}
+	for _, mode := range []string{"rldp-wrong-shape", "rldp-wrong-digest", "rldp-success-no-loss",
+		"rldp-failure-no-error", "rldp-noninteger"} {
+		t.Run(mode, func(t *testing.T) {
+			sidecar, err := startFake(t, mode)
+			if err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			if _, err := sidecar.RLDP(plan, 20*time.Second); err == nil {
+				t.Fatal("mutated RLDP evidence was accepted")
+			}
+		})
+	}
+
+	// A structurally complete negative verdict is a valid measured outcome,
+	// not a protocol failure. It remains unsuccessful and retains its reason.
+	sidecar, err := startFake(t, "rldp-failed")
+	if err != nil {
+		t.Fatalf("start failed-result fake: %v", err)
+	}
+	result, err := sidecar.RLDP(plan, 20*time.Second)
+	if err != nil || result.Succeeded || result.SameTransferResumed || result.RoundTripMillis != 0 ||
+		result.Failure != "query timeout" {
+		t.Fatalf("valid failed result was not preserved: result=%+v err=%v", result, err)
+	}
 }
 
 // A hello that names another protocol revision, describes no build, or never

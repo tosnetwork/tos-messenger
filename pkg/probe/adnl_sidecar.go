@@ -64,6 +64,11 @@ func RunADNLSidecar(ctx context.Context, config Config) (Result, error) {
 	if config.HoldWindow > 0 && config.KeepaliveInterval > sidecarMaxTimeout {
 		return Result{}, errors.New("the sidecar protocol bounds the keepalive interval to at most 120s")
 	}
+	for _, plan := range config.RLDPTransfers {
+		if err := validateSidecarRLDPPlan(plan); err != nil {
+			return Result{}, err
+		}
+	}
 
 	sidecar, err := StartSidecar(ctx, config.SidecarPath)
 	if err != nil {
@@ -184,6 +189,23 @@ const (
 	sidecarMaxTimeout    = 120 * time.Second
 	sidecarMaxHoldWindow = 600 * time.Second
 )
+
+// validateSidecarRLDPPlan narrows the general collector profile to the exact
+// native command currently exposed. It rejects before the subprocess starts,
+// so an operator asking for an unsupported interruption point cannot file a
+// transport failure caused by a tooling mismatch.
+func validateSidecarRLDPPlan(plan RLDPTransferPlan) error {
+	if err := validateRLDPPlan(plan); err != nil {
+		return err
+	}
+	if plan.InterruptAfterBytes != RLDPPartSizeBytes || plan.Interruption == 0 {
+		return errors.New("the native sidecar requires interruption after exactly the first 2000000-byte RLDP part")
+	}
+	if plan.Interruption%time.Millisecond != 0 {
+		return errors.New("the native sidecar requires an interruption in whole milliseconds")
+	}
+	return nil
+}
 
 // sidecarUnsupportedCandidate is the sidecar's distinct refusal for a
 // candidate set that was non-empty but entirely outside what its
@@ -343,6 +365,34 @@ func (r *runner) establishSidecar(ctx context.Context, sidecar *Sidecar,
 			break
 		}
 		r.result.EchoResults = append(r.result.EchoResults, echoed)
+	}
+
+	// RLDP direction slots deliberately do not overlap. Role A owns the first
+	// bounded slot and role B waits through it before issuing its own query;
+	// otherwise both endpoints would induce whole-socket loss at once and each
+	// signed sample would include the peer's unrelated fault. The native actor
+	// remains alive during the wait and can answer the other endpoint's query.
+	if len(r.config.RLDPTransfers) > 0 && r.config.Role == RoleB {
+		timer := time.NewTimer(rldpBudget(r.config))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+	for _, plan := range r.config.RLDPTransfers {
+		if ctx.Err() != nil {
+			break
+		}
+		transferred, transferErr := sidecar.RLDP(plan, r.config.PunchTimeout)
+		if transferErr != nil {
+			// A malformed completion, unsupported old binary, or dead sidecar is
+			// tooling failure. Returning it prevents the orchestrator from signing
+			// a network sample manufactured by the collector boundary itself.
+			return transferErr
+		}
+		r.result.RLDPResults = append(r.result.RLDPResults, transferred)
 	}
 
 	// The session must outlive this endpoint's own success for the same

@@ -256,16 +256,21 @@ the measured phases. Their verdicts appear on stderr as
 configure the policy's exact sizes. Pairing keeps only sizes measured by both
 halves; success is the conjunction of the two outcomes and latency is the
 slower half. A one-sided result therefore cannot become bidirectional route
-evidence. Add `-rldp-transfers 4000001@2000000@150ms` on both in-process
-collector endpoints for the example policy. The first number is response
+evidence. Add `-rldp-transfers 4000001@2000000@150ms` on both collector
+endpoints for the example policy. The first number is response
 bytes, the second is the required progress point, and the third is the induced
 loss window. Role A owns the first bounded transfer slot and role B the second.
 Expect `rldp=4000001:ok:...:interrupted:...:suppressed=N:resumed=true`; zero
 suppressed messages or `resumed=false` cannot satisfy the gate. The same
 application query must finish after the interruption—reissuing it is not
-resume. The current `tos-adnl-probe/1` native sidecar has no RLDP command and
-therefore refuses `-rldp-transfers`; its ADNL echo remains a separate native
-cross-check, not native RLDP evidence.
+resume. When `-adnl-probe` is set, both endpoints must use the native sidecar
+for this RLDP cross-check. Protocol `tos-adnl-probe/1` accepts the canonical
+first-part interruption in whole milliseconds, observes the exact
+complementary response transfer ID, suppresses and counts real packets at the
+dedicated UDP manager, and maps only a structurally exact completion into the
+signed v4 trial. Mixed Go/native RLDP peers use different probe-query encodings
+and are not qualifying cross-implementation RLDP evidence; the existing mixed
+matrix remains ADNL/echo interoperability evidence only.
 
 ## 7. Aggregate
 
