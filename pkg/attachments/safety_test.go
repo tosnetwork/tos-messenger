@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -94,6 +97,10 @@ func TestOpenForAgentRequiresPinnedSandboxedScanner(t *testing.T) {
 		"resource limiter substitution": func(value *AgentContentPolicy) {
 			value.PrlimitDigest = "sha256:" + strings.Repeat("6", 64)
 		},
+		"cgroup launcher substitution": func(value *AgentContentPolicy) {
+			value.Cgroup = &ScannerCgroupPolicy{SystemdRunDigest: "sha256:" + strings.Repeat("5", 64),
+				MemoryMaxBytes: 256 << 20, TasksMax: 32}
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -105,6 +112,94 @@ func TestOpenForAgentRequiresPinnedSandboxedScanner(t *testing.T) {
 				t.Fatalf("unsafe content released: %+v err=%v", result, err)
 			}
 		})
+	}
+}
+
+func TestScannerCgroupCommandIsFailClosed(t *testing.T) {
+	runtimeDirectory := t.TempDir()
+	if err := os.Chmod(runtimeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDirectory)
+	policy := &ScannerCgroupPolicy{SystemdRunDigest: "sha256:" + strings.Repeat("1", 64),
+		MemoryMaxBytes: 256 << 20, TasksMax: 32}
+	command, err := scannerCommand(context.Background(), "/pinned/systemd-run", "/pinned/bwrap",
+		[]string{"--sandbox-argument"}, 5*time.Second, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Path != "/pinned/systemd-run" || len(command.Env) != 1 ||
+		command.Env[0] != "XDG_RUNTIME_DIR="+runtimeDirectory {
+		t.Fatalf("wrong cgroup command boundary: path=%q env=%v", command.Path, command.Env)
+	}
+	joined := strings.Join(command.Args, "\n")
+	for _, required := range []string{
+		"--user", "--wait", "--pipe", "--collect", "--quiet", "--service-type=exec",
+		"--property=MemoryAccounting=yes", "--property=MemoryMax=268435456",
+		"--property=MemorySwapMax=0", "--property=TasksAccounting=yes", "--property=TasksMax=32",
+		"--property=LimitCORE=0", "--property=NoNewPrivileges=yes", "--property=KillMode=control-group",
+		"--property=OOMPolicy=stop", "--property=RuntimeMaxSec=5s", "--property=TimeoutStopSec=1s",
+		"/pinned/bwrap", "--sandbox-argument",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("cgroup command omitted %q: %v", required, command.Args)
+		}
+	}
+	if matched, _ := regexp.MatchString(`--unit=tos-attachment-scan-[0-9a-f]{32}\.service`, joined); !matched {
+		t.Fatalf("cgroup command has no unpredictable bounded unit: %v", command.Args)
+	}
+
+	if err := os.Chmod(runtimeDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scannerCommand(context.Background(), "/pinned/systemd-run", "/pinned/bwrap", nil,
+		5*time.Second, policy); err == nil {
+		t.Fatal("unsafe user runtime directory accepted")
+	}
+}
+
+func TestScannerCgroupHardLimitsLive(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("scanner cgroup is Linux-only")
+	}
+	for _, path := range []string{bubblewrapPath, prlimitPath, systemdRunPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Skipf("hard-isolation executable unavailable: %s", path)
+		}
+	}
+	if os.Getenv("XDG_RUNTIME_DIR") == "" {
+		t.Skip("user systemd runtime is unavailable")
+	}
+	probe := exec.Command(systemdRunPath, "--user", "--wait", "--pipe", "--collect", "--quiet",
+		"--service-type=exec", "/bin/true")
+	probe.Env = []string{"XDG_RUNTIME_DIR=" + os.Getenv("XDG_RUNTIME_DIR")}
+	if err := probe.Run(); err != nil {
+		t.Skipf("user systemd manager is unavailable: %v", err)
+	}
+	plaintext := []byte("cgroup isolated attachment\n")
+	ref, chunks, err := Seal(bytes.NewReader(bytes.Repeat([]byte{0x76}, KeyBytes+AttachmentIDBytes+NoncePrefixBytes)), plaintext,
+		Metadata{Filename: "cgroup.txt", MediaType: "text/plain", PlaintextDigest: canon.Digest(plaintext), ExpiresAtUnix: 1_900_003_600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := scannerTestPolicy(t, "cgroup-proof")
+	digest, err := ExecutableDigest(systemdRunPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Cgroup = &ScannerCgroupPolicy{SystemdRunDigest: digest, MemoryMaxBytes: 256 << 20, TasksMax: 32}
+	admitted, err := OpenForAgent(context.Background(), ref, chunks, Policy{MaxPlaintextBytes: 1 << 20}, policy,
+		time.Unix(1_900_000_000, 0))
+	if err != nil {
+		t.Fatalf("cgroup admission: %v", err)
+	}
+	if len(admitted.Report.Scans) != 1 || admitted.Report.Scans[0].ReasonCode != "cgroup_hard_limits" {
+		t.Fatalf("scanner did not observe its hard boundary: %+v", admitted.Report)
+	}
+	policy.Scanners[0].Args = scannerHelperArgs("oom")
+	if released, err := OpenForAgent(context.Background(), ref, chunks, Policy{MaxPlaintextBytes: 1 << 20}, policy,
+		time.Unix(1_900_000_000, 0)); err == nil || released.Plaintext != nil {
+		t.Fatalf("memory-exhausting scanner released plaintext: %+v err=%v", released, err)
 	}
 }
 
@@ -211,6 +306,17 @@ func TestAgentContentPolicyFailsClosed(t *testing.T) {
 		},
 		"unbounded plaintext": func(value *AgentContentPolicy) { value.MaxPlaintextBytes = 0 },
 		"unbounded timeout":   func(value *AgentContentPolicy) { value.ScannerTimeout = 3 * time.Minute },
+		"cgroup launcher unpinned": func(value *AgentContentPolicy) {
+			value.Cgroup = &ScannerCgroupPolicy{MemoryMaxBytes: 256 << 20, TasksMax: 32}
+		},
+		"cgroup memory too small": func(value *AgentContentPolicy) {
+			value.Cgroup = &ScannerCgroupPolicy{SystemdRunDigest: "sha256:" + strings.Repeat("3", 64),
+				MemoryMaxBytes: 32 << 20, TasksMax: 32}
+		},
+		"cgroup tasks exceed process ceiling": func(value *AgentContentPolicy) {
+			value.Cgroup = &ScannerCgroupPolicy{SystemdRunDigest: "sha256:" + strings.Repeat("3", 64),
+				MemoryMaxBytes: 256 << 20, TasksMax: 4097}
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -301,6 +407,13 @@ func TestSandboxScannerHelperProcess(t *testing.T) {
 	if mode == "timeout" {
 		time.Sleep(5 * time.Second)
 	}
+	if mode == "oom" {
+		allocation := make([]byte, 512<<20)
+		for index := 0; index < len(allocation); index += os.Getpagesize() {
+			allocation[index] = byte(index)
+		}
+		runtime.KeepAlive(allocation)
+	}
 	if mode == "output-bomb" {
 		_, _ = os.Stdout.Write(bytes.Repeat([]byte("x"), MaxScanVerdictBytes+1))
 		os.Exit(0)
@@ -319,6 +432,17 @@ func TestSandboxScannerHelperProcess(t *testing.T) {
 	if mode == "isolation" {
 		if _, err := os.ReadFile(os.Args[marker+2]); err == nil {
 			decision = ScanDeny
+		}
+	}
+	reason := ""
+	if mode == "cgroup-proof" {
+		membership, err := os.ReadFile("/proc/self/cgroup")
+		var core syscall.Rlimit
+		coreErr := syscall.Getrlimit(syscall.RLIMIT_CORE, &core)
+		if err != nil || coreErr != nil || !bytes.Contains(membership, []byte("/tos-attachment-scan-")) || core.Cur != 0 {
+			decision = ScanDeny
+		} else {
+			reason = "cgroup_hard_limits"
 		}
 	}
 	raw, err := os.ReadFile(input)
@@ -350,7 +474,7 @@ func TestSandboxScannerHelperProcess(t *testing.T) {
 	}
 	verdict := ScanVerdict{Schema: ScanVerdictSchema, ScannerID: scannerID, ScannerDigest: executableDigest,
 		PlaintextDigest: plaintextDigest, SizeBytes: sizeBytes, DeclaredMediaType: declared,
-		DetectedMediaType: detected, Decision: decision}
+		DetectedMediaType: detected, Decision: decision, ReasonCode: reason}
 	if err := json.NewEncoder(os.Stdout).Encode(verdict); err != nil {
 		os.Exit(94)
 	}

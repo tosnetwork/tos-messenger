@@ -5,7 +5,7 @@ authenticated opaque-storage contract for private Messenger attachments;
 `pkg/attachmentapi` and `tos-attachmentd` expose its bounded Unix/HTTPS service
 boundary. `OpenForAgent` adds an explicit Linux content-admission boundary and
 `tos-attachment-text-scanner` supplies a minimal reference UTF-8 inspector.
-`pkg/attachmentadmission`, daemon config v8 and local API v5 keep the Reference,
+`pkg/attachmentadmission`, daemon config v8 and local API v6 keep the Reference,
 attachment key and fetch capability out of OpenFox while releasing admitted
 `text/plain` plus exact scanner evidence under the Event's application lease.
 This does not select a message route, paid retention profile, production
@@ -159,11 +159,14 @@ path replacement cannot change the inode used for that attempt. Writable,
 relative, symlinked, substituted, or oversized executables fail closed.
 The exact authenticated plaintext is placed in a sealed Linux `memfd` rather
 than a persistent file. Bubblewrap receives that descriptor as read-only
-`/work/input`, unshares all supported namespaces including the network, drops
-all capabilities, clears the environment, exposes only a copied scanner plus
+`/work/input`, unshares user, IPC, PID, network and UTS namespaces, drops all
+capabilities, clears the environment, exposes only a copied scanner plus
 read-only system runtime directories, and gives it fresh `/proc`, `/dev`,
 `/tmp`, and `/work` views. The scanner runs behind wall-clock, virtual-address,
-CPU, file-descriptor, output-size and `RLIMIT_NPROC` ceilings.
+CPU, file-descriptor, output-size and `RLIMIT_NPROC` ceilings. The cgroup
+namespace remains shared only so the scanner and acceptance tests can observe
+the otherwise unmodifiable kernel membership assigned by the optional hard
+profile; cgroupfs is not mounted into the sandbox.
 
 The only accepted stdout is one strict bounded JSON verdict. It must bind the
 scanner ID and binary digest, exact plaintext SHA-256 and size, and identical
@@ -183,10 +186,16 @@ same all-must-allow boundary.
 
 The address-space ceiling bounds virtual mappings, while fixed `GOMEMLIMIT`
 and `GOMAXPROCS` values constrain the reference Go scanner. `RLIMIT_NPROC` is a
-per-real-user limit on many Linux systems, not an isolated per-scan cgroup
-budget. Deployments needing hard RSS, process or I/O isolation must add an
-independently reviewed service/cgroup/container boundary; this implementation
-does not claim one.
+per-real-user limit on many Linux systems, so it is not by itself an isolated
+per-scan process budget. The optional `cgroup` policy therefore pins and stages
+`/usr/bin/systemd-run`, creates one unpredictable transient user service per
+scan, and fixes kernel-accounted `MemoryMax`, `MemorySwapMax=0`, `TasksMax`,
+`LimitCORE=0`, `NoNewPrivileges=yes`, whole-cgroup kill, and a runtime ceiling.
+Missing user-systemd authority, an unsafe runtime directory, launcher
+substitution, unsupported properties, unit failure, OOM, timeout, or restart
+damage releases no plaintext. When this explicit policy is absent, the daemon
+continues to make only the prlimit/bubblewrap claim and does not imply hard RSS
+or swap isolation.
 
 The profile bounds plaintext to 512 MiB, chunks to 1 MiB (256 KiB by default),
 and count to 2,048; the recipient may set a smaller plaintext limit and an
@@ -212,11 +221,15 @@ restart replay refusal, interrupted multi-frame upload, signed local deletion
 observation, locator/SSRF policy, sealed-input sandboxing, strict verdict
 binding, daemon-owned/OpenFox application, Event v2 cross-consumption and the
 reference text inspector, plus daemon-owned outbound OpenFox streaming,
-dual-capability signing, restart recovery, ACK-before-queue ordering and exact
-retry are implemented and tested locally.
+dual-capability signing, restart recovery, ACK-before-queue ordering, exact
+retry, and the optional cgroup hard-isolation profile are implemented and
+tested locally. The live cgroup test observes a distinct transient unit and
+zero core limit, then proves a memory-exhausting scanner is killed without
+releasing plaintext; a separate host probe records exact memory, zero-swap and
+task ceilings from cgroup v2.
 Still open are an independently operated public-TLS deployment, measured
 interrupted wide-area transfer, independently audited retention behavior,
-a selected production malware scanner and representative hostile corpus, hard
-cgroup-level resource evidence, non-text product policy, and commercial
-attachment service terms. A content-addressed object may have
+a selected production malware scanner and representative hostile corpus,
+independent hard-isolation review/evidence, non-text product policy, and
+commercial attachment service terms. A content-addressed object may have
 been copied, so no storage API promises cryptographic erasure it cannot prove.

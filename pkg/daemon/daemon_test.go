@@ -681,6 +681,30 @@ func TestAttachmentAdmissionPlaintextCannotExceedEventBoundary(t *testing.T) {
 	}
 }
 
+func TestAttachmentAdmissionMapsExplicitCgroupPolicy(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	config := AttachmentAdmissionConfig{
+		MaxPlaintextBytes: 1024, AllowedMediaTypes: []string{"text/plain"},
+		Scanners: []AttachmentScannerConfig{{ID: "reviewed", Executable: "/scanner",
+			ExecutableDigest: digest}},
+		BubblewrapDigest: digest, PrlimitDigest: digest,
+		Cgroup: &AttachmentScannerCgroupConfig{SystemdRunDigest: digest,
+			MemoryMaxBytes: 256 << 20, TasksMax: 32},
+	}
+	_, content, _, err := config.Policies()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.Cgroup == nil || content.Cgroup.SystemdRunDigest != digest ||
+		content.Cgroup.MemoryMaxBytes != 256<<20 || content.Cgroup.TasksMax != 32 {
+		t.Fatalf("wrong cgroup mapping: %+v", content.Cgroup)
+	}
+	config.Cgroup.MemoryMaxBytes = 32 << 20
+	if _, _, _, err := config.Policies(); err == nil {
+		t.Fatal("unsafe cgroup memory limit accepted")
+	}
+}
+
 func testEvent(t *testing.T) envelope.Event {
 	t.Helper()
 	event, err := envelope.NewEvent(envelope.Event{
