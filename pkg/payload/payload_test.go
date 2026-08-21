@@ -2,6 +2,8 @@ package payload
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -72,7 +74,7 @@ func sample(kind string) Payload {
 	case "artifact.encrypted":
 		plaintext := []byte("private attachment")
 		random := bytes.NewReader(bytes.Repeat([]byte{0x42}, attachments.KeyBytes+attachments.AttachmentIDBytes+attachments.NoncePrefixBytes))
-		ref, _, err := attachments.Seal(random, plaintext, attachments.Metadata{Filename: "note.txt", MediaType: "text/plain", PlaintextDigest: canon.Digest(plaintext), ExpiresAtUnix: 1_900_000_000})
+		ref, chunks, err := attachments.Seal(random, plaintext, attachments.Metadata{Filename: "note.txt", MediaType: "text/plain", PlaintextDigest: canon.Digest(plaintext), ExpiresAtUnix: 1_900_000_000})
 		if err != nil {
 			panic(err)
 		}
@@ -88,7 +90,27 @@ func sample(kind string) Payload {
 		if err != nil {
 			panic(err)
 		}
-		return EncryptedAttachment{ManifestDigest: digest, ReferenceJSON: raw, Locator: locator}
+		endpointKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x51}, ed25519.SeedSize))
+		storageKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x52}, ed25519.SeedSize))
+		capabilityKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x53}, ed25519.SeedSize))
+		grant, err := attachments.SignGrant(attachments.CapabilityGrant{NetworkID: "tos-local",
+			GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64),
+			AgentID: "agent_" + strings.Repeat("c", 64), EndpointID: "mep_" + strings.Repeat("d", 64),
+			StoragePublicKeyHex:    hex.EncodeToString(storageKey.Public().(ed25519.PublicKey)),
+			CapabilityPublicKeyHex: hex.EncodeToString(capabilityKey.Public().(ed25519.PublicKey)),
+			ManifestDigest:         digest, ChunkDigests: append([]string(nil), ref.Manifest.ChunkDigests...),
+			CiphertextBytes: uint64(len(chunks[0].Ciphertext)), RetainUntilUnix: ref.Metadata.ExpiresAtUnix,
+			Operations: []attachments.Operation{attachments.OperationFetch}, IssuedAtUnix: 1_899_000_000,
+			ExpiresAtUnix: 1_900_000_000}, endpointKey)
+		if err != nil {
+			panic(err)
+		}
+		grantJSON, err := attachments.EncodeGrantJSON(grant)
+		if err != nil {
+			panic(err)
+		}
+		return EncryptedAttachment{ManifestDigest: digest, ReferenceJSON: raw, Locator: locator,
+			FetchGrantJSON: grantJSON, FetchCapabilityPrivateKeyHex: hex.EncodeToString(capabilityKey)}
 	case "service.quote.reference":
 		return QuoteReference{ChainReference: sampleChainReference()}
 	case "service.escrow.reference":
@@ -219,6 +241,69 @@ func TestEncryptedAttachmentV1HistoryRemainsDecodable(t *testing.T) {
 	if !SupportsSchema("artifact.encrypted", encryptedAttachmentV1Schema) ||
 		SupportsSchema("artifact.encrypted", "tos.messaging.payload.encrypted-attachment.v999") {
 		t.Fatal("attachment schema allow-list is wrong")
+	}
+}
+
+func TestEncryptedAttachmentV2HistoryRemainsDecodable(t *testing.T) {
+	current := sample("artifact.encrypted").(EncryptedAttachment)
+	legacy := EncryptedAttachment{ManifestDigest: current.ManifestDigest, ReferenceJSON: current.ReferenceJSON,
+		Locator: current.Locator, schema: encryptedAttachmentV2Schema}
+	encoded, err := Encode(legacy)
+	if err != nil {
+		t.Fatalf("encode v2 attachment: %v", err)
+	}
+	decoded, err := DecodeSchema("artifact.encrypted", encryptedAttachmentV2Schema, encoded)
+	if err != nil {
+		t.Fatalf("decode v2 attachment: %v", err)
+	}
+	attachment := decoded.(EncryptedAttachment)
+	if attachment.Schema() != encryptedAttachmentV2Schema || len(attachment.FetchGrantJSON) != 0 ||
+		attachment.FetchCapabilityPrivateKeyHex != "" {
+		t.Fatalf("v2 attachment acquired fetch authority: %#v", attachment)
+	}
+	if _, err := Decode("artifact.encrypted", encoded); err == nil {
+		t.Fatal("v2 bytes were guessed as the current schema")
+	}
+}
+
+func TestEncryptedAttachmentV3FetchAuthorityFailsClosed(t *testing.T) {
+	valid := sample("artifact.encrypted").(EncryptedAttachment)
+	cases := map[string]func(*EncryptedAttachment){
+		"missing grant": func(value *EncryptedAttachment) { value.FetchGrantJSON = nil },
+		"wrong private key": func(value *EncryptedAttachment) {
+			value.FetchCapabilityPrivateKeyHex = strings.Repeat("0", ed25519.PrivateKeySize*2)
+		},
+		"extra operation": func(value *EncryptedAttachment) {
+			grant, _ := attachments.DecodeGrantJSON(value.FetchGrantJSON)
+			grant.Operations = []attachments.Operation{attachments.OperationFetch, attachments.OperationUpload}
+			value.FetchGrantJSON, _ = attachments.EncodeGrantJSON(grant)
+		},
+		"ciphertext byte substitution": func(value *EncryptedAttachment) {
+			grant, _ := attachments.DecodeGrantJSON(value.FetchGrantJSON)
+			grant.CiphertextBytes++
+			value.FetchGrantJSON, _ = attachments.EncodeGrantJSON(grant)
+		},
+		"retention substitution": func(value *EncryptedAttachment) {
+			grant, _ := attachments.DecodeGrantJSON(value.FetchGrantJSON)
+			grant.RetainUntilUnix--
+			value.FetchGrantJSON, _ = attachments.EncodeGrantJSON(grant)
+		},
+		"chunk substitution": func(value *EncryptedAttachment) {
+			grant, _ := attachments.DecodeGrantJSON(value.FetchGrantJSON)
+			grant.ChunkDigests[0] = "sha256:" + strings.Repeat("9", 64)
+			value.FetchGrantJSON, _ = attachments.EncodeGrantJSON(grant)
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			changed := valid
+			changed.ReferenceJSON = append([]byte(nil), valid.ReferenceJSON...)
+			changed.FetchGrantJSON = append([]byte(nil), valid.FetchGrantJSON...)
+			mutate(&changed)
+			if err := changed.Validate(); err == nil {
+				t.Fatal("invalid recipient fetch authority was accepted")
+			}
+		})
 	}
 }
 

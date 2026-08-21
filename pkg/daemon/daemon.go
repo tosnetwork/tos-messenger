@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/agentpacketbridge"
+	"github.com/tosnetwork/tos-messenger/pkg/attachmentadmission"
 	"github.com/tosnetwork/tos-messenger/pkg/chainquote"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
@@ -167,6 +168,21 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		Policy: config.FirewallPolicy(), OwnerKey: ownerKey,
 		Journal: journal, Dispatcher: dispatcher, LocalEndpointID: config.EndpointID,
 		DeviceIDs: append([]string(nil), config.Publication.DeviceIDs...),
+	}
+	if config.AttachmentAdmission != nil {
+		openPolicy, contentPolicy, httpsConfig, policyErr := config.AttachmentAdmission.Policies()
+		if policyErr != nil {
+			_ = journal.Close()
+			return nil, policyErr
+		}
+		admitter, admissionErr := attachmentadmission.New(attachmentadmission.Config{
+			OpenPolicy: openPolicy, ContentPolicy: contentPolicy, HTTPS: httpsConfig, Now: instance.now,
+		})
+		if admissionErr != nil {
+			_ = journal.Close()
+			return nil, errors.New("build attachment admission: " + admissionErr.Error())
+		}
+		serverConfig.AttachmentAdmitter = admitter
 	}
 	if quoteResolver != nil {
 		serverConfig.QuoteResolver = quoteResolver

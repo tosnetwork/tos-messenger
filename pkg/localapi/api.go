@@ -32,9 +32,9 @@ import (
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema = "tos.messaging.local-request.v3"
+	RequestSchema = "tos.messaging.local-request.v4"
 	// ResponseSchema is the strict wire schema of a response.
-	ResponseSchema = "tos.messaging.local-response.v1"
+	ResponseSchema = "tos.messaging.local-response.v2"
 
 	// MaxFrameBytes bounds one request or response body. It has to hold an
 	// event, because a claim hands one back.
@@ -64,6 +64,13 @@ const (
 	// OpCompose submits message meaning; the daemon supplies identity, network,
 	// clock, payload schema, kind and Event ID.
 	OpCompose Operation = "outbox.compose"
+	// OpPendingAttachments lists only opaque metadata for encrypted attachment
+	// Events. It never exposes the E2EE-carried Reference or fetch key.
+	OpPendingAttachments Operation = "attachments.pending"
+	// OpClaimAttachment atomically claims one encrypted attachment Event and
+	// returns content only after daemon-owned fetch, AEAD verification and all
+	// configured scanners allow it.
+	OpClaimAttachment Operation = "attachments.claim"
 
 	// OpAwaitingAdmission lists inbound events waiting for the owner. A
 	// runtime never sees these; deciding about them is what the owner is for.
@@ -151,6 +158,7 @@ const (
 var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
 		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {},
+		OpPendingAttachments: {}, OpClaimAttachment: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
 		OpVerifyAcceptedQuote: {},
 	},
@@ -178,6 +186,7 @@ func Permits(principal Principal, operation Operation) bool {
 
 var operations = map[Operation]struct{}{
 	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {},
+	OpPendingAttachments: {}, OpClaimAttachment: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
 	OpApprove: {}, OpDeny: {},
 	OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpPendingActions: {},
@@ -374,6 +383,40 @@ type PendingEvent struct {
 	Event            json.RawMessage `json:"event"`
 }
 
+// PendingAttachment is deliberately less than a PendingEvent. In particular,
+// it contains neither canonical Event bytes nor the v3 fetch capability key.
+type PendingAttachment struct {
+	EventID          string `json:"event_id"`
+	SenderEndpointID string `json:"sender_messaging_endpoint_id"`
+	ConversationID   string `json:"conversation_id"`
+	ReceivedAtUnix   uint64 `json:"received_at_unix"`
+}
+
+type AttachmentScan struct {
+	ScannerID     string `json:"scanner_id"`
+	ScannerDigest string `json:"scanner_digest"`
+}
+
+// AdmittedAttachment is the only attachment shape released to the runtime.
+// Its body has already passed exact AEAD/reference verification and every
+// configured scanner; no decryption or capability material is present.
+type AdmittedAttachment struct {
+	EventID          string           `json:"event_id"`
+	SenderAgentID    string           `json:"sender_agent_id"`
+	SenderEndpointID string           `json:"sender_messaging_endpoint_id"`
+	SenderDeviceID   string           `json:"sender_device_id"`
+	ConversationID   string           `json:"conversation_id"`
+	RoomID           string           `json:"room_id,omitempty"`
+	ReplyToEventID   string           `json:"reply_to_event_id,omitempty"`
+	ReceivedAtUnix   uint64           `json:"received_at_unix"`
+	Filename         string           `json:"filename"`
+	MediaType        string           `json:"media_type"`
+	PlaintextDigest  string           `json:"plaintext_digest"`
+	SizeBytes        uint64           `json:"size_bytes"`
+	Body             string           `json:"body"`
+	Scans            []AttachmentScan `json:"scans"`
+}
+
 // Response is one answer.
 type Response struct {
 	Schema string     `json:"schema"`
@@ -381,11 +424,13 @@ type Response struct {
 	Code   fault.Code `json:"code,omitempty"`
 	Detail string     `json:"detail,omitempty"`
 
-	Events  []PendingEvent    `json:"events,omitempty"`
-	Event   *PendingEvent     `json:"claimed,omitempty"`
-	History []json.RawMessage `json:"history,omitempty"`
-	Fresh   bool              `json:"fresh,omitempty"`
-	EventID string            `json:"event_id,omitempty"`
+	Events      []PendingEvent      `json:"events,omitempty"`
+	Event       *PendingEvent       `json:"claimed,omitempty"`
+	Attachments []PendingAttachment `json:"attachments,omitempty"`
+	Attachment  *AdmittedAttachment `json:"attachment,omitempty"`
+	History     []json.RawMessage   `json:"history,omitempty"`
+	Fresh       bool                `json:"fresh,omitempty"`
+	EventID     string              `json:"event_id,omitempty"`
 
 	// Actions lists decisions waiting for the owner.
 	Actions []WaitingAction `json:"actions,omitempty"`
@@ -579,12 +624,12 @@ func ValidateRequest(request Request) error {
 		return errors.New("only device-history export carries history terms")
 	}
 	switch request.Op {
-	case OpPending, OpAwaitingAdmission:
+	case OpPending, OpAwaitingAdmission, OpPendingAttachments:
 		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
 			return errors.New("invalid pending limit")
 		}
 		return requireEmpty(request, "a listing", request.EventID, request.LeaseID, request.SessionID)
-	case OpClaim:
+	case OpClaim, OpClaimAttachment:
 		if !eventPattern.MatchString(request.EventID) || !leasePattern.MatchString(request.LeaseID) {
 			return errors.New("a claim needs an event and a lease")
 		}

@@ -157,7 +157,7 @@ func Seal(rng io.Reader, plaintext []byte, metadata Metadata) (Reference, []Chun
 // Open verifies the manifest digest of every ordered chunk and every AEAD tag
 // before returning any plaintext. It never decompresses, parses, or scans the
 // result; consumers must apply sandbox/content policy after this function.
-func Open(ref Reference, chunks []Chunk, policy Policy, now time.Time) ([]byte, error) {
+func Open(ref Reference, chunks []Chunk, policy Policy, now time.Time) (plaintext []byte, err error) {
 	if err := ValidateReference(ref); err != nil {
 		return nil, err
 	}
@@ -170,6 +170,14 @@ func Open(ref Reference, chunks []Chunk, policy Policy, now time.Time) ([]byte, 
 	key, _ := hex.DecodeString(ref.KeyHex)
 	prefix, _ := hex.DecodeString(ref.Manifest.NoncePrefixHex)
 	attachmentID, _ := hex.DecodeString(ref.Manifest.AttachmentIDHex)
+	defer clear(key)
+	defer clear(prefix)
+	defer clear(attachmentID)
+	defer func() {
+		if err != nil {
+			clear(plaintext)
+		}
+	}()
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -178,7 +186,7 @@ func Open(ref Reference, chunks []Chunk, policy Policy, now time.Time) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	plaintext := make([]byte, 0, int(ref.Manifest.PlaintextBytes))
+	plaintext = make([]byte, 0, int(ref.Manifest.PlaintextBytes))
 	for index, chunk := range chunks {
 		if chunk.Index != uint32(index) || chunk.Digest != ref.Manifest.ChunkDigests[index] || canon.Digest(chunk.Ciphertext) != chunk.Digest {
 			return nil, errors.New("attachment chunk identity mismatch")
@@ -194,6 +202,7 @@ func Open(ref Reference, chunks []Chunk, policy Policy, now time.Time) ([]byte, 
 			return nil, errors.New("attachment authentication failed")
 		}
 		plaintext = append(plaintext, opened...)
+		clear(opened)
 	}
 	if uint64(len(plaintext)) != ref.Manifest.PlaintextBytes {
 		return nil, errors.New("attachment plaintext length mismatch")

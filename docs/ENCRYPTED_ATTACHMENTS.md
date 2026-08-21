@@ -5,6 +5,9 @@ authenticated opaque-storage contract for private Messenger attachments;
 `pkg/attachmentapi` and `tos-attachmentd` expose its bounded Unix/HTTPS service
 boundary. `OpenForAgent` adds an explicit Linux content-admission boundary and
 `tos-attachment-text-scanner` supplies a minimal reference UTF-8 inspector.
+`pkg/attachmentadmission`, daemon config v8 and local API v4 keep the Reference,
+attachment key and fetch capability out of OpenFox while releasing admitted
+`text/plain` plus exact scanner evidence under the Event's application lease.
 This does not select a message route, paid retention profile, production
 malware product, or parser for arbitrary formats.
 
@@ -76,7 +79,24 @@ a `DeleteAck` after observing its local lease deletion. These are operational
 acknowledgements, not TOS commercial Receipts. A `DeleteAck` cannot prove that a
 backup, cache, another operator, recipient, or attacker destroyed its copy.
 
-The `artifact.encrypted` payload is now v2 and accepts only the canonical URL
+The `artifact.encrypted` payload is now v3. New emission carries the secret
+Reference, the canonical URL, an Endpoint-signed fetch-only grant and its
+matching Ed25519 capability private key inside application E2EE. The grant must
+name the same sender Agent/Endpoint and network as the Event, be issued no later
+than the Event, and match the Reference's manifest, ordered chunk digests,
+ciphertext byte count and retention exactly. Its only operation is `fetch`.
+V1 and v2 remain explicit read-only history decoders; they cannot be fetched
+because they carried no recipient authority. A locator is never promoted into
+that missing authority.
+
+The sender should mint a fresh fetch capability distinct from its upload/delete
+capability. In a room, the v3 payload is one MLS-protected room message, so the
+fetch capability is shared by the recipients of that epoch; it is bounded to
+one manifest and expiry but does not provide per-member revocation. Deployments
+requiring per-recipient revocation must fan out distinct direct Events instead
+of pretending one room Event has recipient-specific bytes.
+
+V3 accepts only the canonical URL
 
 ```text
 https://<lowercase-host>/.well-known/tos-messenger/attachments/<manifest-sha256-hex>
@@ -90,7 +110,7 @@ non-public, and dials only the checked address while TLS continues to verify the
 original hostname. The locator is an E2EE-authenticated retrieval hint, never a
 bearer credential or authority source; capability signatures remain mandatory.
 
-## Content safety and remaining integration
+## Content safety and OpenFox integration
 
 `Open` deliberately does not decompress archives, infer media types, render a
 filename as a path, parse a document, or invoke a scanner. Display filenames
@@ -143,13 +163,27 @@ allow-list of canonical media types. These bounds stop allocation and content
 bombs at the attachment layer, but format-specific decompression ratios and
 parser limits belong to the eventual sandbox adapter.
 
-Expiry is enforced on open and by lease GC. Authenticated remote operation,
+Expiry is enforced on open and by lease GC. `artifact.encrypted` is excluded
+from the general runtime listing and claim path, so neither its Reference nor
+its capability key crosses the Agent IPC. `attachments.pending` reveals only
+Event/Endpoint/conversation metadata. `attachments.claim` atomically takes the
+same durable application lease used by ordinary messages, reloads and rechecks
+the exact canonical Event, performs strict HTTPS fetch with the v3 capability,
+opens every AEAD chunk, runs every pinned scanner, and returns only bounded
+UTF-8 `text/plain`, display metadata, plaintext digest/size and scanner IDs and
+binary digests. OpenFox independently recomputes the returned body digest,
+persists it through the existing Event-ID application result, and only then
+calls `inbox.complete`; a crash or persistence failure leaves the stable Event
+retryable. Attachment support is an explicit OpenFox channel option.
+
+Authenticated remote operation,
 restart replay refusal, interrupted multi-frame upload, signed local deletion
 observation, locator/SSRF policy, sealed-input sandboxing, strict verdict
-binding, and the reference text inspector are implemented and tested locally.
+binding, daemon-owned/OpenFox application, Event v2 cross-consumption and the
+reference text inspector are implemented and tested locally.
 Still open are an independently operated public-TLS deployment, measured
 interrupted wide-area transfer, independently audited retention behavior,
-OpenFox attachment-fetch/application wiring, a selected production malware
-scanner and representative hostile corpus, hard cgroup-level resource evidence,
-and commercial attachment service terms. A content-addressed object may have
+a selected production malware scanner and representative hostile corpus, hard
+cgroup-level resource evidence, non-text product policy, and commercial
+attachment service terms. A content-addressed object may have
 been copied, so no storage API promises cryptographic erasure it cannot prove.

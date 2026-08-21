@@ -192,6 +192,24 @@ func validateContentPolicy(policy AgentContentPolicy, metadata Metadata, plainte
 	if _, allowed := policy.AllowedMediaTypes[metadata.MediaType]; !allowed {
 		return errors.New("attachment media type is not allowed for Agent consumption")
 	}
+	return ValidateAgentContentPolicy(policy)
+}
+
+// ValidateAgentContentPolicy checks the complete executable/resource policy
+// without opening attacker-controlled content. Daemons use it at startup so a
+// missing scanner or launcher pin fails before any runtime socket is opened.
+func ValidateAgentContentPolicy(policy AgentContentPolicy) error {
+	if policy.MaxPlaintextBytes == 0 || policy.MaxPlaintextBytes > MaxPlaintextBytes {
+		return errors.New("Agent content policy needs an explicit plaintext limit")
+	}
+	if len(policy.AllowedMediaTypes) == 0 {
+		return errors.New("Agent content policy needs an explicit media allow-list")
+	}
+	for mediaType := range policy.AllowedMediaTypes {
+		if !canonicalMediaType(mediaType) {
+			return errors.New("Agent content policy has a noncanonical media type")
+		}
+	}
 	if len(policy.Scanners) == 0 || len(policy.Scanners) > MaxAdmissionScanners {
 		return errors.New("Agent content policy needs a bounded scanner set")
 	}

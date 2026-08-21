@@ -672,6 +672,15 @@ func TestUnknownConfigurationKeysAreRefused(t *testing.T) {
 	}
 }
 
+func TestAttachmentAdmissionPlaintextCannotExceedEventBoundary(t *testing.T) {
+	_, _, _, err := (AttachmentAdmissionConfig{
+		MaxPlaintextBytes: envelope.MaxContentBytes + 1,
+	}).Policies()
+	if err == nil || !strings.Contains(err.Error(), "Event content bound") {
+		t.Fatalf("oversized attachment admission policy was not refused at config validation: %v", err)
+	}
+}
+
 func testEvent(t *testing.T) envelope.Event {
 	t.Helper()
 	event, err := envelope.NewEvent(envelope.Event{
