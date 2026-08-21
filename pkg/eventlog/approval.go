@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/ids"
+	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 )
 
@@ -99,7 +100,8 @@ type ApprovalRequest struct {
 	// persisted so the owner is shown the real amount, asset, provider, and
 	// expiry from typed state rather than the runtime's summary, and so the
 	// identifier can be recomputed and checked against what is being signed.
-	Terms *negotiation.Terms
+	Terms    *negotiation.Terms
+	Physical *ApprovalPhysicalOperation
 	// MandateID names the standing authorisation a spend draws on. It is stored
 	// so the per-mandate budget can be reopened and the reservation named --
 	// the reservation key is ExecutionID(MandateID, Terms) -- when the spend is
@@ -111,20 +113,31 @@ type ApprovalRequest struct {
 
 // Approval is the durable state of one request.
 type Approval struct {
-	Schema         string             `json:"schema"`
-	ActionID       string             `json:"action_id"`
-	Effect         string             `json:"effect"`
-	Summary        string             `json:"summary"`
-	IdempotencyKey string             `json:"idempotency_key,omitempty"`
-	Reason         string             `json:"reason"`
-	Origins        []ApprovalOrigin   `json:"origins,omitempty"`
-	Terms          *negotiation.Terms `json:"terms,omitempty"`
-	MandateID      string             `json:"mandate_id,omitempty"`
-	State          ApprovalState      `json:"state"`
-	AskedAtUnix    uint64             `json:"asked_at_unix"`
-	DecidedAtUnix  uint64             `json:"decided_at_unix,omitempty"`
-	SpentAtUnix    uint64             `json:"spent_at_unix,omitempty"`
-	DenialReason   string             `json:"denial_reason,omitempty"`
+	Schema         string                     `json:"schema"`
+	ActionID       string                     `json:"action_id"`
+	Effect         string                     `json:"effect"`
+	Summary        string                     `json:"summary"`
+	IdempotencyKey string                     `json:"idempotency_key,omitempty"`
+	Reason         string                     `json:"reason"`
+	Origins        []ApprovalOrigin           `json:"origins,omitempty"`
+	Terms          *negotiation.Terms         `json:"terms,omitempty"`
+	Physical       *ApprovalPhysicalOperation `json:"physical,omitempty"`
+	MandateID      string                     `json:"mandate_id,omitempty"`
+	State          ApprovalState              `json:"state"`
+	AskedAtUnix    uint64                     `json:"asked_at_unix"`
+	DecidedAtUnix  uint64                     `json:"decided_at_unix,omitempty"`
+	SpentAtUnix    uint64                     `json:"spent_at_unix,omitempty"`
+	DenialReason   string                     `json:"denial_reason,omitempty"`
+}
+
+// ApprovalPhysicalOperation is stored with the approval so the owner-visible
+// record can reproduce the exact content-addressed action identifier.
+type ApprovalPhysicalOperation struct {
+	CapabilityID    string `json:"capability_id"`
+	Tool            string `json:"tool"`
+	Operation       string `json:"operation"`
+	ArgumentsDigest string `json:"arguments_digest"`
+	ArgumentsJSON   string `json:"arguments_json"`
 }
 
 // RequestApproval durably records that an action is waiting for a person.
@@ -161,7 +174,7 @@ func (j *Journal) RequestApproval(request ApprovalRequest) (Approval, error) {
 		Schema: ApprovalSchema, ActionID: request.ActionID, Effect: request.Effect,
 		Summary: request.Summary, IdempotencyKey: request.IdempotencyKey,
 		Reason: request.Reason, Origins: request.Origins,
-		Terms: request.Terms, MandateID: request.MandateID, State: ApprovalPending,
+		Terms: request.Terms, Physical: request.Physical, MandateID: request.MandateID, State: ApprovalPending,
 		AskedAtUnix: request.AskedAt,
 	}
 	return j.commitApproval(approval)
@@ -390,6 +403,20 @@ func validateApprovalRequest(request ApprovalRequest) error {
 			return err
 		}
 	}
+	if request.Effect == "physical-io" && request.Physical == nil {
+		return errors.New("a physical I/O approval must carry its local Capability and operation")
+	}
+	if request.Effect == "physical-io" {
+		physical := firewall.PhysicalOperation{CapabilityID: request.Physical.CapabilityID,
+			Tool: request.Physical.Tool, Operation: request.Physical.Operation,
+			ArgumentsDigest: request.Physical.ArgumentsDigest, ArgumentsJSON: request.Physical.ArgumentsJSON}
+		if !approvalIdempotencyPattern.MatchString(request.IdempotencyKey) || physical.Validate() != nil {
+			return errors.New("a physical I/O approval has malformed Capability or invocation evidence")
+		}
+	}
+	if request.Effect != "physical-io" && request.Physical != nil {
+		return errors.New("only physical I/O approval carries a physical operation")
+	}
 	// A spend draws on a mandate's budget, so it must name the mandate that
 	// bounds it: the reservation the spend lifecycle commits or releases is keyed
 	// by that mandate. Anything else holds no budget and names none, so a mandate
@@ -532,7 +559,7 @@ func (j *Journal) RecordAutoAuthorization(request ApprovalRequest) (Approval, er
 		Schema: ApprovalSchema, ActionID: request.ActionID, Effect: request.Effect,
 		Summary: request.Summary, IdempotencyKey: request.IdempotencyKey,
 		Reason: request.Reason, Origins: request.Origins,
-		Terms: request.Terms, MandateID: request.MandateID, State: ApprovalGranted,
+		Terms: request.Terms, Physical: request.Physical, MandateID: request.MandateID, State: ApprovalGranted,
 		AskedAtUnix: request.AskedAt, DecidedAtUnix: request.AskedAt,
 	}
 	return j.commitApproval(approval)

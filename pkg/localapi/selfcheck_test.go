@@ -92,4 +92,26 @@ func TestApprovalReproducesID(t *testing.T) {
 	if approvalReproducesID(toolApproval) {
 		t.Fatal("a swapped tool idempotency key reproduced the identifier")
 	}
+
+	physical := firewall.Action{Effect: firewall.EffectPhysicalIO, Summary: "read local sensor",
+		IdempotencyKey: "idem_" + strings.Repeat("c", 64),
+		Physical: &firewall.PhysicalOperation{CapabilityID: "cap_" + strings.Repeat("d", 64),
+			Tool: "i2c", Operation: "read",
+			ArgumentsDigest: "sha256:16384135fc236bb03583cf3024b9fb573cc1ae45f908a98d0601d2ab45f8cfbe",
+			ArgumentsJSON:   `{"action":"read"}`}}
+	physicalID, err := firewall.ActionID(physical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	physicalApproval := eventlog.Approval{ActionID: physicalID, Effect: string(physical.Effect),
+		Summary: physical.Summary, IdempotencyKey: physical.IdempotencyKey,
+		Physical: toApprovalPhysical(physical.Physical)}
+	if !approvalReproducesID(physicalApproval) {
+		t.Fatal("a faithful physical approval did not reproduce its identifier")
+	}
+	physicalApproval.Physical.ArgumentsDigest = "sha256:fc8d3bb5fdbbf709135d031562103a482a000d9f0385762020409ca235915f85"
+	physicalApproval.Physical.ArgumentsJSON = `{"action":"read","length":2}`
+	if approvalReproducesID(physicalApproval) {
+		t.Fatal("swapped physical arguments reproduced the identifier")
+	}
 }

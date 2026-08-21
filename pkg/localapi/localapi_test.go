@@ -1347,6 +1347,48 @@ func TestActionDerivedFromReceivedContentWaitsForTheOwner(t *testing.T) {
 	}
 }
 
+func TestPhysicalIORequiresLocalCapabilityAndOneShotOwnerDecision(t *testing.T) {
+	h := newHarnessWithPolicy(t, firewall.Policy{
+		UnattendedCeiling: firewall.EffectMessage, OwnInitiativeCeiling: firewall.EffectPhysicalIO,
+	})
+	proposal := &ProposedAction{
+		Effect: "physical-io", Summary: "read local temperature sensor",
+		IdempotencyKey: "idem_" + strings.Repeat("b", 64),
+		Physical: &PhysicalOperation{CapabilityID: "cap_" + strings.Repeat("c", 64),
+			Tool: "i2c", Operation: "read",
+			ArgumentsDigest: "sha256:16384135fc236bb03583cf3024b9fb573cc1ae45f908a98d0601d2ab45f8cfbe",
+			ArgumentsJSON:   `{"action":"read"}`},
+	}
+	asked := h.call(t, Request{Op: OpRequestAction, Action: proposal})
+	if !asked.OK || asked.Decision != string(firewall.RequireOwnerApproval) || asked.State != "pending" || asked.Authorised {
+		t.Fatalf("physical I/O escaped owner hold: %+v", asked)
+	}
+	waiting := h.owner(t, Request{Op: OpPendingActions})
+	if len(waiting.Actions) != 1 || waiting.Actions[0].Physical == nil ||
+		*waiting.Actions[0].Physical != *proposal.Physical {
+		t.Fatalf("owner did not receive exact physical operation: %+v", waiting)
+	}
+	if granted := h.owner(t, Request{Op: OpGrantAction, ActionID: asked.ActionID}); !granted.OK {
+		t.Fatalf("grant: %+v", granted)
+	}
+	if first := h.call(t, Request{Op: OpClaimAction, ActionID: asked.ActionID}); !first.Authorised {
+		t.Fatalf("physical grant could not be claimed: %+v", first)
+	}
+	if second := h.call(t, Request{Op: OpClaimAction, ActionID: asked.ActionID}); second.Authorised {
+		t.Fatal("one physical decision authorized two invocations")
+	}
+
+	mutated := *proposal
+	physical := *proposal.Physical
+	mutated.Physical = &physical
+	mutated.Physical.ArgumentsDigest = "sha256:fc8d3bb5fdbbf709135d031562103a482a000d9f0385762020409ca235915f85"
+	mutated.Physical.ArgumentsJSON = `{"action":"read","length":2}`
+	conflict := h.call(t, Request{Op: OpRequestAction, Action: &mutated})
+	if conflict.Decision != string(firewall.Refuse) || conflict.ActionID == asked.ActionID {
+		t.Fatalf("argument substitution reused a physical invocation key: %+v", conflict)
+	}
+}
+
 func askedKey(t *testing.T, actionID string, proposal *ProposedAction) string {
 	t.Helper()
 	action, err := toAction(*proposal)

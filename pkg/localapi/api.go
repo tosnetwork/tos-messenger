@@ -26,15 +26,16 @@ import (
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/localwire"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
+	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 )
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema = "tos.messaging.local-request.v5"
+	RequestSchema = "tos.messaging.local-request.v6"
 	// ResponseSchema is the strict wire schema of a response.
-	ResponseSchema = "tos.messaging.local-response.v3"
+	ResponseSchema = "tos.messaging.local-response.v4"
 
 	// MaxFrameBytes bounds one request or response body. It has to hold an
 	// event, because a claim hands one back.
@@ -225,6 +226,8 @@ var (
 	challengePattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	quotePattern        = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
 	uploadPattern       = regexp.MustCompile(`^attup_[0-9a-f]{64}$`)
+	capabilityPattern   = regexp.MustCompile(`^cap_[0-9a-f]{64}$`)
+	physicalNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 )
 
 // Request is one call over the local socket.
@@ -383,6 +386,18 @@ type ProposedAction struct {
 	// identifier commits it and an approval for one price cannot be spent on
 	// another.
 	Terms *PurchaseTerms `json:"terms,omitempty"`
+	// Physical is present only for physical-io. It binds the separately
+	// configured local Capability and exact canonical argument digest that the
+	// owner is being asked to authorize.
+	Physical *PhysicalOperation `json:"physical,omitempty"`
+}
+
+type PhysicalOperation struct {
+	CapabilityID    string `json:"capability_id"`
+	Tool            string `json:"tool"`
+	Operation       string `json:"operation"`
+	ArgumentsDigest string `json:"arguments_digest"`
+	ArgumentsJSON   string `json:"arguments_json"`
 }
 
 // ActionOrigin is one piece of received content behind a proposed action.
@@ -508,6 +523,7 @@ type WaitingAction struct {
 	// summary, and recomputes the action identifier from it to confirm the
 	// signature commits the purchase actually shown.
 	Terms       *negotiation.Terms `json:"terms,omitempty"`
+	Physical    *PhysicalOperation `json:"physical,omitempty"`
 	AskedAtUnix uint64             `json:"asked_at_unix"`
 }
 
@@ -760,11 +776,23 @@ func ValidateRequest(request Request) error {
 		if request.ActionID != "" {
 			return errors.New("the action identifier is derived, not declared")
 		}
-		if request.Action.Effect == "tool-call" && !idempotencyPattern.MatchString(request.Action.IdempotencyKey) {
+		oneShotTool := request.Action.Effect == "tool-call" || request.Action.Effect == "physical-io"
+		if oneShotTool && !idempotencyPattern.MatchString(request.Action.IdempotencyKey) {
 			return errors.New("a tool call needs a canonical idempotency key")
 		}
-		if request.Action.Effect != "tool-call" && request.Action.IdempotencyKey != "" {
+		if !oneShotTool && request.Action.IdempotencyKey != "" {
 			return errors.New("only a tool call carries an idempotency key")
+		}
+		if request.Action.Effect == "physical-io" {
+			physical := request.Action.Physical
+			if physical == nil || !capabilityPattern.MatchString(physical.CapabilityID) ||
+				!physicalNamePattern.MatchString(physical.Tool) || !physicalNamePattern.MatchString(physical.Operation) ||
+				!canon.ValidDigest(physical.ArgumentsDigest) || physical.ArgumentsJSON == "" ||
+				len(physical.ArgumentsJSON) > firewall.MaxPhysicalArgumentsBytes {
+				return errors.New("physical I/O needs a canonical local Capability, operation, and argument digest")
+			}
+		} else if request.Action.Physical != nil {
+			return errors.New("only physical I/O carries a physical operation")
 		}
 		if request.Action.Effect == "spend" {
 			if request.Action.Terms == nil {

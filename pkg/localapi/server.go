@@ -775,7 +775,7 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 				Decision: string(decision.Outcome), Detail: decision.Reason,
 				State: string(approval.State)}
 		}
-		if action.Effect == firewall.EffectToolCall {
+		if action.Effect == firewall.EffectToolCall || action.Effect == firewall.EffectPhysicalIO {
 			bound, _, err := s.config.Journal.ClaimToolExecution(action.IdempotencyKey, actionID, now)
 			if err != nil {
 				return refuse(fault.CodeInternal, err)
@@ -816,7 +816,7 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 		}
 		return s.escalateSpend(request, action, actionID, decision.Provenance, decision.Reason, now)
 	}
-	if action.Effect == firewall.EffectToolCall {
+	if action.Effect == firewall.EffectToolCall || action.Effect == firewall.EffectPhysicalIO {
 		bound, _, err := s.config.Journal.ClaimToolExecution(action.IdempotencyKey, actionID, now)
 		if err != nil {
 			return refuse(fault.CodeInternal, err)
@@ -830,7 +830,7 @@ func (s *Server) requestAction(request Request, now time.Time) Response {
 		ActionID: actionID, Effect: string(action.Effect), Summary: action.Summary,
 		IdempotencyKey: action.IdempotencyKey,
 		Reason:         decision.Reason, Origins: toApprovalOrigins(decision.Provenance),
-		Terms: action.Terms, AskedAt: uint64(now.Unix()),
+		Terms: action.Terms, Physical: toApprovalPhysical(action.Physical), AskedAt: uint64(now.Unix()),
 	})
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
@@ -939,7 +939,7 @@ func (s *Server) pendingActions(request Request, now time.Time) Response {
 			ActionID: approval.ActionID, Effect: approval.Effect, Summary: approval.Summary,
 			IdempotencyKey: approval.IdempotencyKey,
 			Reason:         approval.Reason, Origins: fromApprovalOrigins(approval.Origins),
-			Terms: approval.Terms, AskedAtUnix: approval.AskedAtUnix,
+			Terms: approval.Terms, Physical: fromApprovalPhysical(approval.Physical), AskedAtUnix: approval.AskedAtUnix,
 		})
 	}
 	return Response{Schema: ResponseSchema, OK: true, Actions: actions}
@@ -982,9 +982,33 @@ func toAction(proposed ProposedAction) (firewall.Action, error) {
 	action := firewall.Action{
 		Effect: firewall.Effect(proposed.Effect), Summary: proposed.Summary,
 		IdempotencyKey: proposed.IdempotencyKey,
-		DerivedFrom:    origins, Terms: toTerms(proposed.Terms),
+		DerivedFrom:    origins, Terms: toTerms(proposed.Terms), Physical: toPhysical(proposed.Physical),
 	}
 	return action, nil
+}
+
+func toPhysical(operation *PhysicalOperation) *firewall.PhysicalOperation {
+	if operation == nil {
+		return nil
+	}
+	return &firewall.PhysicalOperation{CapabilityID: operation.CapabilityID, Tool: operation.Tool,
+		Operation: operation.Operation, ArgumentsDigest: operation.ArgumentsDigest, ArgumentsJSON: operation.ArgumentsJSON}
+}
+
+func toApprovalPhysical(operation *firewall.PhysicalOperation) *eventlog.ApprovalPhysicalOperation {
+	if operation == nil {
+		return nil
+	}
+	return &eventlog.ApprovalPhysicalOperation{CapabilityID: operation.CapabilityID, Tool: operation.Tool,
+		Operation: operation.Operation, ArgumentsDigest: operation.ArgumentsDigest, ArgumentsJSON: operation.ArgumentsJSON}
+}
+
+func fromApprovalPhysical(operation *eventlog.ApprovalPhysicalOperation) *PhysicalOperation {
+	if operation == nil {
+		return nil
+	}
+	return &PhysicalOperation{CapabilityID: operation.CapabilityID, Tool: operation.Tool,
+		Operation: operation.Operation, ArgumentsDigest: operation.ArgumentsDigest, ArgumentsJSON: operation.ArgumentsJSON}
 }
 
 func toApprovalOrigins(origins []firewall.Origin) []eventlog.ApprovalOrigin {
@@ -1037,6 +1061,7 @@ func approvalReproducesID(approval eventlog.Approval) bool {
 		IdempotencyKey: approval.IdempotencyKey,
 		DerivedFrom:    firewallOrigins(approval.Origins),
 		Terms:          approval.Terms,
+		Physical:       toPhysical(fromApprovalPhysical(approval.Physical)),
 	}
 	recomputed, err := firewall.ActionID(action)
 	if err != nil {
