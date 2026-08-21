@@ -226,7 +226,7 @@ func (r *runner) tunnelEstablish(ctx context.Context, transportKey ed25519.Priva
 		gateway.SetAddressList([]address.Address{&address.UDP{IP: ip.AsSlice(), Port: int32(relayAddr.Port())}})
 	}
 	established := make(chan arrival, 4)
-	gateway.SetConnectionHandler(confirmInbound(ctx, deadline, established))
+	gateway.SetConnectionHandler(confirmInbound(ctx, deadline, established, r.config.Role == RoleB))
 	if err := gateway.StartServer(bind); err != nil {
 		return
 	}
@@ -248,6 +248,7 @@ func (r *runner) tunnelEstablish(ctx context.Context, transportKey ed25519.Priva
 	if confirmed == nil {
 		return
 	}
+	defer forgetRLDPSession(confirmed)
 	r.result.TunneledEstablish = true
 
 	// The hold phase runs over the tunneled session exactly as it runs over a
@@ -401,7 +402,7 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 	started := time.Now()
 	deadline := started.Add(r.config.PunchTimeout)
 	established := make(chan arrival, 4)
-	gateway.SetConnectionHandler(confirmInbound(ctx, deadline, established))
+	gateway.SetConnectionHandler(confirmInbound(ctx, deadline, established, r.config.Role == RoleB))
 	if err := gateway.StartServer(bind); err != nil {
 		r.result.Failure = reachability.FailureInternal
 		return
@@ -426,6 +427,7 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 	if confirmed == nil {
 		return
 	}
+	defer forgetRLDPSession(confirmed)
 
 	if r.config.HoldWindow > 0 {
 		r.result.HoldAttempted = true
@@ -454,6 +456,7 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 	// phases that preceded it. It never runs over a tunneled session, whose
 	// echo would measure the relay.
 	r.runEchoPhase(ctx, confirmed)
+	r.runRLDPPhase(ctx, confirmed)
 
 	// The gateway has to outlive this endpoint's own success: closing the
 	// moment the session came up would pull it out from under a peer that is
@@ -478,7 +481,7 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 // share covers this endpoint's own configured echoes, because the peer's
 // sizes are not knowable here and each side has to at least outlive itself.
 func measurementBudget(config Config) time.Duration {
-	budget := echoBudget(config)
+	budget := echoBudget(config) + rldpBudget(config)
 	if config.HoldWindow <= 0 {
 		if budget > 0 {
 			budget += doneSignalGrace
@@ -492,6 +495,13 @@ func measurementBudget(config Config) time.Duration {
 // every configured size, each given the full punch-timeout window.
 func echoBudget(config Config) time.Duration {
 	return time.Duration(len(config.EchoSizes)) * config.PunchTimeout
+}
+
+// rldpBudget is the outer bound for this endpoint's sequential large-transfer
+// plans. Each plan uses the punch timeout as its query deadline; interruption
+// windows live inside that deadline rather than extending it.
+func rldpBudget(config Config) time.Duration {
+	return time.Duration(len(config.RLDPTransfers)) * config.PunchTimeout
 }
 
 // runEchoPhase runs one echo round trip per configured size over the confirmed
@@ -517,6 +527,35 @@ func (r *runner) runEchoPhase(ctx context.Context, peer adnl.Peer) {
 		r.result.EchoResults = append(r.result.EchoResults, EchoResult{
 			Bytes: size, OK: ok, Millis: millis,
 		})
+	}
+}
+
+func (r *runner) runRLDPPhase(ctx context.Context, peer adnl.Peer) {
+	if len(r.config.RLDPTransfers) == 0 {
+		return
+	}
+	// Each direction is measured, but not simultaneously: two endpoints
+	// inducing loss windows at once would make one direction's controlled
+	// interruption indistinguishable from its peer's. Role A owns the first
+	// bounded slot; role B starts after that slot expires. The done-signal
+	// budget includes both slots, and a completed A returns early into the
+	// existing peer-done wait while B measures the reverse direction.
+	if r.config.Role == RoleB {
+		timer := time.NewTimer(rldpBudget(r.config))
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+	}
+	session := prepareRLDPSession(peer)
+	for _, plan := range r.config.RLDPTransfers {
+		if ctx.Err() != nil {
+			return
+		}
+		r.result.RLDPResults = append(r.result.RLDPResults,
+			runRLDPTransfer(ctx, session, plan, r.config.PunchTimeout))
 	}
 }
 
@@ -640,9 +679,16 @@ var directPeersForTest func([]netip.AddrPort) []netip.AddrPort
 // path. Every inbound peer is also made to answer the probe's echo queries,
 // because that is the round trip a native peer confirms, keeps alive, and
 // echoes with.
-func confirmInbound(ctx context.Context, deadline time.Time, established chan<- arrival) func(adnl.Peer) error {
+func confirmInbound(ctx context.Context, deadline time.Time, established chan<- arrival, prepareRLDP bool) func(adnl.Peer) error {
 	return func(client adnl.Peer) error {
 		answerEchoQueries(client)
+		// The responder owns the inbound peer. The initiator already owns the
+		// peer returned by RegisterClient; preparing a second wrapper from its
+		// connection callback would replace the custom-message handler while the
+		// query still used the first wrapper, splitting one RLDP session in two.
+		if prepareRLDP {
+			prepareRLDPSession(client)
+		}
 		go func() {
 			for time.Now().Before(deadline) {
 				err := sessionRoundTrip(ctx, client, keepalivePingTimeout)
@@ -701,6 +747,7 @@ func (r *runner) dial(ctx context.Context, gateway *adnl.Gateway, peerKey ed2551
 				// round trip, and an initiator that stayed silent would leave
 				// the peer's half unconfirmable.
 				answerEchoQueries(registered)
+				prepareRLDPSession(registered)
 				dialled[name] = registered
 				peer = registered
 			}

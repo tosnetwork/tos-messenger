@@ -61,6 +61,10 @@ type pairResult struct {
 	// is the AND of the two signed directional verdicts and latency is the
 	// slower direction, so a one-sided echo never becomes bidirectional proof.
 	sizedEchoes []pairedSizedEcho
+	// rldpTransfers contains only sizes measured in both directions. A success
+	// requires exact payload completion on both halves; recovery requires both
+	// halves to have suppressed traffic and completed the original query.
+	rldpTransfers []pairedRLDPTransfer
 	// initiatorFiltering and responderFiltering are the filtering classes
 	// derived from each half's coordinator-signed cold-source receipts.
 	// Filtering is a property of each end, not of the pair, so each side gets
@@ -75,6 +79,17 @@ type pairedSizedEcho struct {
 	payloadBytes    uint32
 	succeeded       bool
 	roundTripMillis uint64
+}
+
+type pairedRLDPTransfer struct {
+	payloadBytes              uint32
+	succeeded                 bool
+	roundTripMillis           uint64
+	interrupted               bool
+	interruptAfterBytes       uint64
+	plannedInterruptionMillis uint64
+	interruptionMillis        uint64
+	sameTransferResumed       bool
 }
 
 // combine folds the two halves of a measurement into one sample.
@@ -175,6 +190,7 @@ func combine(halves []Trial) (pairResult, error) {
 	result.tunnelHoldAttempted = a.TunnelHoldAttempted && b.TunnelHoldAttempted
 	result.tunnelHoldCompleted = a.TunnelHoldCompleted && b.TunnelHoldCompleted
 	result.sizedEchoes = pairSizedEchoes(a.SizedEchoes, b.SizedEchoes)
+	result.rldpTransfers = pairRLDPTransfers(a.RLDPTransfers, b.RLDPTransfers)
 	return result, nil
 }
 
@@ -194,6 +210,44 @@ func pairSizedEchoes(a, b []SizedEchoMeasurement) []pairedSizedEcho {
 			}
 			paired = append(paired, pairedSizedEcho{payloadBytes: a[left].PayloadBytes,
 				succeeded: succeeded, roundTripMillis: millis})
+			left++
+			right++
+		}
+	}
+	return paired
+}
+
+func pairRLDPTransfers(a, b []RLDPTransferMeasurement) []pairedRLDPTransfer {
+	paired := make([]pairedRLDPTransfer, 0, minOfInt(len(a), len(b)))
+	for left, right := 0, 0; left < len(a) && right < len(b); {
+		switch {
+		case a[left].PayloadBytes < b[right].PayloadBytes:
+			left++
+		case b[right].PayloadBytes < a[left].PayloadBytes:
+			right++
+		default:
+			succeeded := a[left].Succeeded && b[right].Succeeded
+			millis := uint64(0)
+			if succeeded {
+				millis = maxOf(a[left].RoundTripMillis, b[right].RoundTripMillis)
+			}
+			interrupted := a[left].InterruptionAttempted && b[right].InterruptionAttempted &&
+				a[left].InterruptAfterBytes == b[right].InterruptAfterBytes
+			interruptAfter := uint64(0)
+			plannedInterruptionMillis := uint64(0)
+			interruptionMillis := uint64(0)
+			if interrupted {
+				interruptAfter = a[left].InterruptAfterBytes
+				plannedInterruptionMillis = minOf(a[left].PlannedInterruptionMillis, b[right].PlannedInterruptionMillis)
+				interruptionMillis = minOf(a[left].InterruptionMillis, b[right].InterruptionMillis)
+			}
+			paired = append(paired, pairedRLDPTransfer{
+				payloadBytes: a[left].PayloadBytes, succeeded: succeeded,
+				roundTripMillis: millis, interrupted: interrupted,
+				interruptAfterBytes: interruptAfter, interruptionMillis: interruptionMillis,
+				plannedInterruptionMillis: plannedInterruptionMillis,
+				sameTransferResumed:       interrupted && a[left].SameTransferResumed && b[right].SameTransferResumed,
+			})
 			left++
 			right++
 		}

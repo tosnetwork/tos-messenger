@@ -305,11 +305,18 @@ func testPolicy() Policy {
 		MinTunnelSurvivalRate:              0.75,
 		MinReconnectSuccessRate:            0.75,
 		MinSizedEchoSuccessRate:            0.75,
+		MinRLDPTransferSuccessRate:         0.75,
+		MinRLDPSameTransferRecoveryRate:    0.75,
 		MinSurvivalSamplesPerCell:          2,
 		MinReconnectSamplesPerMobilityCell: 2,
 		MinSizedEchoSamplesPerCell:         2,
+		MinRLDPTransferSamplesPerCell:      2,
 		RequiredSizedEchoPayloads:          []uint32{1024, MaxSizedEchoPayloadBytes},
-		Coordinators:                       []string{testCoordinatorID()},
+		RequiredRLDPTransfers: []RLDPTransferRequirement{{
+			PayloadBytes: MinRLDPLargePayloadBytes, InterruptAfterBytes: RLDPPartSizeBytes,
+			MinInterruptionMillis: 150,
+		}},
+		Coordinators: []string{testCoordinatorID()},
 		RequiredScenarios: []Scenario{
 			scenario(CarrierConsumerISP, ClassDesktop),
 			scenario(CarrierCarrierGrade, ClassEdgeARM),
@@ -331,7 +338,19 @@ func withHealthyDirectPhases(trial Trial) Trial {
 		trial.ReconnectMillis = 40
 	}
 	setHealthySizedEchoes(&trial)
+	setHealthyRLDPTransfers(&trial)
 	return resign(trial)
+}
+
+func setHealthyRLDPTransfers(trial *Trial) {
+	trial.RLDPTransfers = []RLDPTransferMeasurement{{
+		PayloadBytes: MinRLDPLargePayloadBytes, PayloadSHA256: "sha256:" + strings.Repeat("a", 64),
+		PartSizeBytes: RLDPPartSizeBytes, ExpectedParts: 3, Succeeded: true,
+		RoundTripMillis: 250, InterruptionAttempted: true,
+		InterruptAfterBytes: RLDPPartSizeBytes, PlannedInterruptionMillis: 150,
+		InterruptionMillis: 150,
+		SuppressedMessages: 8, SameTransferResumed: true,
+	}}
 }
 
 func setHealthySizedEchoes(trial *Trial) {
@@ -405,6 +424,21 @@ func TestPolicyRejectsSmokeTests(t *testing.T) {
 		},
 		"duplicate echo payload": func(p *Policy) {
 			p.RequiredSizedEchoPayloads = []uint32{MaxSizedEchoPayloadBytes, MaxSizedEchoPayloadBytes}
+		},
+		"zero RLDP success rate":  func(p *Policy) { p.MinRLDPTransferSuccessRate = 0 },
+		"zero RLDP recovery rate": func(p *Policy) { p.MinRLDPSameTransferRecoveryRate = 0 },
+		"no RLDP sample minimum":  func(p *Policy) { p.MinRLDPTransferSamplesPerCell = 0 },
+		"no RLDP transfers":       func(p *Policy) { p.RequiredRLDPTransfers = nil },
+		"two part smoke test only": func(p *Policy) {
+			p.RequiredRLDPTransfers = []RLDPTransferRequirement{{PayloadBytes: RLDPPartSizeBytes + 1,
+				InterruptAfterBytes: RLDPPartSizeBytes, MinInterruptionMillis: 100}}
+		},
+		"application retry profile": func(p *Policy) {
+			p.RequiredRLDPTransfers[0].InterruptAfterBytes = 0
+			p.RequiredRLDPTransfers[0].MinInterruptionMillis = 0
+		},
+		"interruption before a complete part": func(p *Policy) {
+			p.RequiredRLDPTransfers[0].InterruptAfterBytes = RLDPPartSizeBytes - 1
 		},
 		"no scenarios": func(p *Policy) { p.RequiredScenarios = nil },
 		"public pairs only": func(p *Policy) {
@@ -481,11 +515,17 @@ func TestPolicyDigestIsOrderIndependentAndThresholdSensitive(t *testing.T) {
 		"tunnel survival rate":    func(p *Policy) { p.MinTunnelSurvivalRate = 0.8 },
 		"reconnect success rate":  func(p *Policy) { p.MinReconnectSuccessRate = 0.8 },
 		"sized echo success rate": func(p *Policy) { p.MinSizedEchoSuccessRate = 0.8 },
+		"RLDP success rate":       func(p *Policy) { p.MinRLDPTransferSuccessRate = 0.8 },
+		"RLDP recovery rate":      func(p *Policy) { p.MinRLDPSameTransferRecoveryRate = 0.8 },
 		"survival sample minimum": func(p *Policy) { p.MinSurvivalSamplesPerCell = 3 },
 		"reconnect sample minimum": func(p *Policy) {
 			p.MinReconnectSamplesPerMobilityCell = 3
 		},
 		"sized echo sample minimum": func(p *Policy) { p.MinSizedEchoSamplesPerCell = 3 },
+		"RLDP sample minimum":       func(p *Policy) { p.MinRLDPTransferSamplesPerCell = 3 },
+		"RLDP interruption window": func(p *Policy) {
+			p.RequiredRLDPTransfers[0].MinInterruptionMillis = 200
+		},
 		"sized echo payloads": func(p *Policy) {
 			p.RequiredSizedEchoPayloads = append(p.RequiredSizedEchoPayloads, 4096)
 		},
@@ -969,6 +1009,140 @@ func TestSizedEchoGateNeedsPairedDirectionsAndPredeclaredRate(t *testing.T) {
 		if report.Finding != FindingHybrid || !reasonNaming(report.Reasons,
 			"sized echoes did not succeed at the predeclared rate for payload 8176: "+target.Key()) {
 			t.Fatalf("failed payload transport produced %q: %v", report.Finding, report.Reasons)
+		}
+	})
+}
+
+func TestRLDPTransferEvidenceIsSignedAndFailClosed(t *testing.T) {
+	base := switchProbe(directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100), ProbeADNL)
+	setHealthyRLDPTransfers(&base)
+	base = resign(base)
+	if err := VerifyTrial(testPolicy(), base); err != nil {
+		t.Fatalf("honest RLDP trial did not verify: %v", err)
+	}
+	encoded, err := EncodeTrialJSON(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeTrialJSON(encoded)
+	if err != nil || len(decoded.RLDPTransfers) != 1 || !decoded.RLDPTransfers[0].SameTransferResumed {
+		t.Fatalf("RLDP evidence round trip failed: transfers=%+v err=%v", decoded.RLDPTransfers, err)
+	}
+
+	tampered := base
+	tampered.RLDPTransfers = append([]RLDPTransferMeasurement(nil), base.RLDPTransfers...)
+	tampered.RLDPTransfers[0].SuppressedMessages++
+	if err := VerifyTrial(testPolicy(), tampered); err == nil {
+		t.Fatal("RLDP interruption evidence changed after endpoint signing")
+	}
+
+	cases := map[string]func(*Trial){
+		"unprefixed digest":          func(trial *Trial) { trial.RLDPTransfers[0].PayloadSHA256 = strings.Repeat("a", 64) },
+		"wrong part size":            func(trial *Trial) { trial.RLDPTransfers[0].PartSizeBytes-- },
+		"wrong part count":           func(trial *Trial) { trial.RLDPTransfers[0].ExpectedParts-- },
+		"success without latency":    func(trial *Trial) { trial.RLDPTransfers[0].RoundTripMillis = 0 },
+		"unattempted carries outage": func(trial *Trial) { trial.RLDPTransfers[0].InterruptionAttempted = false },
+		"resume without suppression": func(trial *Trial) { trial.RLDPTransfers[0].SuppressedMessages = 0 },
+		"udp transfer": func(trial *Trial) {
+			*trial = directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100)
+			setHealthyRLDPTransfers(trial)
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			trial := base
+			trial.RLDPTransfers = append([]RLDPTransferMeasurement(nil), base.RLDPTransfers...)
+			mutate(&trial)
+			if err := trial.Validate(); err == nil {
+				t.Fatalf("invalid RLDP evidence %q was accepted", name)
+			}
+		})
+	}
+}
+
+func TestRLDPPairRequiresBothDirectionsAndSameTransferRecovery(t *testing.T) {
+	measurement := func(size uint32, success, resumed bool, millis uint64) RLDPTransferMeasurement {
+		return RLDPTransferMeasurement{PayloadBytes: size, PayloadSHA256: "sha256:" + strings.Repeat("b", 64),
+			PartSizeBytes: RLDPPartSizeBytes, ExpectedParts: (size + RLDPPartSizeBytes - 1) / RLDPPartSizeBytes,
+			Succeeded: success, RoundTripMillis: millis, InterruptionAttempted: true,
+			InterruptAfterBytes: RLDPPartSizeBytes, PlannedInterruptionMillis: 150,
+			InterruptionMillis: 150,
+			SuppressedMessages: 3, SameTransferResumed: resumed}
+	}
+	paired := pairRLDPTransfers(
+		[]RLDPTransferMeasurement{measurement(MinRLDPLargePayloadBytes, true, true, 200), measurement(8_000_001, true, true, 300)},
+		[]RLDPTransferMeasurement{measurement(MinRLDPLargePayloadBytes, true, false, 250)})
+	if len(paired) != 1 {
+		t.Fatalf("one-sided RLDP transfer became paired evidence: %+v", paired)
+	}
+	if !paired[0].succeeded || paired[0].roundTripMillis != 250 || paired[0].sameTransferResumed {
+		t.Fatalf("paired RLDP evidence did not use AND recovery and slower latency: %+v", paired[0])
+	}
+}
+
+func TestRLDPGateNeedsPairedRecoveryAtThePredeclaredInterruption(t *testing.T) {
+	build := func() []Trial {
+		var trials []Trial
+		for _, required := range testPolicy().RequiredScenarios {
+			trials = append(trials, adnlStudy(fillCell(nil, required, 4, OutcomeFailed, FailureHandshake, 0))...)
+		}
+		return trials
+	}
+	policy := testPolicy()
+	policy.MinRLDPTransferSamplesPerCell = 4
+	target := policy.RequiredScenarios[0]
+
+	t.Run("one sided transfer is under-sampled", func(t *testing.T) {
+		trials := build()
+		for index := range trials {
+			if trials[index].Local.Key() == target.Responder.Key() && trials[index].Role == RoleB {
+				trials[index].RLDPTransfers = nil
+				trials[index] = resign(trials[index])
+				break
+			}
+		}
+		report, err := Aggregate(policy, trials, ProbeADNL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Finding != FindingInsufficient || !reasonNaming(report.Reasons, "RLDP transfer gate is under-sampled") {
+			t.Fatalf("one-sided RLDP evidence produced %q: %v", report.Finding, report.Reasons)
+		}
+	})
+
+	t.Run("application retry cannot stand in for same transfer recovery", func(t *testing.T) {
+		trials := build()
+		for index := range trials {
+			trial := trials[index]
+			if trial.Local.Key() == target.Initiator.Key() && trial.Role == RoleA {
+				trial.RLDPTransfers[0].SameTransferResumed = false
+				trials[index] = resign(trial)
+			}
+		}
+		report, err := Aggregate(policy, trials, ProbeADNL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Finding != FindingHybrid || !reasonNaming(report.Reasons, "same-transfer recovery did not succeed") {
+			t.Fatalf("failed same-transfer recovery produced %q: %v", report.Finding, report.Reasons)
+		}
+	})
+
+	t.Run("shorter planned outage cannot qualify by scheduler overshoot", func(t *testing.T) {
+		trials := build()
+		for index := range trials {
+			if trials[index].Local.Key() == target.Responder.Key() && trials[index].Role == RoleB {
+				trials[index].RLDPTransfers[0].PlannedInterruptionMillis = 100
+				trials[index] = resign(trials[index])
+				break
+			}
+		}
+		report, err := Aggregate(policy, trials, ProbeADNL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Finding != FindingInsufficient || !reasonNaming(report.Reasons, "same-transfer recovery gate is under-sampled") {
+			t.Fatalf("post-hoc outage overshoot produced %q: %v", report.Finding, report.Reasons)
 		}
 	})
 }
@@ -1640,6 +1814,7 @@ func TestDyingSessionsBlockDirectFirst(t *testing.T) {
 			trial.ReconnectMillis = 40
 		}
 		setHealthySizedEchoes(&trial)
+		setHealthyRLDPTransfers(&trial)
 		trials[index] = resign(trial)
 	}
 	report, err := Aggregate(policy, trials, ProbeADNL)
@@ -1687,6 +1862,7 @@ func TestFailedReconnectsBlockDirectFirst(t *testing.T) {
 			}
 		}
 		setHealthySizedEchoes(&trial)
+		setHealthyRLDPTransfers(&trial)
 		trials[index] = resign(trial)
 	}
 	report, err := Aggregate(policy, trials, ProbeADNL)
@@ -1794,6 +1970,7 @@ func TestUnderSampledReconnectGateRefusesAFinding(t *testing.T) {
 			trial.ReconnectMillis = 40
 		}
 		setHealthySizedEchoes(&trial)
+		setHealthyRLDPTransfers(&trial)
 		trials[index] = resign(trial)
 	}
 	report, err := Aggregate(policy, trials, ProbeADNL)

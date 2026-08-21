@@ -27,15 +27,13 @@ import (
 )
 
 const (
-	// TrialSchema is the strict record schema identifier. v3 is one loud
-	// pre-launch break that signs the bounded sized-echo outcomes used by the
-	// payload gate. v2 records do not decode because their endpoint signature
-	// committed no echo evidence.
-	TrialSchema = "tos.messaging.reachability-trial.v3"
-	// PolicySchema is the strict acceptance-policy schema identifier. v3 adds
-	// predeclared payload sizes, success rate and paired-sample floor. Changing
-	// any of them changes the policy digest; v2 policies do not decode.
-	PolicySchema = "tos.messaging.reachability-policy.v3"
+	// TrialSchema v4 signs segmented RLDPv2 transfer and same-transfer recovery
+	// evidence in addition to v3's bounded ADNL echoes. Older records cannot be
+	// silently upgraded because their endpoint signatures covered neither.
+	TrialSchema = "tos.messaging.reachability-trial.v4"
+	// PolicySchema v4 makes the exact large transfers and interruption profile
+	// decision-bearing. Thresholds chosen after collection change its digest.
+	PolicySchema = "tos.messaging.reachability-policy.v4"
 
 	// MaxScenariosPerPolicy bounds a predeclared scenario set.
 	MaxScenariosPerPolicy = 128
@@ -44,6 +42,15 @@ const (
 	// MaxSizedEchoPayloadBytes is the largest random payload the native ADNL
 	// query profile can carry after its 16-byte query prefix.
 	MaxSizedEchoPayloadBytes = 8176
+	// MaxRLDPTransferMeasurements bounds signed large-transfer evidence.
+	MaxRLDPTransferMeasurements = 4
+	// RLDPPartSizeBytes is the pinned TOS RLDPv2 FEC part size.
+	RLDPPartSizeBytes = 2_000_000
+	// MaxRLDPTransferPayloadBytes follows the bounded Mailbox response frame.
+	MaxRLDPTransferPayloadBytes = 16 << 20
+	// MinRLDPLargePayloadBytes spans at least three pinned parts, preventing a
+	// two-part boundary smoke test from standing in for a large transfer.
+	MinRLDPLargePayloadBytes = 4_000_001
 )
 
 // AddressFamily is the address family a trial ran over.
@@ -424,10 +431,15 @@ type Trial struct {
 	// are strictly size-ordered and endpoint-signed. Pairing keeps a size only
 	// when both halves measured it, making success bidirectional rather than one
 	// endpoint's assertion about one direction.
-	SizedEchoes   []SizedEchoMeasurement `json:"sized_echoes,omitempty"`
-	StartedAtUnix uint64                 `json:"started_at_unix"`
-	LocalCommit   string                 `json:"local_commit"`
-	PeerCommit    string                 `json:"peer_commit"`
+	SizedEchoes []SizedEchoMeasurement `json:"sized_echoes,omitempty"`
+	// RLDPTransfers are exact large-response outcomes over one uninterrupted
+	// application query. SameTransferResumed is valid only when an observable
+	// loss window suppressed traffic after progress and that same query later
+	// returned the committed payload.
+	RLDPTransfers []RLDPTransferMeasurement `json:"rldp_transfers,omitempty"`
+	StartedAtUnix uint64                    `json:"started_at_unix"`
+	LocalCommit   string                    `json:"local_commit"`
+	PeerCommit    string                    `json:"peer_commit"`
 	// LocalManifestDigest is the digest of this endpoint's own CollectorManifest.
 	// The commit names a repository revision; the manifest names the build --
 	// which ADNL implementation at which version, compiled by what for what,
@@ -451,6 +463,22 @@ type SizedEchoMeasurement struct {
 	PayloadBytes    uint32 `json:"payload_bytes"`
 	Succeeded       bool   `json:"succeeded"`
 	RoundTripMillis uint64 `json:"round_trip_millis,omitempty"`
+}
+
+// RLDPTransferMeasurement is endpoint-signed segmented transfer evidence.
+type RLDPTransferMeasurement struct {
+	PayloadBytes              uint32 `json:"payload_bytes"`
+	PayloadSHA256             string `json:"payload_sha256"`
+	PartSizeBytes             uint32 `json:"part_size_bytes"`
+	ExpectedParts             uint32 `json:"expected_parts"`
+	Succeeded                 bool   `json:"succeeded"`
+	RoundTripMillis           uint64 `json:"round_trip_millis,omitempty"`
+	InterruptionAttempted     bool   `json:"interruption_attempted,omitempty"`
+	InterruptAfterBytes       uint64 `json:"interrupt_after_bytes,omitempty"`
+	PlannedInterruptionMillis uint64 `json:"planned_interruption_millis,omitempty"`
+	InterruptionMillis        uint64 `json:"interruption_millis,omitempty"`
+	SuppressedMessages        uint64 `json:"suppressed_messages,omitempty"`
+	SameTransferResumed       bool   `json:"same_transfer_resumed,omitempty"`
 }
 
 type wireTrial struct {
@@ -572,6 +600,41 @@ func (t Trial) Validate() error {
 	if len(t.SizedEchoes) > 0 && (t.Probe != ProbeADNL || t.Outcome != OutcomeDirect) {
 		return errors.New("sized echo measurements require a direct ADNL session")
 	}
+	if len(t.RLDPTransfers) > MaxRLDPTransferMeasurements {
+		return errors.New("too many RLDP transfer measurements")
+	}
+	for index, transfer := range t.RLDPTransfers {
+		expectedParts := (transfer.PayloadBytes + RLDPPartSizeBytes - 1) / RLDPPartSizeBytes
+		if transfer.PayloadBytes <= RLDPPartSizeBytes || transfer.PayloadBytes > MaxRLDPTransferPayloadBytes ||
+			!canon.ValidDigest(transfer.PayloadSHA256) || transfer.PartSizeBytes != RLDPPartSizeBytes ||
+			transfer.ExpectedParts != expectedParts || transfer.ExpectedParts < 2 ||
+			transfer.Succeeded != (transfer.RoundTripMillis != 0) ||
+			index > 0 && t.RLDPTransfers[index-1].PayloadBytes >= transfer.PayloadBytes {
+			return errors.New("invalid RLDP transfer measurement")
+		}
+		if transfer.PlannedInterruptionMillis == 0 {
+			if transfer.InterruptAfterBytes != 0 || transfer.InterruptionAttempted {
+				return errors.New("unplanned RLDP interruption carries a plan or attempt")
+			}
+		} else if transfer.PlannedInterruptionMillis < 100 || transfer.PlannedInterruptionMillis > 10_000 ||
+			transfer.InterruptAfterBytes < RLDPPartSizeBytes || transfer.InterruptAfterBytes >= uint64(transfer.PayloadBytes) {
+			return errors.New("invalid RLDP interruption plan")
+		}
+		if transfer.InterruptionAttempted {
+			if transfer.InterruptAfterBytes < RLDPPartSizeBytes || transfer.InterruptAfterBytes >= uint64(transfer.PayloadBytes) ||
+				transfer.InterruptionMillis < transfer.PlannedInterruptionMillis {
+				return errors.New("invalid RLDP interruption measurement")
+			}
+		} else if transfer.InterruptionMillis != 0 || transfer.SuppressedMessages != 0 || transfer.SameTransferResumed {
+			return errors.New("unattempted RLDP interruption carries results")
+		}
+		if transfer.SameTransferResumed && (!transfer.Succeeded || transfer.SuppressedMessages == 0) {
+			return errors.New("RLDP same-transfer recovery requires success and suppressed traffic")
+		}
+	}
+	if len(t.RLDPTransfers) > 0 && (t.Probe != ProbeADNL || t.Outcome != OutcomeDirect) {
+		return errors.New("RLDP transfer measurements require a direct ADNL session")
+	}
 	// Bind observations are bounded and well-shaped before anything is derived
 	// from them. Each coordinator reflects once, so a set with the same
 	// coordinator twice is malformed: it would let a reporter pad the distinct
@@ -651,6 +714,21 @@ func (t Trial) CanonicalBytes() ([]byte, error) {
 		canon.Uint32(buffer, echoed.PayloadBytes)
 		canon.Bool(buffer, echoed.Succeeded)
 		canon.Uint64(buffer, echoed.RoundTripMillis)
+	}
+	canon.Uint32(buffer, uint32(len(t.RLDPTransfers)))
+	for _, transfer := range t.RLDPTransfers {
+		canon.Uint32(buffer, transfer.PayloadBytes)
+		canon.Text(buffer, transfer.PayloadSHA256)
+		canon.Uint32(buffer, transfer.PartSizeBytes)
+		canon.Uint32(buffer, transfer.ExpectedParts)
+		canon.Bool(buffer, transfer.Succeeded)
+		canon.Uint64(buffer, transfer.RoundTripMillis)
+		canon.Bool(buffer, transfer.InterruptionAttempted)
+		canon.Uint64(buffer, transfer.InterruptAfterBytes)
+		canon.Uint64(buffer, transfer.PlannedInterruptionMillis)
+		canon.Uint64(buffer, transfer.InterruptionMillis)
+		canon.Uint64(buffer, transfer.SuppressedMessages)
+		canon.Bool(buffer, transfer.SameTransferResumed)
 	}
 	canon.Uint64(buffer, t.StartedAtUnix)
 	canon.Text(buffer, t.LocalCommit)

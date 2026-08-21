@@ -111,11 +111,25 @@ type Policy struct {
 	// direct-path decision reads. Order is not policy identity; duplicates and
 	// values outside the native profile are refused.
 	RequiredSizedEchoPayloads []uint32 `json:"required_sized_echo_payloads"`
+	// The RLDP gates are separate from the ADNL echo gate: a maximum-size ADNL
+	// query is still not evidence that a multi-part reliable transfer recovers.
+	MinRLDPTransferSuccessRate      float64                   `json:"min_rldp_transfer_success_rate"`
+	MinRLDPSameTransferRecoveryRate float64                   `json:"min_rldp_same_transfer_recovery_rate"`
+	MinRLDPTransferSamplesPerCell   int                       `json:"min_rldp_transfer_samples_per_cell"`
+	RequiredRLDPTransfers           []RLDPTransferRequirement `json:"required_rldp_transfers"`
 	// Coordinators predeclares whose attestations count. Without it a signed
 	// observation proves only that somebody signed something, since anyone can
 	// run a coordinator and attest to whatever an operator wants.
 	Coordinators      []string   `json:"coordinators"`
 	RequiredScenarios []Scenario `json:"required_scenarios"`
+}
+
+// RLDPTransferRequirement freezes one large-transfer experiment before data
+// collection. A nonzero interruption point requires same-transfer recovery.
+type RLDPTransferRequirement struct {
+	PayloadBytes          uint32 `json:"payload_bytes"`
+	InterruptAfterBytes   uint64 `json:"interrupt_after_bytes,omitempty"`
+	MinInterruptionMillis uint64 `json:"min_interruption_millis,omitempty"`
 }
 
 type wirePolicy struct {
@@ -153,6 +167,17 @@ type SizedEchoReport struct {
 	SuccessRate      *float64 `json:"success_rate,omitempty"`
 	RoundTripP50     uint64   `json:"round_trip_p50_millis"`
 	RoundTripP95     uint64   `json:"round_trip_p95_millis"`
+}
+
+// RLDPTransferReport is paired, bidirectional segmented-transfer evidence.
+type RLDPTransferReport struct {
+	PayloadBytes             uint32   `json:"payload_bytes"`
+	AttemptedSamples         int      `json:"attempted_samples"`
+	SuccessRate              *float64 `json:"success_rate,omitempty"`
+	RecoveryAttemptedSamples int      `json:"recovery_attempted_samples"`
+	SameTransferRecoveryRate *float64 `json:"same_transfer_recovery_rate,omitempty"`
+	RoundTripP50             uint64   `json:"round_trip_p50_millis"`
+	RoundTripP95             uint64   `json:"round_trip_p95_millis"`
 }
 
 // CellReport is the aggregate for one scenario.
@@ -205,6 +230,7 @@ type CellReport struct {
 	TunnelHoldAttemptedSamples int                  `json:"tunnel_hold_attempted_samples"`
 	ReconnectAttemptedSamples  int                  `json:"reconnect_attempted_samples"`
 	SizedEchoes                []SizedEchoReport    `json:"sized_echoes"`
+	RLDPTransfers              []RLDPTransferReport `json:"rldp_transfers"`
 	FailureCounts              map[FailureClass]int `json:"failure_counts"`
 	// Filtering counts the filtering class derived from each half's
 	// coordinator-signed cold-source receipts. Evidence only: no threshold
@@ -288,8 +314,10 @@ func (p Policy) Validate() error {
 	if p.MinDirectSurvivalRate <= 0 || p.MinDirectSurvivalRate > 1 ||
 		p.MinTunnelSurvivalRate <= 0 || p.MinTunnelSurvivalRate > 1 ||
 		p.MinReconnectSuccessRate <= 0 || p.MinReconnectSuccessRate > 1 ||
-		p.MinSizedEchoSuccessRate <= 0 || p.MinSizedEchoSuccessRate > 1 {
-		return errors.New("session and sized-echo rates must fall in (0,1]")
+		p.MinSizedEchoSuccessRate <= 0 || p.MinSizedEchoSuccessRate > 1 ||
+		p.MinRLDPTransferSuccessRate <= 0 || p.MinRLDPTransferSuccessRate > 1 ||
+		p.MinRLDPSameTransferRecoveryRate <= 0 || p.MinRLDPSameTransferRecoveryRate > 1 {
+		return errors.New("session and transport rates must fall in (0,1]")
 	}
 	if p.MinSurvivalSamplesPerCell < 1 {
 		return errors.New("a policy must require at least one hold-attempted sample per cell")
@@ -299,6 +327,9 @@ func (p Policy) Validate() error {
 	}
 	if p.MinSizedEchoSamplesPerCell < 1 {
 		return errors.New("a policy must require at least one paired sized-echo sample per cell")
+	}
+	if p.MinRLDPTransferSamplesPerCell < 1 {
+		return errors.New("a policy must require at least one paired RLDP transfer sample per cell")
 	}
 	if len(p.RequiredSizedEchoPayloads) == 0 || len(p.RequiredSizedEchoPayloads) > MaxSizedEchoMeasurements {
 		return errors.New("a policy must predeclare bounded sized-echo payloads")
@@ -317,6 +348,34 @@ func (p Policy) Validate() error {
 	}
 	if !hasMaximumEcho {
 		return errors.New("a route policy must exercise the maximum native ADNL echo payload")
+	}
+	if len(p.RequiredRLDPTransfers) == 0 || len(p.RequiredRLDPTransfers) > MaxRLDPTransferMeasurements {
+		return errors.New("a policy must predeclare bounded RLDP transfers")
+	}
+	seenRLDP := make(map[uint32]struct{}, len(p.RequiredRLDPTransfers))
+	hasLargeInterrupted := false
+	for _, required := range p.RequiredRLDPTransfers {
+		if required.PayloadBytes <= RLDPPartSizeBytes || required.PayloadBytes > MaxRLDPTransferPayloadBytes {
+			return errors.New("invalid required RLDP payload")
+		}
+		if _, duplicate := seenRLDP[required.PayloadBytes]; duplicate {
+			return errors.New("a policy cannot require the same RLDP payload twice")
+		}
+		seenRLDP[required.PayloadBytes] = struct{}{}
+		if required.InterruptAfterBytes == 0 {
+			if required.MinInterruptionMillis != 0 {
+				return errors.New("an uninterrupted RLDP requirement carries an interruption window")
+			}
+			continue
+		}
+		if required.InterruptAfterBytes < RLDPPartSizeBytes || required.InterruptAfterBytes >= uint64(required.PayloadBytes) ||
+			required.MinInterruptionMillis < 100 || required.MinInterruptionMillis > 10_000 {
+			return errors.New("invalid required RLDP interruption")
+		}
+		hasLargeInterrupted = hasLargeInterrupted || required.PayloadBytes >= MinRLDPLargePayloadBytes
+	}
+	if !hasLargeInterrupted {
+		return errors.New("a route policy must require interrupted recovery of a three-part RLDP transfer")
 	}
 	if len(p.RequiredScenarios) == 0 || len(p.RequiredScenarios) > MaxScenariosPerPolicy {
 		return errors.New("a policy must predeclare its required scenarios")
@@ -417,14 +476,25 @@ func (p Policy) CanonicalBytes() ([]byte, error) {
 	canon.Uint64(buffer, ratePoints(p.MinTunnelSurvivalRate))
 	canon.Uint64(buffer, ratePoints(p.MinReconnectSuccessRate))
 	canon.Uint64(buffer, ratePoints(p.MinSizedEchoSuccessRate))
+	canon.Uint64(buffer, ratePoints(p.MinRLDPTransferSuccessRate))
+	canon.Uint64(buffer, ratePoints(p.MinRLDPSameTransferRecoveryRate))
 	canon.Uint64(buffer, uint64(p.MinSurvivalSamplesPerCell))
 	canon.Uint64(buffer, uint64(p.MinReconnectSamplesPerMobilityCell))
 	canon.Uint64(buffer, uint64(p.MinSizedEchoSamplesPerCell))
+	canon.Uint64(buffer, uint64(p.MinRLDPTransferSamplesPerCell))
 	echoPayloads := append([]uint32(nil), p.RequiredSizedEchoPayloads...)
 	sort.Slice(echoPayloads, func(i, j int) bool { return echoPayloads[i] < echoPayloads[j] })
 	canon.Uint32(buffer, uint32(len(echoPayloads)))
 	for _, size := range echoPayloads {
 		canon.Uint32(buffer, size)
+	}
+	rldpRequirements := append([]RLDPTransferRequirement(nil), p.RequiredRLDPTransfers...)
+	sort.Slice(rldpRequirements, func(i, j int) bool { return rldpRequirements[i].PayloadBytes < rldpRequirements[j].PayloadBytes })
+	canon.Uint32(buffer, uint32(len(rldpRequirements)))
+	for _, required := range rldpRequirements {
+		canon.Uint32(buffer, required.PayloadBytes)
+		canon.Uint64(buffer, required.InterruptAfterBytes)
+		canon.Uint64(buffer, required.MinInterruptionMillis)
 	}
 	coordinators := append([]string(nil), p.Coordinators...)
 	sort.Strings(coordinators)
@@ -644,6 +714,13 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 	var establish, reconnect, survival []uint64
 	echoAttempts := map[uint32]int{}
 	echoLatencies := map[uint32][]uint64{}
+	rldpAttempts := map[uint32]int{}
+	rldpRecoveryAttempts := map[uint32]int{}
+	rldpLatencies := map[uint32][]uint64{}
+	rldpRequirements := make(map[uint32]RLDPTransferRequirement, len(policy.RequiredRLDPTransfers))
+	for _, required := range policy.RequiredRLDPTransfers {
+		rldpRequirements[required.PayloadBytes] = required
+	}
 	var proxy, relay, https, failed int
 	for _, pair := range kept {
 		for _, failure := range pair.failures {
@@ -668,6 +745,18 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 			echoAttempts[echoed.payloadBytes]++
 			if echoed.succeeded {
 				echoLatencies[echoed.payloadBytes] = append(echoLatencies[echoed.payloadBytes], echoed.roundTripMillis)
+			}
+		}
+		for _, transferred := range pair.rldpTransfers {
+			rldpAttempts[transferred.payloadBytes]++
+			if transferred.succeeded {
+				rldpLatencies[transferred.payloadBytes] = append(rldpLatencies[transferred.payloadBytes], transferred.roundTripMillis)
+			}
+			required, requiredSize := rldpRequirements[transferred.payloadBytes]
+			if transferred.interrupted && (!requiredSize || required.InterruptAfterBytes == transferred.interruptAfterBytes &&
+				transferred.plannedInterruptionMillis >= required.MinInterruptionMillis &&
+				transferred.interruptionMillis >= required.MinInterruptionMillis) {
+				rldpRecoveryAttempts[transferred.payloadBytes]++
 			}
 		}
 		switch pair.outcome {
@@ -698,12 +787,16 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 	var directRates, tunnelRates []float64
 	var survivalRates, tunnelSurvivalRates, reconnectRates []float64
 	echoRates := map[uint32][]float64{}
+	rldpRates := map[uint32][]float64{}
+	rldpRecoveryRates := map[uint32][]float64{}
 	for _, pairs := range byOperator {
 		var direct, withProxy int
 		var holdAttempted, holdCompleted int
 		var tunnelAttempted, tunnelCompleted int
 		var reconnectAttempted, reconnectSucceeded int
 		operatorEchoes := map[uint32][2]int{}
+		operatorRLDP := map[uint32][2]int{}
+		operatorRLDPRecovery := map[uint32][2]int{}
 		for _, pair := range pairs {
 			switch pair.outcome {
 			case OutcomeDirect:
@@ -738,6 +831,25 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 				}
 				operatorEchoes[echoed.payloadBytes] = counts
 			}
+			for _, transferred := range pair.rldpTransfers {
+				counts := operatorRLDP[transferred.payloadBytes]
+				counts[0]++
+				if transferred.succeeded {
+					counts[1]++
+				}
+				operatorRLDP[transferred.payloadBytes] = counts
+				required, requiredSize := rldpRequirements[transferred.payloadBytes]
+				if transferred.interrupted && (!requiredSize || required.InterruptAfterBytes == transferred.interruptAfterBytes &&
+					transferred.plannedInterruptionMillis >= required.MinInterruptionMillis &&
+					transferred.interruptionMillis >= required.MinInterruptionMillis) {
+					recovery := operatorRLDPRecovery[transferred.payloadBytes]
+					recovery[0]++
+					if transferred.sameTransferResumed {
+						recovery[1]++
+					}
+					operatorRLDPRecovery[transferred.payloadBytes] = recovery
+				}
+			}
 		}
 		total := float64(len(pairs))
 		directRates = append(directRates, float64(direct)/total)
@@ -753,6 +865,12 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 		}
 		for size, counts := range operatorEchoes {
 			echoRates[size] = append(echoRates[size], float64(counts[1])/float64(counts[0]))
+		}
+		for size, counts := range operatorRLDP {
+			rldpRates[size] = append(rldpRates[size], float64(counts[1])/float64(counts[0]))
+		}
+		for size, counts := range operatorRLDPRecovery {
+			rldpRecoveryRates[size] = append(rldpRecoveryRates[size], float64(counts[1])/float64(counts[0]))
 		}
 	}
 
@@ -793,6 +911,26 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 		cell.SizedEchoes = append(cell.SizedEchoes, SizedEchoReport{PayloadBytes: size,
 			AttemptedSamples: echoAttempts[size], SuccessRate: measuredMean(echoRates[size]),
 			RoundTripP50: percentile(echoLatencies[size], 50), RoundTripP95: percentile(echoLatencies[size], 95)})
+	}
+	rldpSizes := make(map[uint32]struct{}, len(rldpAttempts)+len(policy.RequiredRLDPTransfers))
+	for size := range rldpAttempts {
+		rldpSizes[size] = struct{}{}
+	}
+	for _, required := range policy.RequiredRLDPTransfers {
+		rldpSizes[required.PayloadBytes] = struct{}{}
+	}
+	orderedRLDPSizes := make([]uint32, 0, len(rldpSizes))
+	for size := range rldpSizes {
+		orderedRLDPSizes = append(orderedRLDPSizes, size)
+	}
+	sort.Slice(orderedRLDPSizes, func(i, j int) bool { return orderedRLDPSizes[i] < orderedRLDPSizes[j] })
+	for _, size := range orderedRLDPSizes {
+		cell.RLDPTransfers = append(cell.RLDPTransfers, RLDPTransferReport{
+			PayloadBytes: size, AttemptedSamples: rldpAttempts[size], SuccessRate: measuredMean(rldpRates[size]),
+			RecoveryAttemptedSamples: rldpRecoveryAttempts[size],
+			SameTransferRecoveryRate: measuredMean(rldpRecoveryRates[size]),
+			RoundTripP50:             percentile(rldpLatencies[size], 50), RoundTripP95: percentile(rldpLatencies[size], 95),
+		})
 	}
 	cell.Qualifying = cell.Samples >= policy.MinSamplesPerCell &&
 		cell.Operators >= policy.MinOperatorsPerCell &&
@@ -935,6 +1073,30 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 		if echoMissing {
 			continue
 		}
+		rldpBySize := make(map[uint32]RLDPTransferReport, len(cell.RLDPTransfers))
+		for _, transferred := range cell.RLDPTransfers {
+			rldpBySize[transferred.PayloadBytes] = transferred
+		}
+		rldpMissing := false
+		for _, requiredTransfer := range policy.RequiredRLDPTransfers {
+			transferred, found := rldpBySize[requiredTransfer.PayloadBytes]
+			if !found || transferred.AttemptedSamples < policy.MinRLDPTransferSamplesPerCell || transferred.SuccessRate == nil {
+				underSampled = append(underSampled, cell.ScenarioKey)
+				reasons = append(reasons, "RLDP transfer gate is under-sampled for payload "+itoa(int(requiredTransfer.PayloadBytes))+": "+cell.ScenarioKey)
+				rldpMissing = true
+				break
+			}
+			if requiredTransfer.InterruptAfterBytes != 0 &&
+				(transferred.RecoveryAttemptedSamples < policy.MinRLDPTransferSamplesPerCell || transferred.SameTransferRecoveryRate == nil) {
+				underSampled = append(underSampled, cell.ScenarioKey)
+				reasons = append(reasons, "RLDP same-transfer recovery gate is under-sampled for payload "+itoa(int(requiredTransfer.PayloadBytes))+": "+cell.ScenarioKey)
+				rldpMissing = true
+				break
+			}
+		}
+		if rldpMissing {
+			continue
+		}
 		qualifies := true
 		if *cell.DirectSurvivalRate < policy.MinDirectSurvivalRate {
 			qualifies = false
@@ -951,6 +1113,17 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 				reasons = append(reasons, "sized echoes did not succeed at the predeclared rate for payload "+itoa(int(size))+": "+cell.ScenarioKey)
 			}
 		}
+		for _, requiredTransfer := range policy.RequiredRLDPTransfers {
+			transferred := rldpBySize[requiredTransfer.PayloadBytes]
+			if *transferred.SuccessRate < policy.MinRLDPTransferSuccessRate {
+				qualifies = false
+				reasons = append(reasons, "RLDP transfers did not succeed at the predeclared rate for payload "+itoa(int(requiredTransfer.PayloadBytes))+": "+cell.ScenarioKey)
+			}
+			if requiredTransfer.InterruptAfterBytes != 0 && *transferred.SameTransferRecoveryRate < policy.MinRLDPSameTransferRecoveryRate {
+				qualifies = false
+				reasons = append(reasons, "RLDP same-transfer recovery did not succeed at the predeclared rate for payload "+itoa(int(requiredTransfer.PayloadBytes))+": "+cell.ScenarioKey)
+			}
+		}
 		if qualifies {
 			directQualified++
 		}
@@ -962,7 +1135,7 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 
 	switch {
 	case directQualified == evaluated:
-		reasons = append(reasons, "every required stratum reached the direct establishment, survival, reconnect, and sized-echo gates")
+		reasons = append(reasons, "every required stratum reached the direct establishment, survival, reconnect, sized-echo, and RLDP recovery gates")
 		return FindingDirectFirst, nil, reasons
 	case directQualified > 0:
 		reasons = append(reasons, "direct sessions qualify in some required strata and not others")

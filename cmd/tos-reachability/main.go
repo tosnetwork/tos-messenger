@@ -78,6 +78,7 @@ func main() {
 	flag.StringVar(&phases.tunnel, "tunnel", "", "tunnel relay address for the fallback phase after a failed direct attempt, empty for none")
 	flag.StringVar(&phases.adnlProbe, "adnl-probe", "", "path to a tos-adnl-probe binary; the adnl probe then speaks through the native sidecar instead of the in-process gateway")
 	echoSizes := flag.String("echo-sizes", "", "comma-separated distinct payload sizes (1..8176) to echo over the established adnl session; results enter the signed trial")
+	rldpTransfers := flag.String("rldp-transfers", "", "comma-separated payload@interrupt-after@window RLDPv2 plans, for example 4000001@2000000@150ms; use payload@0@0 for uninterrupted")
 
 	var labels declared
 	flag.StringVar(&labels.operator, "operator", "", "operator name, hashed into an opaque identifier")
@@ -95,6 +96,12 @@ func main() {
 		os.Exit(1)
 	}
 	phases.echoSizes = parsedSizes
+	parsedTransfers, err := parseRLDPTransfers(*rldpTransfers)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tos-reachability:", err)
+		os.Exit(1)
+	}
+	phases.rldpTransfers = parsedTransfers
 
 	trial, artifacts, err := measure(context.Background(), *coordinators, *session, *role, *listen, *commit, *identity,
 		reachability.ProbeKind(*probeKind), *pairTimeout, *punchTimeout, phases, labels)
@@ -127,6 +134,9 @@ func main() {
 	if len(trial.SizedEchoes) > 0 {
 		fmt.Fprintf(os.Stderr, "echo=%s\n", formatEchoes(trial.SizedEchoes))
 	}
+	if len(trial.RLDPTransfers) > 0 {
+		fmt.Fprintf(os.Stderr, "rldp=%s\n", formatRLDPTransfers(trial.RLDPTransfers))
+	}
 }
 
 // parseEchoSizes turns the flag's comma-separated list into sizes; the probe
@@ -147,6 +157,34 @@ func parseEchoSizes(value string) ([]int, error) {
 	return sizes, nil
 }
 
+func parseRLDPTransfers(value string) ([]probe.RLDPTransferPlan, error) {
+	if value == "" {
+		return nil, nil
+	}
+	plans := make([]probe.RLDPTransferPlan, 0, strings.Count(value, ",")+1)
+	for _, encoded := range strings.Split(value, ",") {
+		fields := strings.Split(strings.TrimSpace(encoded), "@")
+		if len(fields) != 3 {
+			return nil, errors.New("RLDP transfers must use payload@interrupt-after@window")
+		}
+		payload, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return nil, errors.New("RLDP payload must be a byte count")
+		}
+		interruptAfter, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return nil, errors.New("RLDP interruption point must be a byte count")
+		}
+		window, err := time.ParseDuration(fields[2])
+		if err != nil {
+			return nil, errors.New("RLDP interruption window must be a duration")
+		}
+		plans = append(plans, probe.RLDPTransferPlan{PayloadBytes: payload,
+			InterruptAfterBytes: interruptAfter, Interruption: window})
+	}
+	return plans, nil
+}
+
 // formatEchoes renders each echo as size:verdict, with the round-trip time on
 // the verified ones.
 func formatEchoes(echoes []reachability.SizedEchoMeasurement) string {
@@ -157,6 +195,22 @@ func formatEchoes(echoes []reachability.SizedEchoMeasurement) string {
 			continue
 		}
 		rendered = append(rendered, fmt.Sprintf("%d:failed", echoed.PayloadBytes))
+	}
+	return strings.Join(rendered, ",")
+}
+
+func formatRLDPTransfers(transfers []reachability.RLDPTransferMeasurement) string {
+	rendered := make([]string, 0, len(transfers))
+	for _, transfer := range transfers {
+		verdict := "failed"
+		if transfer.Succeeded {
+			verdict = fmt.Sprintf("ok:%dms", transfer.RoundTripMillis)
+		}
+		if transfer.InterruptionAttempted {
+			verdict += fmt.Sprintf(":interrupted:%dms:suppressed=%d:resumed=%t",
+				transfer.InterruptionMillis, transfer.SuppressedMessages, transfer.SameTransferResumed)
+		}
+		rendered = append(rendered, fmt.Sprintf("%d:%s", transfer.PayloadBytes, verdict))
 	}
 	return strings.Join(rendered, ",")
 }
@@ -199,7 +253,8 @@ type sessionPhases struct {
 	tunnel    string
 	// echoSizes are the sized round trips run after an established session;
 	// their results are canonicalized into the endpoint-signed trial.
-	echoSizes []int
+	echoSizes     []int
+	rldpTransfers []probe.RLDPTransferPlan
 	// adnlProbe names a native sidecar binary; when set, the adnl probe's
 	// wire is spoken by that process instead of the in-process gateway, and
 	// the collector manifest describes the sidecar's build.
@@ -282,6 +337,7 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		TunnelAddr:        phases.tunnel,
 		SidecarPath:       phases.adnlProbe,
 		EchoSizes:         phases.echoSizes,
+		RLDPTransfers:     phases.rldpTransfers,
 		Commit:            commit,
 		ManifestDigest:    manifestDigest,
 		EndpointKeyHex:    endpointPublicHex,
@@ -308,6 +364,10 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		return reachability.Trial{}, artifacts, err
 	}
 	trialEchoes, err := signedEchoMeasurements(result.EchoResults)
+	if err != nil {
+		return reachability.Trial{}, artifacts, err
+	}
+	trialRLDP, err := signedRLDPMeasurements(result.RLDPResults)
 	if err != nil {
 		return reachability.Trial{}, artifacts, err
 	}
@@ -364,6 +424,7 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		RxBytes:               result.RxBytes,
 		EstablishMillis:       result.EstablishMillis,
 		SizedEchoes:           trialEchoes,
+		RLDPTransfers:         trialRLDP,
 	}
 	if err := classify(&trial, result); err != nil {
 		return reachability.Trial{}, artifacts, err
@@ -397,6 +458,30 @@ func signedEchoMeasurements(results []probe.EchoResult) ([]reachability.SizedEch
 		}
 	}
 	return echoes, nil
+}
+
+func signedRLDPMeasurements(results []probe.RLDPResult) ([]reachability.RLDPTransferMeasurement, error) {
+	if len(results) > reachability.MaxRLDPTransferMeasurements {
+		return nil, errors.New("probe returned too many RLDP transfers")
+	}
+	transfers := make([]reachability.RLDPTransferMeasurement, len(results))
+	for index, result := range results {
+		if result.PayloadBytes < 1 || result.PayloadBytes > reachability.MaxRLDPTransferPayloadBytes {
+			return nil, errors.New("probe returned an invalid RLDP transfer")
+		}
+		transfers[index] = reachability.RLDPTransferMeasurement{
+			PayloadBytes: uint32(result.PayloadBytes), PayloadSHA256: result.PayloadSHA256,
+			PartSizeBytes: result.PartSizeBytes, ExpectedParts: result.ExpectedParts,
+			Succeeded: result.Succeeded, RoundTripMillis: result.RoundTripMillis,
+			InterruptionAttempted:     result.InterruptionAttempted,
+			InterruptAfterBytes:       result.InterruptAfterBytes,
+			PlannedInterruptionMillis: result.PlannedInterruptionMillis,
+			InterruptionMillis:        result.InterruptionMillis,
+			SuppressedMessages:        result.SuppressedMessages, SameTransferResumed: result.SameTransferResumed,
+		}
+	}
+	sort.Slice(transfers, func(i, j int) bool { return transfers[i].PayloadBytes < transfers[j].PayloadBytes })
+	return transfers, nil
 }
 
 // collectorManifest describes this build: which orchestrator at which commit,

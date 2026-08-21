@@ -559,8 +559,14 @@ func build(t *testing.T) []Vector {
 		MinDirectSurvivalRate: 0.9, MinTunnelSurvivalRate: 0.9, MinReconnectSuccessRate: 0.9,
 		MinSizedEchoSuccessRate: 0.9, MinSurvivalSamplesPerCell: 10,
 		MinReconnectSamplesPerMobilityCell: 10, MinSizedEchoSamplesPerCell: 10,
-		RequiredSizedEchoPayloads: []uint32{1024, reachability.MaxSizedEchoPayloadBytes},
-		Coordinators:              []string{coordinatorID},
+		MinRLDPTransferSuccessRate: 0.9, MinRLDPSameTransferRecoveryRate: 0.9,
+		MinRLDPTransferSamplesPerCell: 10,
+		RequiredSizedEchoPayloads:     []uint32{1024, reachability.MaxSizedEchoPayloadBytes},
+		RequiredRLDPTransfers: []reachability.RLDPTransferRequirement{{
+			PayloadBytes:        reachability.MinRLDPLargePayloadBytes,
+			InterruptAfterBytes: reachability.RLDPPartSizeBytes, MinInterruptionMillis: 150,
+		}},
+		Coordinators: []string{coordinatorID},
 		RequiredScenarios: []reachability.Scenario{
 			{
 				Initiator: reachability.EndpointStratum{

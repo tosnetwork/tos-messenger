@@ -76,29 +76,25 @@ const (
 	DomainDeviceSession = "tos.messaging.device-session.v1\x00"
 	// DomainE2EEBinding namespaces the associated data of a ciphertext.
 	DomainE2EEBinding = "tos.messaging.e2ee-binding.v1\x00"
-	// DomainReachabilityTrial namespaces one measured trial record. v3 folds in
-	// the bounded sized-echo results, so payload-transport evidence cannot be
-	// added, removed, reordered, or have its verdict/latency changed after the
-	// endpoint signs. It retains v2's collector-manifest and phase-status
-	// bindings.
-	// the collector-manifest digests of both endpoints, so a trial commits to
-	// exactly which collector builds produced each half rather than only to two
-	// repository commits -- a sidecar collector is a different implementation
-	// at the same orchestrator commit, and the commit alone cannot tell them
-	// apart -- and the phase-status booleans, so a failed hold or reconnect
-	// cannot be rewritten into an unattempted one after signing.
-	DomainReachabilityTrial = "tos.messaging.reachability-trial.v3\x00"
+	// DomainReachabilityTrial namespaces one measured trial record. v4 folds in
+	// bounded sized-echo and segmented RLDP recovery results, so transport
+	// evidence cannot be added, removed, reordered, or changed after signing.
+	// It also retains the collector-manifest digests of both endpoints and the
+	// phase-status booleans: a sidecar at the same orchestrator commit remains a
+	// distinct implementation, and a failed phase cannot become unattempted.
+	DomainReachabilityTrial = "tos.messaging.reachability-trial.v4\x00"
 	// DomainReachabilityCollectorManifest namespaces the content-addressed
 	// description of one collector build: orchestrator, ADNL implementation,
 	// dependency version, binary hash, target, toolchain, and wire profile. The
 	// digest over it is what a trial commits and what the two halves of a pair
 	// cross-check about each other.
 	DomainReachabilityCollectorManifest = "tos.messaging.reachability-collector-manifest.v1\x00"
-	// DomainReachabilityPolicy namespaces a predeclared acceptance policy. v3
-	// folds in the required sized-echo payloads, success rate, and paired sample
-	// floor in addition to v2's session gates, so those values cannot be chosen
-	// after observing the study.
-	DomainReachabilityPolicy = "tos.messaging.reachability-policy.v3\x00"
+	// DomainReachabilityPolicy namespaces a predeclared acceptance policy. v4
+	// additionally folds in segmented RLDP and same-transfer recovery gates.
+	DomainReachabilityPolicy = "tos.messaging.reachability-policy.v4\x00"
+	// DomainReachabilityRLDPPayload derives deterministic, independently
+	// reproducible bytes for the RLDP measurement response.
+	DomainReachabilityRLDPPayload = "tos.messaging.reachability-rldp-payload.v1\x00"
 	// DomainReachabilityOperator namespaces the opaque operator derivation.
 	DomainReachabilityOperator = "tos.messaging.reachability-operator.v1\x00"
 	// DomainReachabilitySite namespaces the opaque site derivation.
@@ -210,6 +206,7 @@ var Domains = []string{
 	DomainReachabilityTrial,
 	DomainReachabilityCollectorManifest,
 	DomainReachabilityPolicy,
+	DomainReachabilityRLDPPayload,
 	DomainReachabilityOperator,
 	DomainReachabilitySite,
 	DomainReachabilityPairID,
