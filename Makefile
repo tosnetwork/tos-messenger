@@ -14,7 +14,7 @@ test-race:
 # The ADNL gateway cannot run under the race detector (tonutils-go's TL
 # serializer trips checkptr), so its end-to-end tests skip there and run here.
 test-adnl:
-	GOWORK=off go test -count=1 -run ADNL ./pkg/probe ./cmd/tos-reachability
+	GOWORK=off go test -count=1 -run ADNL ./pkg/probe ./pkg/publicchannel ./cmd/tos-reachability
 
 test-openmls:
 	cargo fmt --manifest-path rust/openmls-driver/Cargo.toml -- --check

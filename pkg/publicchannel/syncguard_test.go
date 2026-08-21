@@ -71,7 +71,7 @@ func TestPublicChannelSyncGuardEnforcesPerAttemptWorkLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	limits := DefaultSyncLimits()
-	limits.FetchesPerPeer = 2
+	limits.FetchesPerPeer = 3
 	limits.UnavailablePerPeer = 1
 	limits.ResponseBytesPerPeer = MaxFetchResponseBytes
 	limits.TotalResponseBytes = MaxFetchResponseBytes
@@ -100,5 +100,47 @@ func TestPublicChannelSyncGuardEnforcesPerAttemptWorkLimits(t *testing.T) {
 	}
 	if _, err := NewSyncGuard(profile.ChannelID, digest, SyncLimits{}); err == nil {
 		t.Fatal("zero sync limits were accepted")
+	}
+}
+
+func TestNativeCarrierInboundBudgetsAndAnnouncementReplay(t *testing.T) {
+	profile, _, _, _, _, _ := storeFixture(t)
+	digest, _ := profile.Digest()
+	limits := DefaultSyncLimits()
+	limits.FetchesPerPeer = 2
+	limits.CandidateHeadsPerPeer = 1
+	limits.UnavailablePerPeer = 1
+	limits.ResponseBytesPerPeer = MaxFetchResponseBytes
+	limits.TotalResponseBytes = MaxFetchResponseBytes
+	guard, err := NewSyncGuard(profile.ChannelID, digest, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	carrier := &NativeCarrier{guard: guard, seenHeads: map[string]struct{}{}, seenEvents: map[string]struct{}{}}
+	if err := carrier.beginServeFetch(); err != nil {
+		t.Fatal(err)
+	}
+	if err := carrier.chargeServeResponse(1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := carrier.beginServeFetch(); err != nil {
+		t.Fatal(err)
+	}
+	if err := carrier.beginServeFetch(); err == nil {
+		t.Fatal("silent inbound fetch bypassed its attempt ceiling")
+	}
+	if err := carrier.chargeServeResponse(1, 1); err == nil {
+		t.Fatal("inbound unavailable response bypassed its ceiling")
+	}
+	if !carrier.claimAnnouncement("event-one", false) || carrier.claimAnnouncement("event-one", false) {
+		t.Fatal("native Event announcement replay was not idempotent")
+	}
+	if !carrier.claimAnnouncement("head-one", true) || carrier.claimAnnouncement("head-one", true) ||
+		carrier.claimAnnouncement("head-two", true) {
+		t.Fatal("native head replay/distinct-head ceiling was not enforced")
+	}
+	carrier.releaseAnnouncement("event-one", false)
+	if !carrier.claimAnnouncement("event-one", false) {
+		t.Fatal("failed application callback could not retry its announcement")
 	}
 }

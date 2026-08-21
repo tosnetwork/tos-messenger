@@ -41,6 +41,7 @@ type HeadCandidate struct {
 type syncPeerUsage struct {
 	heads       map[string]Head
 	fetches     uint32
+	responses   uint32
 	bytes       uint64
 	unavailable uint32
 }
@@ -94,13 +95,11 @@ func (g *SyncGuard) ObserveHead(peerID string, head Head) error {
 	return nil
 }
 
-// ChargeFetch accounts bounded work after the transport-level response-size
-// ceiling has already stopped the read. A peer reporting unavailable IDs still
-// consumes both fetch and unavailable budgets.
-func (g *SyncGuard) ChargeFetch(peerID string, responseBytes int, unavailable int) error {
-	if g == nil || responseBytes < 1 || responseBytes > MaxFetchResponseBytes ||
-		unavailable < 0 || unavailable > MaxFetchEvents {
-		return errors.New("invalid public channel fetch charge")
+// BeginFetch charges the attempt before network I/O, so silence and timeout
+// cannot bypass the per-peer request ceiling.
+func (g *SyncGuard) BeginFetch(peerID string) error {
+	if g == nil || !syncPeerPattern.MatchString(peerID) {
+		return errors.New("invalid public channel fetch peer")
 	}
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
@@ -108,17 +107,48 @@ func (g *SyncGuard) ChargeFetch(peerID string, responseBytes int, unavailable in
 	if !found {
 		return errors.New("unobserved public channel sync peer")
 	}
+	if peer.fetches >= g.limits.FetchesPerPeer {
+		return errors.New("public channel sync fetch limit reached")
+	}
+	peer.fetches++
+	return nil
+}
+
+// ChargeResponse accounts work after the transport-level response-size ceiling
+// stopped the read. Unavailable IDs consume their own budget.
+func (g *SyncGuard) ChargeResponse(peerID string, responseBytes int, unavailable int) error {
+	if g == nil || responseBytes < 1 || responseBytes > MaxFetchResponseBytes ||
+		unavailable < 0 || unavailable > MaxFetchEvents {
+		return errors.New("invalid public channel response charge")
+	}
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+	peer, found := g.peers[peerID]
+	if !found {
+		return errors.New("unobserved public channel sync peer")
+	}
+	if peer.responses >= peer.fetches {
+		return errors.New("public channel response has no charged fetch")
+	}
 	bytes := uint64(responseBytes)
 	missing := uint32(unavailable)
-	if peer.fetches >= g.limits.FetchesPerPeer || bytes > g.limits.ResponseBytesPerPeer-peer.bytes ||
+	if bytes > g.limits.ResponseBytesPerPeer-peer.bytes ||
 		missing > g.limits.UnavailablePerPeer-peer.unavailable || bytes > g.limits.TotalResponseBytes-g.totalBytes {
 		return errors.New("public channel sync resource limit reached")
 	}
-	peer.fetches++
 	peer.bytes += bytes
 	peer.unavailable += missing
+	peer.responses++
 	g.totalBytes += bytes
 	return nil
+}
+
+// ChargeFetch is the in-memory/test convenience for one completed fetch.
+func (g *SyncGuard) ChargeFetch(peerID string, responseBytes int, unavailable int) error {
+	if err := g.BeginFetch(peerID); err != nil {
+		return err
+	}
+	return g.ChargeResponse(peerID, responseBytes, unavailable)
 }
 
 // Candidates returns fetch priority only. A support threshold can avoid work

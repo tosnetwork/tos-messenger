@@ -91,6 +91,32 @@ contains transport noise without adding unmeasured PoW, stake or payment rules,
 and authorized publication remains governed by the finalized profile. Default
 calibration against the real M0-R carrier and abuse measurements is still open.
 
+## Native TOS Overlay/RLDP carrier
+
+`NativeCarrier` binds the candidate to the repository's pinned
+`tosutils-go` native stack. The 32 bytes already committed by
+`channel_<sha256>` are the Overlay ID. Authenticated ADNL peers exchange live
+head/Event hints through signed two-step Overlay broadcast; RLDP carries the
+strict fetch request and response when history is larger or missing. Each
+connection authorizes only the remote ADNL transport key and caps native
+broadcast/FEC state, inbound queries, served bytes, unavailable results and
+application callback replay.
+
+The native signature is hop authentication, not publisher authority. Received
+Events still recheck the finalized profile, publisher role/delegation and
+Ed25519 signature; heads still enter `SyncGuard` as untrusted claims. Incoming
+RLDP requests must match the carrier's exact channel/profile, and outbound
+fetch attempts are charged before I/O so a silent peer cannot bypass the
+request ceiling. Malformed responses consume a pessimistic unavailable budget.
+
+The non-race ADNL gate starts two real UDP Gateways, broadcasts a head and an
+authenticated Event in both directions, recursively fetches the history over
+RLDP, reproduces its head, tears the transport down, and repeats with the same
+transport identities. The race gate covers the carrier's state and codecs;
+the live ADNL test runs separately because the pinned TL serializer is not
+compatible with race/checkptr. This is same-host native-stack/restart evidence,
+not independent-network evidence.
+
 ## Durable local state
 
 The candidate store writes verified Event objects and a canonical immutable
@@ -108,8 +134,10 @@ derived history matches them.
 
 ## Explicitly still open
 
-- Overlay/RLDP/TOS Sites publication binding and measured production calibration
-  of the candidate peer/resource limits;
+- daemon/DHT peer discovery and multi-peer production assembly around the
+  implemented native Overlay/RLDP carrier;
+- TOS Sites history mirroring and measured production calibration of the
+  candidate peer/resource limits;
 - independently operated convergence/failover evidence;
 - independent vector consumption/review and a second implementation.
 
