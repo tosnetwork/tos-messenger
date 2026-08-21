@@ -551,6 +551,64 @@ func trialTamperedSignatureJSON(t *testing.T) string {
 	return encodeTrial(t, trial)
 }
 
+// signedEchoTrial is a valid direct-ADNL measurement whose endpoint signature
+// covers two bounded payload results. It is separate from the UDP baseline so
+// the corpus can distinguish malformed echo shape from a probe that could
+// never have measured an ADNL session.
+func signedEchoTrial(t *testing.T) reachability.Trial {
+	t.Helper()
+	trial := signedTrial(t, inPolicyCoordinatorKey())
+	observation, err := reachability.SignObservation(reachability.Observation{
+		SessionID:            trial.SessionID,
+		Role:                 string(trial.Role),
+		EndpointPublicKeyHex: trial.EndpointPublicKeyHex,
+		Probe:                string(reachability.ProbeADNL),
+		Observed:             trial.Observation.Observed,
+		PeerPublic:           trial.Observation.PeerPublic,
+		AtUnix:               trial.Observation.AtUnix,
+	}, inPolicyCoordinatorKey())
+	if err != nil {
+		t.Fatalf("sign ADNL observation: %v", err)
+	}
+	trial.Probe = reachability.ProbeADNL
+	trial.Observation = observation
+	trial.SizedEchoes = []reachability.SizedEchoMeasurement{
+		{PayloadBytes: 1024, Succeeded: true, RoundTripMillis: 4},
+		{PayloadBytes: reachability.MaxSizedEchoPayloadBytes, Succeeded: true, RoundTripMillis: 9},
+	}
+	signed, err := reachability.SignTrial(trial, endpointKey())
+	if err != nil {
+		t.Fatalf("sign sized-echo trial: %v", err)
+	}
+	return signed
+}
+
+// trialTamperedSizedEchoJSON changes a signed latency without changing shape.
+// Decode therefore succeeds, but signature verification must fail.
+func trialTamperedSizedEchoJSON(t *testing.T) string {
+	t.Helper()
+	trial := signedEchoTrial(t)
+	trial.SizedEchoes[0].RoundTripMillis++
+	return encodeTrial(t, trial)
+}
+
+// echoShapeTrialJSON edits a valid signed echo trial after signing and marshals
+// it directly. These mutations are shapes SignTrial itself refuses, exactly as
+// an attacker would have to construct them.
+func echoShapeTrialJSON(t *testing.T, mutate func(*reachability.Trial)) string {
+	t.Helper()
+	trial := signedEchoTrial(t)
+	mutate(&trial)
+	document, err := json.Marshal(struct {
+		Schema string `json:"schema"`
+		reachability.Trial
+	}{Schema: reachability.TrialSchema, Trial: trial})
+	if err != nil {
+		t.Fatalf("encode sized-echo trial: %v", err)
+	}
+	return string(document)
+}
+
 // signBindReflection signs one coordinator's reflection of the baseline
 // endpoint's external address, for the key the baseline trial signs with.
 func signBindReflection(t *testing.T, coordinatorKey ed25519.PrivateKey, session, observed string) reachability.BindObservation {

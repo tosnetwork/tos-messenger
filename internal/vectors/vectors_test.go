@@ -557,8 +557,10 @@ func build(t *testing.T) []Vector {
 		MinSamplesPerCell: 30, MinOperatorsPerCell: 3, MinSitesPerCell: 3,
 		MaxTrialsPerOperatorPerCell: 20, DirectViableRate: 0.8, TunnelViableRate: 0.95,
 		MinDirectSurvivalRate: 0.9, MinTunnelSurvivalRate: 0.9, MinReconnectSuccessRate: 0.9,
-		MinSurvivalSamplesPerCell: 10, MinReconnectSamplesPerMobilityCell: 10,
-		Coordinators: []string{coordinatorID},
+		MinSizedEchoSuccessRate: 0.9, MinSurvivalSamplesPerCell: 10,
+		MinReconnectSamplesPerMobilityCell: 10, MinSizedEchoSamplesPerCell: 10,
+		RequiredSizedEchoPayloads: []uint32{1024, reachability.MaxSizedEchoPayloadBytes},
+		Coordinators:              []string{coordinatorID},
 		RequiredScenarios: []reachability.Scenario{
 			{
 				Initiator: reachability.EndpointStratum{

@@ -478,6 +478,18 @@ func TestConfigRefusesWhatTheRunnersCannotMeasure(t *testing.T) {
 	if _, err := RunADNL(ctx, empty); err == nil {
 		t.Fatal("a zero-byte echo was accepted")
 	}
+	duplicate := base
+	duplicate.EchoSizes = []int{1024, 1024}
+	if _, err := RunADNL(ctx, duplicate); err == nil {
+		t.Fatal("duplicate echo sizes were accepted")
+	}
+	tooMany := base
+	for size := 1; size <= reachability.MaxSizedEchoMeasurements+1; size++ {
+		tooMany.EchoSizes = append(tooMany.EchoSizes, size)
+	}
+	if _, err := RunADNL(ctx, tooMany); err == nil {
+		t.Fatal("too many echo sizes were accepted")
+	}
 	udpEcho := base
 	udpEcho.Probe = reachability.ProbeUDP
 	udpEcho.EchoSizes = []int{1024}

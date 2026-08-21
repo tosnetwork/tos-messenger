@@ -27,23 +27,23 @@ import (
 )
 
 const (
-	// TrialSchema is the strict record schema identifier. v2 is one loud
-	// pre-launch break carrying two additions: both endpoints'
-	// collector-manifest digests, and the phase-status booleans that make a
-	// failed hold or reconnect distinguishable from one nobody ran. All of it is
-	// folded into the canonical preimage, and a v1 record simply does not
-	// decode.
-	TrialSchema = "tos.messaging.reachability-trial.v2"
-	// PolicySchema is the strict acceptance-policy schema identifier. v2 is a
-	// loud pre-launch break adding the session gates: the survival and
-	// reconnect thresholds a route decision reads, and the attempted-sample
-	// minimums under them. They change the policy digest deliberately --
-	// thresholds invented after seeing the data must show -- and a v1 policy
-	// simply does not decode.
-	PolicySchema = "tos.messaging.reachability-policy.v2"
+	// TrialSchema is the strict record schema identifier. v3 is one loud
+	// pre-launch break that signs the bounded sized-echo outcomes used by the
+	// payload gate. v2 records do not decode because their endpoint signature
+	// committed no echo evidence.
+	TrialSchema = "tos.messaging.reachability-trial.v3"
+	// PolicySchema is the strict acceptance-policy schema identifier. v3 adds
+	// predeclared payload sizes, success rate and paired-sample floor. Changing
+	// any of them changes the policy digest; v2 policies do not decode.
+	PolicySchema = "tos.messaging.reachability-policy.v3"
 
 	// MaxScenariosPerPolicy bounds a predeclared scenario set.
 	MaxScenariosPerPolicy = 128
+	// MaxSizedEchoMeasurements bounds the signed per-half payload evidence.
+	MaxSizedEchoMeasurements = 8
+	// MaxSizedEchoPayloadBytes is the largest random payload the native ADNL
+	// query profile can carry after its 16-byte query prefix.
+	MaxSizedEchoPayloadBytes = 8176
 )
 
 // AddressFamily is the address family a trial ran over.
@@ -418,10 +418,16 @@ type Trial struct {
 	// tunnel-survival evidence.
 	TunnelHoldAttempted bool `json:"tunnel_hold_attempted,omitempty"`
 	// TunnelHoldCompleted says the tunneled session survived the full window.
-	TunnelHoldCompleted bool   `json:"tunnel_hold_completed,omitempty"`
-	StartedAtUnix       uint64 `json:"started_at_unix"`
-	LocalCommit         string `json:"local_commit"`
-	PeerCommit          string `json:"peer_commit"`
+	TunnelHoldCompleted bool `json:"tunnel_hold_completed,omitempty"`
+	// SizedEchoes are direct-session ADNL query round trips carrying the named
+	// random payload size and accepting only its exact SHA-256 answer. Entries
+	// are strictly size-ordered and endpoint-signed. Pairing keeps a size only
+	// when both halves measured it, making success bidirectional rather than one
+	// endpoint's assertion about one direction.
+	SizedEchoes   []SizedEchoMeasurement `json:"sized_echoes,omitempty"`
+	StartedAtUnix uint64                 `json:"started_at_unix"`
+	LocalCommit   string                 `json:"local_commit"`
+	PeerCommit    string                 `json:"peer_commit"`
 	// LocalManifestDigest is the digest of this endpoint's own CollectorManifest.
 	// The commit names a repository revision; the manifest names the build --
 	// which ADNL implementation at which version, compiled by what for what,
@@ -437,6 +443,14 @@ type Trial struct {
 	TxBytes            uint64 `json:"tx_bytes,omitempty"`
 	RxBytes            uint64 `json:"rx_bytes,omitempty"`
 	PeakRSSBytes       uint64 `json:"peak_rss_bytes,omitempty"`
+}
+
+// SizedEchoMeasurement is one endpoint's signed payload-transport outcome.
+// A failed attempt has zero latency; a success has a nonzero round-trip time.
+type SizedEchoMeasurement struct {
+	PayloadBytes    uint32 `json:"payload_bytes"`
+	Succeeded       bool   `json:"succeeded"`
+	RoundTripMillis uint64 `json:"round_trip_millis,omitempty"`
 }
 
 type wireTrial struct {
@@ -545,6 +559,19 @@ func (t Trial) Validate() error {
 	if t.Probe == ProbeUDP && (t.HoldAttempted || t.ReconnectAttempted || t.TunnelHoldAttempted) {
 		return errors.New("the udp probe has no session phases to report")
 	}
+	if len(t.SizedEchoes) > MaxSizedEchoMeasurements {
+		return errors.New("too many sized echo measurements")
+	}
+	for index, echoed := range t.SizedEchoes {
+		if echoed.PayloadBytes == 0 || echoed.PayloadBytes > MaxSizedEchoPayloadBytes ||
+			echoed.Succeeded != (echoed.RoundTripMillis != 0) ||
+			index > 0 && t.SizedEchoes[index-1].PayloadBytes >= echoed.PayloadBytes {
+			return errors.New("invalid sized echo measurement")
+		}
+	}
+	if len(t.SizedEchoes) > 0 && (t.Probe != ProbeADNL || t.Outcome != OutcomeDirect) {
+		return errors.New("sized echo measurements require a direct ADNL session")
+	}
 	// Bind observations are bounded and well-shaped before anything is derived
 	// from them. Each coordinator reflects once, so a set with the same
 	// coordinator twice is malformed: it would let a reporter pad the distinct
@@ -616,6 +643,15 @@ func (t Trial) CanonicalBytes() ([]byte, error) {
 	canon.Bool(buffer, t.ReconnectSucceeded)
 	canon.Bool(buffer, t.TunnelHoldAttempted)
 	canon.Bool(buffer, t.TunnelHoldCompleted)
+	// Echo evidence is count-prefixed and strictly size-ordered. The endpoint
+	// signature therefore covers exact attempts, failures, and latencies rather
+	// than an unsigned stderr rendering that could be rewritten later.
+	canon.Uint32(buffer, uint32(len(t.SizedEchoes)))
+	for _, echoed := range t.SizedEchoes {
+		canon.Uint32(buffer, echoed.PayloadBytes)
+		canon.Bool(buffer, echoed.Succeeded)
+		canon.Uint64(buffer, echoed.RoundTripMillis)
+	}
 	canon.Uint64(buffer, t.StartedAtUnix)
 	canon.Text(buffer, t.LocalCommit)
 	canon.Text(buffer, t.PeerCommit)

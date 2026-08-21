@@ -103,9 +103,11 @@ Do not shrink the thresholds to make the pilot "pass". The example policy's
 minimums are the point; a policy weak enough for one operator to satisfy is
 refused by the tooling anyway, and editing thresholds after seeing data is
 the failure mode the content-addressed policy digest exists to prevent. The
-same goes for the session gates the v2 policy predeclares — the survival and
-reconnect rates and their attempted-sample floors — which the route decision
-reads alongside the establishment rates.
+same goes for the v3 session gates the policy predeclares — survival,
+reconnect, and sized-echo rates, their attempted-sample floors, and the exact
+echo payload sizes — which the route decision reads alongside establishment.
+The policy is refused unless one required size is the native ADNL maximum of
+8176 bytes; a tiny-packet-only direct gate would answer the wrong question.
 
 ## 4. One UDP pair
 
@@ -157,7 +159,8 @@ Same shape, new session, plus `-probe adnl` on **both** sides:
 
 ```sh
 SESSION="ses_$(openssl rand -hex 16)"
-./tos-reachability -probe adnl -coordinators host:7691,host:7692 \
+./tos-reachability -probe adnl -echo-sizes 1024,8176 \
+  -coordinators host:7691,host:7692 \
   -session "$SESSION" -role a -identity ./endpoint-a.key \
   -operator "your-name" -site "home-fiber" \
   -carrier consumer-isp -endpoint-class desktop \
@@ -184,6 +187,7 @@ like one that did — and all three phase flags are refused with `-probe udp`):
 ```sh
 SESSION="ses_$(openssl rand -hex 16)"
 ./tos-reachability -probe adnl -hold 30s -reconnect \
+  -echo-sizes 1024,8176 \
   -coordinators host:7691,host:7692 \
   -session "$SESSION" -role a -identity ./endpoint-a.key \
   … # labels and -out as before
@@ -241,9 +245,14 @@ collector manifest then names `tos-native-adnl`, the sidecar's own commit and
 toolchain, and the sha256 of the sidecar binary. The sidecar runner refuses
 `-tunnel` and IPv6 sockets — the native transport supports neither, and those
 cells stay with the gateway runner. `-echo-sizes 1024,8176` (adnl only, each
-size 1..8176) adds sized echo round trips after the measured phases; their
-verdicts appear on the stderr summary as `echo=1024:ok:3ms,...` and are
-cross-check harness evidence, never part of the signed trial.
+size 1..8176, at most eight distinct sizes) adds sized echo round trips after
+the measured phases. Their verdicts appear on stderr as
+`echo=1024:ok:3ms,...` and in the endpoint-signed v3 trial. Both endpoints must
+configure the policy's exact sizes. Pairing keeps only sizes measured by both
+halves; success is the conjunction of the two outcomes and latency is the
+slower half. A one-sided result therefore cannot become bidirectional route
+evidence. These bounded ADNL query results gate `direct-first`; they do not
+claim that RLDP has passed its separate transport acceptance.
 
 ## 7. Aggregate
 
@@ -269,6 +278,8 @@ probes:
       (and a *classified* failure, never `internal-error`, elsewhere);
 - [ ] the held ADNL pair carries a nonzero `survival_seconds` on **both**
       halves and a nonzero `reconnect_millis` on the initiator's;
+- [ ] both direct ADNL halves carry signed `sized_echoes` for 1024 and 8176
+      bytes, and the ADNL cell reports one paired attempt for each size;
 - [ ] the forced-fallback pair reports `outcome=proxy-fallback` carrying the
       direct phase's failure class, on both halves;
 - [ ] trials carry `filtering_observations` from the `same-address-other-port`
@@ -299,6 +310,7 @@ probes:
 | coordinator silent | it answers only well-formed probe datagrams and never amplifies; check the port with the endpoint tool itself, not with netcat |
 | `reconnect requires a hold window`, `reconnect measurement belongs to the initiating role` (or a phase flag refused with `-probe udp`) | `-reconnect` needs `-hold` and role `a` — the responder never dials, so it has nothing to re-establish — and the udp probe has no session to hold, reconnect, or tunnel: the phase flags belong to `-probe adnl` |
 | `survival_s=0` on one half of a held pair | that side ran without `-hold`; both sides must hold, or the pair drops out of the survival percentile |
+| a required sized echo has zero paired attempts | one endpoint omitted `-echo-sizes`, used different sizes, or the session never reached its final echo phase; one-sided evidence is deliberately not paired |
 | fallback run stays `outcome=failed` | one side is missing `-tunnel` (registration is double, so half a registration forwards nothing), the relay is unreachable, or the direct block also cut the relay port — the fallback runs inside its own bounded window, so a relay that never answers leaves the direct failure standing |
 | no `filtering_observations` in a trial | the coordinator ran with `-filter-listen` set empty, or the cold probes were filtered or lost — silence is not evidence, and the trial stays valid with filtering `undetermined` |
 

@@ -72,11 +72,10 @@ type Config struct {
 	// neither and a silent no-op would record "not measured" for something
 	// the operator asked for.
 	SidecarPath string
-	// EchoSizes asks for one echo round trip per size after a confirmed
-	// direct establishment: an ADNL query carrying that many random bytes,
-	// answered with their sha256. The results are cross-check harness
-	// evidence about payload transport between implementations, reported
-	// beside the trial and never inside it. ADNL probe only.
+	// EchoSizes asks for one echo round trip per size after a confirmed direct
+	// establishment: an ADNL query carrying that many random bytes, answered
+	// with their SHA-256. The command maps the bounded results into the signed
+	// trial. ADNL probe only.
 	EchoSizes []int
 	Commit    string
 	// ManifestDigest is the digest of this endpoint's collector manifest,
@@ -151,8 +150,8 @@ type Result struct {
 	// under, learned during pairing.
 	PeerTransportKey string
 	// EchoResults is what each configured echo round trip did over the
-	// confirmed direct session, in the order configured. It is cross-check
-	// harness evidence, reported beside the trial and never inside it.
+	// confirmed direct session, in the order configured. The orchestrator
+	// canonicalizes it into endpoint-signed trial evidence.
 	EchoResults []EchoResult
 	// Observation is the coordinator's signed account of what it saw. A result
 	// without one cannot be filed under a stratum, because the two facts that
@@ -388,10 +387,18 @@ func validateConfig(config *Config) error {
 	// An echo that cannot be sent must be refused where the operator can see
 	// it: the native stack caps query payloads, and a size past the cap would
 	// be recorded as a network failure it never was.
+	if len(config.EchoSizes) > reachability.MaxSizedEchoMeasurements {
+		return errors.New("too many echo sizes")
+	}
+	seenEchoSizes := make(map[int]struct{}, len(config.EchoSizes))
 	for _, size := range config.EchoSizes {
 		if size < 1 || size > MaxEchoBytes {
 			return errors.New("echo sizes must be between 1 and 8176 bytes")
 		}
+		if _, duplicate := seenEchoSizes[size]; duplicate {
+			return errors.New("echo sizes must be distinct")
+		}
+		seenEchoSizes[size] = struct{}{}
 	}
 	if config.Commit != "" && !commitPattern.MatchString(config.Commit) {
 		return errors.New("invalid probe commit")

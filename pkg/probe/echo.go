@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/reachability"
 	"github.com/tosnetwork/tosutils-go/adnl"
 	"github.com/tosnetwork/tosutils-go/tl"
 )
@@ -29,7 +30,7 @@ const (
 	// native stack caps ADNL query payloads at 8192 bytes and the prefix
 	// spends 16 of them; a larger request would be refused or dropped rather
 	// than measured, so it is refused here where the operator can see it.
-	MaxEchoBytes = 8176
+	MaxEchoBytes = int(reachability.MaxSizedEchoPayloadBytes)
 	// echoConfirmBytes is the random-byte count of the round trips that stand
 	// in for a ping: session confirmation and keepalives. It matches the
 	// native sidecar's own confirmation payload, so the two implementations

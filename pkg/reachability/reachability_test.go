@@ -304,8 +304,11 @@ func testPolicy() Policy {
 		MinDirectSurvivalRate:              0.75,
 		MinTunnelSurvivalRate:              0.75,
 		MinReconnectSuccessRate:            0.75,
+		MinSizedEchoSuccessRate:            0.75,
 		MinSurvivalSamplesPerCell:          2,
 		MinReconnectSamplesPerMobilityCell: 2,
+		MinSizedEchoSamplesPerCell:         2,
+		RequiredSizedEchoPayloads:          []uint32{1024, MaxSizedEchoPayloadBytes},
 		Coordinators:                       []string{testCoordinatorID()},
 		RequiredScenarios: []Scenario{
 			scenario(CarrierConsumerISP, ClassDesktop),
@@ -327,7 +330,15 @@ func withHealthyDirectPhases(trial Trial) Trial {
 		trial.ReconnectAttempted, trial.ReconnectSucceeded = true, true
 		trial.ReconnectMillis = 40
 	}
+	setHealthySizedEchoes(&trial)
 	return resign(trial)
+}
+
+func setHealthySizedEchoes(trial *Trial) {
+	trial.SizedEchoes = []SizedEchoMeasurement{
+		{PayloadBytes: 1024, Succeeded: true, RoundTripMillis: 12},
+		{PayloadBytes: MaxSizedEchoPayloadBytes, Succeeded: true, RoundTripMillis: 18},
+	}
 }
 
 // withHealthyTunnelPhases marks one ADNL proxy-fallback half as having held
@@ -382,9 +393,20 @@ func TestPolicyRejectsSmokeTests(t *testing.T) {
 			p.MinTunnelSurvivalRate = 1.5
 		},
 		"zero reconnect rate":         func(p *Policy) { p.MinReconnectSuccessRate = 0 },
+		"zero sized echo rate":        func(p *Policy) { p.MinSizedEchoSuccessRate = 0 },
 		"no survival sample minimum":  func(p *Policy) { p.MinSurvivalSamplesPerCell = 0 },
 		"no reconnect sample minimum": func(p *Policy) { p.MinReconnectSamplesPerMobilityCell = 0 },
-		"no scenarios":                func(p *Policy) { p.RequiredScenarios = nil },
+		"no sized echo sample minimum": func(p *Policy) {
+			p.MinSizedEchoSamplesPerCell = 0
+		},
+		"no sized echo payloads": func(p *Policy) { p.RequiredSizedEchoPayloads = nil },
+		"no maximum echo payload": func(p *Policy) {
+			p.RequiredSizedEchoPayloads = []uint32{1024}
+		},
+		"duplicate echo payload": func(p *Policy) {
+			p.RequiredSizedEchoPayloads = []uint32{MaxSizedEchoPayloadBytes, MaxSizedEchoPayloadBytes}
+		},
+		"no scenarios": func(p *Policy) { p.RequiredScenarios = nil },
 		"public pairs only": func(p *Policy) {
 			p.RequiredScenarios = []Scenario{publicScenario()}
 		},
@@ -433,6 +455,8 @@ func TestPolicyDigestIsOrderIndependentAndThresholdSensitive(t *testing.T) {
 	}
 	reordered := testPolicy()
 	reordered.RequiredScenarios[0], reordered.RequiredScenarios[2] = reordered.RequiredScenarios[2], reordered.RequiredScenarios[0]
+	reordered.RequiredSizedEchoPayloads[0], reordered.RequiredSizedEchoPayloads[1] =
+		reordered.RequiredSizedEchoPayloads[1], reordered.RequiredSizedEchoPayloads[0]
 	reorderedDigest, err := reordered.Digest()
 	if err != nil {
 		t.Fatalf("digest: %v", err)
@@ -456,9 +480,14 @@ func TestPolicyDigestIsOrderIndependentAndThresholdSensitive(t *testing.T) {
 		"direct survival rate":    func(p *Policy) { p.MinDirectSurvivalRate = 0.8 },
 		"tunnel survival rate":    func(p *Policy) { p.MinTunnelSurvivalRate = 0.8 },
 		"reconnect success rate":  func(p *Policy) { p.MinReconnectSuccessRate = 0.8 },
+		"sized echo success rate": func(p *Policy) { p.MinSizedEchoSuccessRate = 0.8 },
 		"survival sample minimum": func(p *Policy) { p.MinSurvivalSamplesPerCell = 3 },
 		"reconnect sample minimum": func(p *Policy) {
 			p.MinReconnectSamplesPerMobilityCell = 3
+		},
+		"sized echo sample minimum": func(p *Policy) { p.MinSizedEchoSamplesPerCell = 3 },
+		"sized echo payloads": func(p *Policy) {
+			p.RequiredSizedEchoPayloads = append(p.RequiredSizedEchoPayloads, 4096)
 		},
 		"scenarios": func(p *Policy) {
 			p.RequiredScenarios = append(p.RequiredScenarios, scenario(CarrierMobile, ClassEdgeRISC))
@@ -788,6 +817,160 @@ func TestPhaseStatusCrossRulesFailClosed(t *testing.T) {
 	if err := udp.Validate(); err == nil {
 		t.Fatal("a udp trial claimed a session phase")
 	}
+}
+
+func TestSizedEchoEvidenceIsSignedAndFailClosed(t *testing.T) {
+	base := switchProbe(directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100), ProbeADNL)
+	setHealthySizedEchoes(&base)
+	base = resign(base)
+	if err := VerifyTrial(testPolicy(), base); err != nil {
+		t.Fatalf("honest sized echo trial did not verify: %v", err)
+	}
+	encoded, err := EncodeTrialJSON(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeTrialJSON(encoded)
+	if err != nil || len(decoded.SizedEchoes) != 2 || decoded.SizedEchoes[1].PayloadBytes != MaxSizedEchoPayloadBytes {
+		t.Fatalf("sized echo round trip failed: echoes=%+v err=%v", decoded.SizedEchoes, err)
+	}
+
+	tampered := base
+	tampered.SizedEchoes = append([]SizedEchoMeasurement(nil), base.SizedEchoes...)
+	tampered.SizedEchoes[1].RoundTripMillis++
+	if err := VerifyTrial(testPolicy(), tampered); err == nil {
+		t.Fatal("a sized echo latency changed after endpoint signing")
+	}
+
+	cases := map[string]func(*Trial){
+		"success without latency": func(trial *Trial) {
+			trial.SizedEchoes = []SizedEchoMeasurement{{PayloadBytes: 1024, Succeeded: true}}
+		},
+		"failure with latency": func(trial *Trial) {
+			trial.SizedEchoes = []SizedEchoMeasurement{{PayloadBytes: 1024, RoundTripMillis: 1}}
+		},
+		"duplicate payload": func(trial *Trial) {
+			trial.SizedEchoes = []SizedEchoMeasurement{{PayloadBytes: 1024}, {PayloadBytes: 1024}}
+		},
+		"unordered payloads": func(trial *Trial) {
+			trial.SizedEchoes = []SizedEchoMeasurement{{PayloadBytes: 2048}, {PayloadBytes: 1024}}
+		},
+		"oversized payload": func(trial *Trial) {
+			trial.SizedEchoes = []SizedEchoMeasurement{{PayloadBytes: MaxSizedEchoPayloadBytes + 1}}
+		},
+		"udp echo": func(trial *Trial) {
+			*trial = directTrial(scenario(CarrierConsumerISP, ClassDesktop), opA, 100)
+			trial.SizedEchoes = []SizedEchoMeasurement{{PayloadBytes: 1024}}
+		},
+		"fallback echo": func(trial *Trial) {
+			*trial = switchProbe(fallbackTrial(scenario(CarrierConsumerISP, ClassDesktop), opA,
+				OutcomeProxyFallback, FailureHandshake), ProbeADNL)
+			trial.SizedEchoes = []SizedEchoMeasurement{{PayloadBytes: 1024}}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			trial := base
+			mutate(&trial)
+			if err := trial.Validate(); err == nil {
+				t.Fatalf("invalid sized echo shape %q was accepted", name)
+			}
+		})
+	}
+}
+
+func TestSizedEchoPairRequiresBothDirections(t *testing.T) {
+	paired := pairSizedEchoes(
+		[]SizedEchoMeasurement{
+			{PayloadBytes: 1024, Succeeded: true, RoundTripMillis: 4},
+			{PayloadBytes: 4096},
+			{PayloadBytes: MaxSizedEchoPayloadBytes, Succeeded: true, RoundTripMillis: 9},
+		},
+		[]SizedEchoMeasurement{
+			{PayloadBytes: 2048, Succeeded: true, RoundTripMillis: 3},
+			{PayloadBytes: 4096, Succeeded: true, RoundTripMillis: 8},
+			{PayloadBytes: MaxSizedEchoPayloadBytes, Succeeded: true, RoundTripMillis: 12},
+		})
+	if len(paired) != 2 {
+		t.Fatalf("one-sided payloads became paired evidence: %+v", paired)
+	}
+	if paired[0].payloadBytes != 4096 || paired[0].succeeded || paired[0].roundTripMillis != 0 {
+		t.Fatalf("a directional failure became successful evidence: %+v", paired[0])
+	}
+	if paired[1].payloadBytes != MaxSizedEchoPayloadBytes || !paired[1].succeeded ||
+		paired[1].roundTripMillis != 12 {
+		t.Fatalf("a paired success did not retain the slower direction: %+v", paired[1])
+	}
+}
+
+func TestSizedEchoGateNeedsPairedDirectionsAndPredeclaredRate(t *testing.T) {
+	build := func() []Trial {
+		var trials []Trial
+		for _, required := range testPolicy().RequiredScenarios {
+			trials = append(trials, adnlStudy(fillCell(nil, required, 4, OutcomeFailed, FailureHandshake, 0))...)
+		}
+		return trials
+	}
+
+	t.Run("one sided measurements are under-sampled", func(t *testing.T) {
+		policy := testPolicy()
+		policy.MinSizedEchoSamplesPerCell = 4
+		target := policy.RequiredScenarios[0]
+		trials := build()
+		for index := range trials {
+			trial := trials[index]
+			if trial.Local.Key() == target.Responder.Key() && trial.Role == RoleB {
+				trial.SizedEchoes = trial.SizedEchoes[:1]
+				trials[index] = resign(trial)
+				break
+			}
+		}
+		report, err := Aggregate(policy, trials, ProbeADNL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Finding != FindingInsufficient || !reasonNaming(report.Reasons,
+			"sized echo gate is under-sampled for payload 8176: "+target.Key()) {
+			t.Fatalf("one-sided echo evidence produced %q: %v", report.Finding, report.Reasons)
+		}
+		foundTarget := false
+		for _, cell := range report.Cells {
+			if cell.ScenarioKey != target.Key() {
+				continue
+			}
+			foundTarget = true
+			if len(cell.SizedEchoes) != 2 || cell.SizedEchoes[0].AttemptedSamples != 4 ||
+				cell.SizedEchoes[1].AttemptedSamples != 3 {
+				t.Fatalf("the report did not expose exact paired echo attempts: %+v", cell.SizedEchoes)
+			}
+		}
+		if !foundTarget {
+			t.Fatal("the target cell disappeared from the report")
+		}
+	})
+
+	t.Run("bidirectional failures block direct", func(t *testing.T) {
+		policy := testPolicy()
+		target := policy.RequiredScenarios[0]
+		trials := build()
+		for index := range trials {
+			trial := trials[index]
+			if trial.Local.Key() != target.Initiator.Key() || trial.Role != RoleA {
+				continue
+			}
+			trial.SizedEchoes[1].Succeeded = false
+			trial.SizedEchoes[1].RoundTripMillis = 0
+			trials[index] = resign(trial)
+		}
+		report, err := Aggregate(policy, trials, ProbeADNL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Finding != FindingHybrid || !reasonNaming(report.Reasons,
+			"sized echoes did not succeed at the predeclared rate for payload 8176: "+target.Key()) {
+			t.Fatalf("failed payload transport produced %q: %v", report.Finding, report.Reasons)
+		}
+	})
 }
 
 func TestTrialLogRefusesDuplicatesAndGarbage(t *testing.T) {
@@ -1363,6 +1546,7 @@ func TestPhaseBooleansJoinAcrossHalves(t *testing.T) {
 		pair := directPair(target, operator, 100)
 		for index := range pair {
 			pair[index] = switchProbe(pair[index], ProbeADNL)
+			setHealthySizedEchoes(&pair[index])
 		}
 		shapeA(&pair[0])
 		pair[0] = resign(pair[0])
@@ -1455,6 +1639,7 @@ func TestDyingSessionsBlockDirectFirst(t *testing.T) {
 			trial.ReconnectAttempted, trial.ReconnectSucceeded = true, true
 			trial.ReconnectMillis = 40
 		}
+		setHealthySizedEchoes(&trial)
 		trials[index] = resign(trial)
 	}
 	report, err := Aggregate(policy, trials, ProbeADNL)
@@ -1501,6 +1686,7 @@ func TestFailedReconnectsBlockDirectFirst(t *testing.T) {
 				trial.ReconnectMillis = 40
 			}
 		}
+		setHealthySizedEchoes(&trial)
 		trials[index] = resign(trial)
 	}
 	report, err := Aggregate(policy, trials, ProbeADNL)
@@ -1607,6 +1793,7 @@ func TestUnderSampledReconnectGateRefusesAFinding(t *testing.T) {
 			trial.ReconnectAttempted, trial.ReconnectSucceeded = true, true
 			trial.ReconnectMillis = 40
 		}
+		setHealthySizedEchoes(&trial)
 		trials[index] = resign(trial)
 	}
 	report, err := Aggregate(policy, trials, ProbeADNL)
