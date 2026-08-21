@@ -124,13 +124,13 @@ func TestADNLTrialEndToEnd(t *testing.T) {
 	go func() {
 		trial, _, err := measure(ctx, coordinatorAddress, session, "a", "127.0.0.1:0",
 			strings.Repeat("a", 40), identityFile(t), reachability.ProbeADNL,
-			8*time.Second, 10*time.Second, sessionPhases{}, labels)
+			8*time.Second, 10*time.Second, sessionPhases{echoSizes: []int{1024}}, labels)
 		results <- outcome{trial: trial, err: err}
 	}()
 	go func() {
 		trial, _, err := measure(ctx, coordinatorAddress, session, "b", "127.0.0.1:0",
 			strings.Repeat("b", 40), identityFile(t), reachability.ProbeADNL,
-			8*time.Second, 10*time.Second, sessionPhases{}, peerLabels)
+			8*time.Second, 10*time.Second, sessionPhases{echoSizes: []int{1024}}, peerLabels)
 		results <- outcome{trial: trial, err: err}
 	}()
 	policy := testPolicyWith(coordinatorID)
@@ -166,6 +166,10 @@ func TestADNLTrialEndToEnd(t *testing.T) {
 		if received.trial.LocalManifestDigest == "" || received.trial.PeerManifestDigest == "" {
 			t.Fatalf("the trial did not carry both collector manifests: local=%q peer=%q",
 				received.trial.LocalManifestDigest, received.trial.PeerManifestDigest)
+		}
+		if len(received.trial.SizedEchoes) != 1 || received.trial.SizedEchoes[0].PayloadBytes != 1024 ||
+			!received.trial.SizedEchoes[0].Succeeded || received.trial.SizedEchoes[0].RoundTripMillis == 0 {
+			t.Fatalf("the signed trial lost its sized echo: %+v", received.trial.SizedEchoes)
 		}
 		trials[received.trial.Role] = received.trial
 	}
@@ -240,6 +244,15 @@ func TestADNLSidecarTrialEndToEnd(t *testing.T) {
 		}
 		trials[received.trial.Role] = received.trial
 		manifests[received.trial.Role] = received.artifacts.manifest
+	}
+	if len(trials[reachability.RoleA].SizedEchoes) != 1 ||
+		trials[reachability.RoleA].SizedEchoes[0].PayloadBytes != 1024 ||
+		!trials[reachability.RoleA].SizedEchoes[0].Succeeded {
+		t.Fatalf("the native sidecar echo was not signed into role A's trial: %+v",
+			trials[reachability.RoleA].SizedEchoes)
+	}
+	if len(trials[reachability.RoleB].SizedEchoes) != 0 {
+		t.Fatalf("role B claimed an echo it did not configure: %+v", trials[reachability.RoleB].SizedEchoes)
 	}
 	sidecarManifest := manifests[reachability.RoleA]
 	if sidecarManifest.ADNLImplementation != "tos-native-adnl" {
@@ -352,6 +365,31 @@ func TestClassifyOutcomes(t *testing.T) {
 		Established: true, TunneledEstablish: true, Failure: reachability.FailureNone,
 	}); err == nil {
 		t.Fatal("a tunneled result without a direct failure class was accepted")
+	}
+}
+
+func TestSignedEchoMeasurementsCanonicalizeAndRefuseSubstitution(t *testing.T) {
+	echoes, err := signedEchoMeasurements([]probe.EchoResult{
+		{Bytes: probe.MaxEchoBytes, OK: true, Millis: 9},
+		{Bytes: 1024, OK: true, Millis: 4},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(echoes) != 2 || echoes[0].PayloadBytes != 1024 || echoes[1].PayloadBytes != uint32(probe.MaxEchoBytes) {
+		t.Fatalf("echo measurements were not canonicalized: %+v", echoes)
+	}
+	for name, results := range map[string][]probe.EchoResult{
+		"duplicate":               {{Bytes: 1024}, {Bytes: 1024}},
+		"success without latency": {{Bytes: 1024, OK: true}},
+		"failure with latency":    {{Bytes: 1024, Millis: 1}},
+		"oversized":               {{Bytes: probe.MaxEchoBytes + 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := signedEchoMeasurements(results); err == nil {
+				t.Fatalf("invalid echo result %q was accepted", name)
+			}
+		})
 	}
 }
 

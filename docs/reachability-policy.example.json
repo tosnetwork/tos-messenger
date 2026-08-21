@@ -1,5 +1,5 @@
 {
-  "schema": "tos.messaging.reachability-policy.v2",
+  "schema": "tos.messaging.reachability-policy.v3",
   "min_samples_per_cell": 30,
   "min_operators_per_cell": 3,
   "min_sites_per_cell": 3,
@@ -9,8 +9,14 @@
   "min_direct_survival_rate": 0.9,
   "min_tunnel_survival_rate": 0.9,
   "min_reconnect_success_rate": 0.9,
+  "min_sized_echo_success_rate": 0.9,
   "min_survival_samples_per_cell": 10,
   "min_reconnect_samples_per_mobility_cell": 10,
+  "min_sized_echo_samples_per_cell": 10,
+  "required_sized_echo_payloads": [
+    1024,
+    8176
+  ],
   "coordinators": [
     "srv_0a21b88b9a269533"
   ],

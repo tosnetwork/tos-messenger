@@ -16,8 +16,11 @@ Three properties are enforced by the code rather than by convention.
 every report names the policy digest it was judged against. Thresholds invented
 after seeing the data produce a different digest, which is visible in the
 report. The session gates are predeclared the same way: the policy names the
-minimum direct- and tunnel-survival rates, the reconnect success rate, and the
-attempted-sample floors behind them, all folded into the digest.
+minimum direct- and tunnel-survival rates, reconnect and paired sized-echo
+success rates, their attempted-sample floors, and the exact bounded echo
+payload sizes, all folded into the digest. At least the native 8176-byte
+maximum must be exercised, so a tiny-packet result cannot qualify a direct
+route.
 
 **A weak study yields no finding.** If any required stratum was never measured,
 or was measured with too few samples, too few distinct operator identifiers, or from
@@ -46,7 +49,9 @@ sample only when the halves agree on the cell, the probe, the outcome, and
 which commit each side was running, and only when they come from two different
 keys in the two different roles. Latency takes the slower half and session
 survival the shorter one, because a session exists only while both ends have
-it. A half whose peer never reported, and a pair whose halves contradict each other
+it. A sized echo exists as bidirectional evidence only when both halves report
+the same payload: its success is the conjunction and its latency the slower
+half; an unpaired size is missing evidence, not a success. A half whose peer never reported, and a pair whose halves contradict each other
 about the probe, the outcome or the commits, are dropped and counted in
 `incomplete_pairs`. Describing different situations is not a contradiction: it
 is the measurement. Improving a result
@@ -158,6 +163,13 @@ same amplification rules as the coordinator) is configured and the direct
 phase fails, the collector establishes the same session through the relay and
 the trial files as a proxy fallback carrying the direct phase's failure class
 -- which is what gives the `tunnel-first` route decision evidence to read.
+After a confirmed direct session's hold/reconnect phases, the collector also
+runs the policy's bounded sized ADNL echo queries. Each endpoint signs the
+payload size, outcome, and measured latency into its v3 trial. The report reads
+only paired directions and requires every predeclared size to meet both its
+sample floor and operator-balanced success threshold before `direct-first` can
+qualify. A failed maximum-size echo can therefore veto a path that only carries
+small control traffic.
 With a hold window configured the hold phase also runs over the tunneled
 session, reported through its own status booleans; the survival span stays a
 direct-session measurement, because a relayed lifetime would measure the
@@ -290,15 +302,17 @@ session establishment, keepalive survival, and reconnect, and only its
 evidence produces `direct-first`, `tunnel-first`, `hybrid-by-network-class`,
 or `relay-required`. The session phases are decisive, not merely surfaced:
 `direct-first` additionally requires every required cell to clear the
-predeclared direct-survival gate (and every cell exercising a mobility event
-the reconnect gate), `tunnel-first` requires the tunnel-survival gate, and a
+predeclared direct-survival and per-payload sized-echo gates (and every cell
+exercising a mobility event the reconnect gate), `tunnel-first` requires the tunnel-survival gate, and a
 cell that cannot show the predeclared minimum of attempted pair samples for a
 gate its finding depends on makes the finding `insufficient-evidence`, with the
 missing gate named. A study where every session establishes and then dies, or
 where no reconnect ever succeeds, therefore cannot freeze direct-first.
-Reliable transfer is not yet measured -- every phase is
-ping-based -- and is planned as a bounded ADNL echo-query cross-check first,
-with RLDP acceptance belonging to the transport milestone.
+The bounded ADNL query path is now measured through the protocol maximum, so
+direct qualification is no longer based on ping traffic alone. It remains a
+session-payload check, not an RLDP claim: segmented reliable transfer,
+interruption/resume, and large-envelope acceptance belong to the selected
+transport milestone.
 
 Trials are aggregated per probe and never mixed, and the report names both the
 probe and the kind of question it answered. `Report.SupportsRouteDecision`

@@ -57,6 +57,10 @@ type pairResult struct {
 	reconnectSucceeded  bool
 	tunnelHoldAttempted bool
 	tunnelHoldCompleted bool
+	// sizedEchoes contains only payload sizes both endpoints attempted. Success
+	// is the AND of the two signed directional verdicts and latency is the
+	// slower direction, so a one-sided echo never becomes bidirectional proof.
+	sizedEchoes []pairedSizedEcho
 	// initiatorFiltering and responderFiltering are the filtering classes
 	// derived from each half's coordinator-signed cold-source receipts.
 	// Filtering is a property of each end, not of the pair, so each side gets
@@ -65,6 +69,12 @@ type pairResult struct {
 	// documented meaning: silence is not evidence.
 	initiatorFiltering FilteringBehavior
 	responderFiltering FilteringBehavior
+}
+
+type pairedSizedEcho struct {
+	payloadBytes    uint32
+	succeeded       bool
+	roundTripMillis uint64
 }
 
 // combine folds the two halves of a measurement into one sample.
@@ -164,7 +174,31 @@ func combine(halves []Trial) (pairResult, error) {
 	result.reconnectSucceeded = a.ReconnectSucceeded || b.ReconnectSucceeded
 	result.tunnelHoldAttempted = a.TunnelHoldAttempted && b.TunnelHoldAttempted
 	result.tunnelHoldCompleted = a.TunnelHoldCompleted && b.TunnelHoldCompleted
+	result.sizedEchoes = pairSizedEchoes(a.SizedEchoes, b.SizedEchoes)
 	return result, nil
+}
+
+func pairSizedEchoes(a, b []SizedEchoMeasurement) []pairedSizedEcho {
+	paired := make([]pairedSizedEcho, 0, minOfInt(len(a), len(b)))
+	for left, right := 0, 0; left < len(a) && right < len(b); {
+		switch {
+		case a[left].PayloadBytes < b[right].PayloadBytes:
+			left++
+		case b[right].PayloadBytes < a[left].PayloadBytes:
+			right++
+		default:
+			succeeded := a[left].Succeeded && b[right].Succeeded
+			millis := uint64(0)
+			if succeeded {
+				millis = maxOf(a[left].RoundTripMillis, b[right].RoundTripMillis)
+			}
+			paired = append(paired, pairedSizedEcho{payloadBytes: a[left].PayloadBytes,
+				succeeded: succeeded, roundTripMillis: millis})
+			left++
+			right++
+		}
+	}
+	return paired
 }
 
 // peerReachabilityConsistent reports whether a coordinator's signed peer bit
@@ -214,6 +248,13 @@ func maxOf(a, b uint64) uint64 {
 }
 
 func minOf(a, b uint64) uint64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func minOfInt(a, b int) int {
 	if a < b {
 		return a
 	}

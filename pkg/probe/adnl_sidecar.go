@@ -311,8 +311,8 @@ func (r *runner) establishSidecar(ctx context.Context, sidecar *Sidecar,
 		}
 	}
 
-	// The echo cross-check runs last, after every phase the signed trial
-	// carries, so an echo that ends the peer's process -- the native stack's
+	// The sized-echo phase runs last. Its results enter the signed trial, but an
+	// echo that ends the peer's process -- the native stack's
 	// query-size limits make that a real possibility -- cannot destroy the
 	// measured phases that preceded it. The sidecar's echo command is a
 	// single query, and one datagram lost to UDP or to the peer's concurrent

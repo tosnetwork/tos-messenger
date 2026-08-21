@@ -24,6 +24,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -76,7 +77,7 @@ func main() {
 	flag.BoolVar(&phases.reconnect, "reconnect", false, "deliberately drop and re-establish the session after the hold phase (requires -hold; role a only, refused on role b, which never dials)")
 	flag.StringVar(&phases.tunnel, "tunnel", "", "tunnel relay address for the fallback phase after a failed direct attempt, empty for none")
 	flag.StringVar(&phases.adnlProbe, "adnl-probe", "", "path to a tos-adnl-probe binary; the adnl probe then speaks through the native sidecar instead of the in-process gateway")
-	echoSizes := flag.String("echo-sizes", "", "comma-separated payload sizes (1..8176) to echo over the established adnl session; cross-check evidence, reported on stderr and never in the trial")
+	echoSizes := flag.String("echo-sizes", "", "comma-separated distinct payload sizes (1..8176) to echo over the established adnl session; results enter the signed trial")
 
 	var labels declared
 	flag.StringVar(&labels.operator, "operator", "", "operator name, hashed into an opaque identifier")
@@ -123,10 +124,8 @@ func main() {
 		phaseStatus(trial.ReconnectAttempted, trial.ReconnectSucceeded),
 		phaseStatus(trial.TunnelHoldAttempted, trial.TunnelHoldCompleted),
 		trial.LocalManifestDigest)
-	// The echo cross-check is harness evidence, deliberately outside the
-	// signed trial, so the stderr summary is where it reports.
-	if len(artifacts.echoes) > 0 {
-		fmt.Fprintf(os.Stderr, "echo=%s\n", formatEchoes(artifacts.echoes))
+	if len(trial.SizedEchoes) > 0 {
+		fmt.Fprintf(os.Stderr, "echo=%s\n", formatEchoes(trial.SizedEchoes))
 	}
 }
 
@@ -150,14 +149,14 @@ func parseEchoSizes(value string) ([]int, error) {
 
 // formatEchoes renders each echo as size:verdict, with the round-trip time on
 // the verified ones.
-func formatEchoes(echoes []probe.EchoResult) string {
+func formatEchoes(echoes []reachability.SizedEchoMeasurement) string {
 	rendered := make([]string, 0, len(echoes))
 	for _, echoed := range echoes {
-		if echoed.OK {
-			rendered = append(rendered, fmt.Sprintf("%d:ok:%dms", echoed.Bytes, echoed.Millis))
+		if echoed.Succeeded {
+			rendered = append(rendered, fmt.Sprintf("%d:ok:%dms", echoed.PayloadBytes, echoed.RoundTripMillis))
 			continue
 		}
-		rendered = append(rendered, fmt.Sprintf("%d:failed", echoed.Bytes))
+		rendered = append(rendered, fmt.Sprintf("%d:failed", echoed.PayloadBytes))
 	}
 	return strings.Join(rendered, ",")
 }
@@ -198,9 +197,8 @@ type sessionPhases struct {
 	keepalive time.Duration
 	reconnect bool
 	tunnel    string
-	// echoSizes are the sized cross-check round trips run after an
-	// established session; their results report beside the trial, never in
-	// it.
+	// echoSizes are the sized round trips run after an established session;
+	// their results are canonicalized into the endpoint-signed trial.
 	echoSizes []int
 	// adnlProbe names a native sidecar binary; when set, the adnl probe's
 	// wire is spoken by that process instead of the in-process gateway, and
@@ -208,12 +206,9 @@ type sessionPhases struct {
 	adnlProbe string
 }
 
-// measured is everything one run produces around the trial itself: the
-// manifest the trial's local digest names, and the echo cross-check outcomes,
-// which are deliberately not part of the signed trial.
+// measured is the manifest document the trial's local digest names.
 type measured struct {
 	manifest reachability.CollectorManifest
-	echoes   []probe.EchoResult
 }
 
 func measure(ctx context.Context, coordinators, session, role, listen, commit, identity string,
@@ -312,7 +307,10 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 	if err != nil {
 		return reachability.Trial{}, artifacts, err
 	}
-	artifacts.echoes = result.EchoResults
+	trialEchoes, err := signedEchoMeasurements(result.EchoResults)
+	if err != nil {
+		return reachability.Trial{}, artifacts, err
+	}
 	if result.PeerCommit == "" {
 		return reachability.Trial{}, artifacts, errors.New("the peer's commit was never learned, so the trial cannot name what it measured")
 	}
@@ -365,6 +363,7 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		TxBytes:               result.TxBytes,
 		RxBytes:               result.RxBytes,
 		EstablishMillis:       result.EstablishMillis,
+		SizedEchoes:           trialEchoes,
 	}
 	if err := classify(&trial, result); err != nil {
 		return reachability.Trial{}, artifacts, err
@@ -377,6 +376,27 @@ func measure(ctx context.Context, coordinators, session, role, listen, commit, i
 		return reachability.Trial{}, artifacts, err
 	}
 	return signed, artifacts, nil
+}
+
+func signedEchoMeasurements(results []probe.EchoResult) ([]reachability.SizedEchoMeasurement, error) {
+	if len(results) > reachability.MaxSizedEchoMeasurements {
+		return nil, errors.New("probe returned too many sized echoes")
+	}
+	echoes := make([]reachability.SizedEchoMeasurement, len(results))
+	for index, result := range results {
+		if result.Bytes < 1 || result.Bytes > probe.MaxEchoBytes || result.OK != (result.Millis != 0) {
+			return nil, errors.New("probe returned an invalid sized echo")
+		}
+		echoes[index] = reachability.SizedEchoMeasurement{PayloadBytes: uint32(result.Bytes),
+			Succeeded: result.OK, RoundTripMillis: result.Millis}
+	}
+	sort.Slice(echoes, func(i, j int) bool { return echoes[i].PayloadBytes < echoes[j].PayloadBytes })
+	for index := 1; index < len(echoes); index++ {
+		if echoes[index-1].PayloadBytes == echoes[index].PayloadBytes {
+			return nil, errors.New("probe returned duplicate sized echoes")
+		}
+	}
+	return echoes, nil
 }
 
 // collectorManifest describes this build: which orchestrator at which commit,

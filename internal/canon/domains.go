@@ -76,26 +76,29 @@ const (
 	DomainDeviceSession = "tos.messaging.device-session.v1\x00"
 	// DomainE2EEBinding namespaces the associated data of a ciphertext.
 	DomainE2EEBinding = "tos.messaging.e2ee-binding.v1\x00"
-	// DomainReachabilityTrial namespaces one measured trial record. v2 folds in
+	// DomainReachabilityTrial namespaces one measured trial record. v3 folds in
+	// the bounded sized-echo results, so payload-transport evidence cannot be
+	// added, removed, reordered, or have its verdict/latency changed after the
+	// endpoint signs. It retains v2's collector-manifest and phase-status
+	// bindings.
 	// the collector-manifest digests of both endpoints, so a trial commits to
 	// exactly which collector builds produced each half rather than only to two
 	// repository commits -- a sidecar collector is a different implementation
 	// at the same orchestrator commit, and the commit alone cannot tell them
 	// apart -- and the phase-status booleans, so a failed hold or reconnect
 	// cannot be rewritten into an unattempted one after signing.
-	DomainReachabilityTrial = "tos.messaging.reachability-trial.v2\x00"
+	DomainReachabilityTrial = "tos.messaging.reachability-trial.v3\x00"
 	// DomainReachabilityCollectorManifest namespaces the content-addressed
 	// description of one collector build: orchestrator, ADNL implementation,
 	// dependency version, binary hash, target, toolchain, and wire profile. The
 	// digest over it is what a trial commits and what the two halves of a pair
 	// cross-check about each other.
 	DomainReachabilityCollectorManifest = "tos.messaging.reachability-collector-manifest.v1\x00"
-	// DomainReachabilityPolicy namespaces a predeclared acceptance policy. v2
-	// folds in the session gates a route decision now reads -- the direct and
-	// tunnel survival rates, the reconnect success rate, and the attempted-sample
-	// minimums behind them -- so a policy that never predeclared them cannot be
-	// passed off as one that did.
-	DomainReachabilityPolicy = "tos.messaging.reachability-policy.v2\x00"
+	// DomainReachabilityPolicy namespaces a predeclared acceptance policy. v3
+	// folds in the required sized-echo payloads, success rate, and paired sample
+	// floor in addition to v2's session gates, so those values cannot be chosen
+	// after observing the study.
+	DomainReachabilityPolicy = "tos.messaging.reachability-policy.v3\x00"
 	// DomainReachabilityOperator namespaces the opaque operator derivation.
 	DomainReachabilityOperator = "tos.messaging.reachability-operator.v1\x00"
 	// DomainReachabilitySite namespaces the opaque site derivation.

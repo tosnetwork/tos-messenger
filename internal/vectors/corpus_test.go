@@ -327,6 +327,9 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 	addVerify("reachability-trial/tampered-endpoint-signature", "reachability-trial",
 		trialTamperedSignatureJSON(t),
 		"a trial whose endpoint signature does not verify is rewritable after the fact and is not the measurement it claims")
+	addVerify("reachability-trial/tampered-sized-echo", "reachability-trial",
+		trialTamperedSizedEchoJSON(t),
+		"a sized-echo result is route evidence only when the endpoint signature covers its exact payload, outcome, and latency")
 
 	// A trial may declare its NAT mapping, but the class is derived from the
 	// coordinator-signed bind reflections it carries. Declaring
@@ -382,6 +385,21 @@ func generateCorpus(t *testing.T, verifiers map[string]func([]byte) error) []Cor
 			trial.TunnelHoldAttempted = true
 		}),
 		"a tunnel hold belongs to a proxy fallback; on a direct outcome there was no tunneled session to hold")
+	add("reachability-trial/sized-echo-success-without-latency", "reachability-trial",
+		echoShapeTrialJSON(t, func(trial *reachability.Trial) {
+			trial.SizedEchoes[0].RoundTripMillis = 0
+		}),
+		"a successful sized echo without a measured round trip is an outcome without evidence")
+	add("reachability-trial/duplicate-sized-echo-payload", "reachability-trial",
+		echoShapeTrialJSON(t, func(trial *reachability.Trial) {
+			trial.SizedEchoes[1].PayloadBytes = trial.SizedEchoes[0].PayloadBytes
+		}),
+		"one payload size may contribute at most one attempt per endpoint half")
+	add("reachability-trial/unordered-sized-echo-payloads", "reachability-trial",
+		echoShapeTrialJSON(t, func(trial *reachability.Trial) {
+			trial.SizedEchoes[0], trial.SizedEchoes[1] = trial.SizedEchoes[1], trial.SizedEchoes[0]
+		}),
+		"sized echo measurements have one canonical ascending order so signatures cannot cover alternate representations")
 
 	sort.Slice(corpus, func(i, j int) bool { return corpus[i].Name < corpus[j].Name })
 	return corpus

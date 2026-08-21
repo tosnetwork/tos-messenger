@@ -93,6 +93,10 @@ type Policy struct {
 	// a mobility event. A phone whose session never recovers from a network
 	// change has no direct path worth freezing.
 	MinReconnectSuccessRate float64 `json:"min_reconnect_success_rate"`
+	// MinSizedEchoSuccessRate is the operator-balanced share of paired,
+	// bidirectional sized-echo attempts that must succeed for every required
+	// payload size before a direct session can qualify.
+	MinSizedEchoSuccessRate float64 `json:"min_sized_echo_success_rate"`
 	// MinSurvivalSamplesPerCell is how many hold-attempted pair samples a cell
 	// needs before its survival rate means anything. Below it the rate is
 	// missing evidence, never a pass or a fail.
@@ -101,6 +105,12 @@ type Policy struct {
 	// gate, per cell whose either endpoint declares a non-stationary mobility
 	// event.
 	MinReconnectSamplesPerMobilityCell int `json:"min_reconnect_samples_per_mobility_cell"`
+	// MinSizedEchoSamplesPerCell is the paired-attempt floor per required size.
+	MinSizedEchoSamplesPerCell int `json:"min_sized_echo_samples_per_cell"`
+	// RequiredSizedEchoPayloads predeclares the ADNL query payload sizes the
+	// direct-path decision reads. Order is not policy identity; duplicates and
+	// values outside the native profile are refused.
+	RequiredSizedEchoPayloads []uint32 `json:"required_sized_echo_payloads"`
 	// Coordinators predeclares whose attestations count. Without it a signed
 	// observation proves only that somebody signed something, since anyone can
 	// run a coordinator and attest to whatever an operator wants.
@@ -133,6 +143,16 @@ type wirePolicy struct {
 type FilteringCounts struct {
 	Initiator map[FilteringBehavior]int `json:"initiator"`
 	Responder map[FilteringBehavior]int `json:"responder"`
+}
+
+// SizedEchoReport is one payload size's paired, bidirectional cell evidence.
+// The rate is operator-balanced; nil means no complete pair measured the size.
+type SizedEchoReport struct {
+	PayloadBytes     uint32   `json:"payload_bytes"`
+	AttemptedSamples int      `json:"attempted_samples"`
+	SuccessRate      *float64 `json:"success_rate,omitempty"`
+	RoundTripP50     uint64   `json:"round_trip_p50_millis"`
+	RoundTripP95     uint64   `json:"round_trip_p95_millis"`
 }
 
 // CellReport is the aggregate for one scenario.
@@ -184,6 +204,7 @@ type CellReport struct {
 	HoldAttemptedSamples       int                  `json:"hold_attempted_samples"`
 	TunnelHoldAttemptedSamples int                  `json:"tunnel_hold_attempted_samples"`
 	ReconnectAttemptedSamples  int                  `json:"reconnect_attempted_samples"`
+	SizedEchoes                []SizedEchoReport    `json:"sized_echoes"`
 	FailureCounts              map[FailureClass]int `json:"failure_counts"`
 	// Filtering counts the filtering class derived from each half's
 	// coordinator-signed cold-source receipts. Evidence only: no threshold
@@ -266,14 +287,36 @@ func (p Policy) Validate() error {
 	}
 	if p.MinDirectSurvivalRate <= 0 || p.MinDirectSurvivalRate > 1 ||
 		p.MinTunnelSurvivalRate <= 0 || p.MinTunnelSurvivalRate > 1 ||
-		p.MinReconnectSuccessRate <= 0 || p.MinReconnectSuccessRate > 1 {
-		return errors.New("survival and reconnect rates must fall in (0,1]")
+		p.MinReconnectSuccessRate <= 0 || p.MinReconnectSuccessRate > 1 ||
+		p.MinSizedEchoSuccessRate <= 0 || p.MinSizedEchoSuccessRate > 1 {
+		return errors.New("session and sized-echo rates must fall in (0,1]")
 	}
 	if p.MinSurvivalSamplesPerCell < 1 {
 		return errors.New("a policy must require at least one hold-attempted sample per cell")
 	}
 	if p.MinReconnectSamplesPerMobilityCell < 1 {
 		return errors.New("a policy must require at least one reconnect-attempted sample per mobility cell")
+	}
+	if p.MinSizedEchoSamplesPerCell < 1 {
+		return errors.New("a policy must require at least one paired sized-echo sample per cell")
+	}
+	if len(p.RequiredSizedEchoPayloads) == 0 || len(p.RequiredSizedEchoPayloads) > MaxSizedEchoMeasurements {
+		return errors.New("a policy must predeclare bounded sized-echo payloads")
+	}
+	seenEchoPayloads := make(map[uint32]struct{}, len(p.RequiredSizedEchoPayloads))
+	hasMaximumEcho := false
+	for _, size := range p.RequiredSizedEchoPayloads {
+		if size == 0 || size > MaxSizedEchoPayloadBytes {
+			return errors.New("invalid required sized-echo payload")
+		}
+		if _, duplicate := seenEchoPayloads[size]; duplicate {
+			return errors.New("a policy cannot require the same sized-echo payload twice")
+		}
+		seenEchoPayloads[size] = struct{}{}
+		hasMaximumEcho = hasMaximumEcho || size == MaxSizedEchoPayloadBytes
+	}
+	if !hasMaximumEcho {
+		return errors.New("a route policy must exercise the maximum native ADNL echo payload")
 	}
 	if len(p.RequiredScenarios) == 0 || len(p.RequiredScenarios) > MaxScenariosPerPolicy {
 		return errors.New("a policy must predeclare its required scenarios")
@@ -373,8 +416,16 @@ func (p Policy) CanonicalBytes() ([]byte, error) {
 	canon.Uint64(buffer, ratePoints(p.MinDirectSurvivalRate))
 	canon.Uint64(buffer, ratePoints(p.MinTunnelSurvivalRate))
 	canon.Uint64(buffer, ratePoints(p.MinReconnectSuccessRate))
+	canon.Uint64(buffer, ratePoints(p.MinSizedEchoSuccessRate))
 	canon.Uint64(buffer, uint64(p.MinSurvivalSamplesPerCell))
 	canon.Uint64(buffer, uint64(p.MinReconnectSamplesPerMobilityCell))
+	canon.Uint64(buffer, uint64(p.MinSizedEchoSamplesPerCell))
+	echoPayloads := append([]uint32(nil), p.RequiredSizedEchoPayloads...)
+	sort.Slice(echoPayloads, func(i, j int) bool { return echoPayloads[i] < echoPayloads[j] })
+	canon.Uint32(buffer, uint32(len(echoPayloads)))
+	for _, size := range echoPayloads {
+		canon.Uint32(buffer, size)
+	}
 	coordinators := append([]string(nil), p.Coordinators...)
 	sort.Strings(coordinators)
 	canon.Uint32(buffer, uint32(len(coordinators)))
@@ -591,6 +642,8 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 	}
 
 	var establish, reconnect, survival []uint64
+	echoAttempts := map[uint32]int{}
+	echoLatencies := map[uint32][]uint64{}
 	var proxy, relay, https, failed int
 	for _, pair := range kept {
 		for _, failure := range pair.failures {
@@ -610,6 +663,12 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 		}
 		if pair.reconnectAttempted {
 			cell.ReconnectAttemptedSamples++
+		}
+		for _, echoed := range pair.sizedEchoes {
+			echoAttempts[echoed.payloadBytes]++
+			if echoed.succeeded {
+				echoLatencies[echoed.payloadBytes] = append(echoLatencies[echoed.payloadBytes], echoed.roundTripMillis)
+			}
 		}
 		switch pair.outcome {
 		case OutcomeDirect:
@@ -638,11 +697,13 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 	// survival mean rather than an invented zero or one.
 	var directRates, tunnelRates []float64
 	var survivalRates, tunnelSurvivalRates, reconnectRates []float64
+	echoRates := map[uint32][]float64{}
 	for _, pairs := range byOperator {
 		var direct, withProxy int
 		var holdAttempted, holdCompleted int
 		var tunnelAttempted, tunnelCompleted int
 		var reconnectAttempted, reconnectSucceeded int
+		operatorEchoes := map[uint32][2]int{}
 		for _, pair := range pairs {
 			switch pair.outcome {
 			case OutcomeDirect:
@@ -669,6 +730,14 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 					reconnectSucceeded++
 				}
 			}
+			for _, echoed := range pair.sizedEchoes {
+				counts := operatorEchoes[echoed.payloadBytes]
+				counts[0]++
+				if echoed.succeeded {
+					counts[1]++
+				}
+				operatorEchoes[echoed.payloadBytes] = counts
+			}
 		}
 		total := float64(len(pairs))
 		directRates = append(directRates, float64(direct)/total)
@@ -681,6 +750,9 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 		}
 		if reconnectAttempted > 0 {
 			reconnectRates = append(reconnectRates, float64(reconnectSucceeded)/float64(reconnectAttempted))
+		}
+		for size, counts := range operatorEchoes {
+			echoRates[size] = append(echoRates[size], float64(counts[1])/float64(counts[0]))
 		}
 	}
 
@@ -705,6 +777,23 @@ func summarize(policy Policy, scenario Scenario, key string, group []pairResult)
 	cell.DirectSurvivalRate = measuredMean(survivalRates)
 	cell.TunnelSurvivalRate = measuredMean(tunnelSurvivalRates)
 	cell.ReconnectSuccessRate = measuredMean(reconnectRates)
+	echoSizes := make(map[uint32]struct{}, len(echoAttempts)+len(policy.RequiredSizedEchoPayloads))
+	for size := range echoAttempts {
+		echoSizes[size] = struct{}{}
+	}
+	for _, size := range policy.RequiredSizedEchoPayloads {
+		echoSizes[size] = struct{}{}
+	}
+	orderedEchoSizes := make([]uint32, 0, len(echoSizes))
+	for size := range echoSizes {
+		orderedEchoSizes = append(orderedEchoSizes, size)
+	}
+	sort.Slice(orderedEchoSizes, func(i, j int) bool { return orderedEchoSizes[i] < orderedEchoSizes[j] })
+	for _, size := range orderedEchoSizes {
+		cell.SizedEchoes = append(cell.SizedEchoes, SizedEchoReport{PayloadBytes: size,
+			AttemptedSamples: echoAttempts[size], SuccessRate: measuredMean(echoRates[size]),
+			RoundTripP50: percentile(echoLatencies[size], 50), RoundTripP95: percentile(echoLatencies[size], 95)})
+	}
 	cell.Qualifying = cell.Samples >= policy.MinSamplesPerCell &&
 		cell.Operators >= policy.MinOperatorsPerCell &&
 		cell.Sites >= policy.MinSitesPerCell
@@ -829,6 +918,23 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 			reasons = append(reasons, "reconnect gate is under-sampled in a mobility cell: "+cell.ScenarioKey)
 			continue
 		}
+		echoBySize := make(map[uint32]SizedEchoReport, len(cell.SizedEchoes))
+		for _, echoed := range cell.SizedEchoes {
+			echoBySize[echoed.PayloadBytes] = echoed
+		}
+		echoMissing := false
+		for _, size := range policy.RequiredSizedEchoPayloads {
+			echoed, found := echoBySize[size]
+			if !found || echoed.AttemptedSamples < policy.MinSizedEchoSamplesPerCell || echoed.SuccessRate == nil {
+				underSampled = append(underSampled, cell.ScenarioKey)
+				reasons = append(reasons, "sized echo gate is under-sampled for payload "+itoa(int(size))+": "+cell.ScenarioKey)
+				echoMissing = true
+				break
+			}
+		}
+		if echoMissing {
+			continue
+		}
 		qualifies := true
 		if *cell.DirectSurvivalRate < policy.MinDirectSurvivalRate {
 			qualifies = false
@@ -837,6 +943,13 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 		if mobility && *cell.ReconnectSuccessRate < policy.MinReconnectSuccessRate {
 			qualifies = false
 			reasons = append(reasons, "reconnects did not succeed at the predeclared rate in a mobility cell: "+cell.ScenarioKey)
+		}
+		for _, size := range policy.RequiredSizedEchoPayloads {
+			echoed := echoBySize[size]
+			if *echoed.SuccessRate < policy.MinSizedEchoSuccessRate {
+				qualifies = false
+				reasons = append(reasons, "sized echoes did not succeed at the predeclared rate for payload "+itoa(int(size))+": "+cell.ScenarioKey)
+			}
 		}
 		if qualifies {
 			directQualified++
@@ -849,7 +962,7 @@ func decide(policy Policy, cells []CellReport, probe ProbeKind) (Finding, []stri
 
 	switch {
 	case directQualified == evaluated:
-		reasons = append(reasons, "every required stratum reached the direct establishment, survival, and reconnect gates")
+		reasons = append(reasons, "every required stratum reached the direct establishment, survival, reconnect, and sized-echo gates")
 		return FindingDirectFirst, nil, reasons
 	case directQualified > 0:
 		reasons = append(reasons, "direct sessions qualify in some required strata and not others")

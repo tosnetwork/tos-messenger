@@ -446,9 +446,9 @@ func (r *runner) establishADNL(ctx context.Context, transportKey ed25519.Private
 		}
 	}
 
-	// The echo cross-check runs last, after every phase the signed trial
-	// carries: it is harness evidence about payload transport across
-	// implementations, not part of the trial, and the native stack's own
+	// The sized-echo phase runs last. Its results enter the signed trial, but
+	// running it after hold/reconnect prevents a large query that ends a peer
+	// from erasing those earlier measurements. The native stack's own
 	// query-size limits make a large echo the likeliest phase to end a peer's
 	// process -- an accident that must not be able to destroy the measured
 	// phases that preceded it. It never runs over a tunneled session, whose
@@ -494,12 +494,9 @@ func echoBudget(config Config) time.Duration {
 	return time.Duration(len(config.EchoSizes)) * config.PunchTimeout
 }
 
-// runEchoPhase runs one echo round trip per configured size over the
-// confirmed direct session and records what each one did. The results are
-// cross-check harness evidence -- whether sized payloads actually transport
-// between the two implementations on this path -- and deliberately never part
-// of the signed trial: the study's vocabulary is not grown from inside a
-// collector.
+// runEchoPhase runs one echo round trip per configured size over the confirmed
+// direct session. The orchestrator later canonicalizes the results into the
+// signed trial; the collector does not decide whether they satisfy policy.
 func (r *runner) runEchoPhase(ctx context.Context, peer adnl.Peer) {
 	attemptWindow := r.config.PunchTimeout / echoAttempts
 	if attemptWindow <= 0 {
