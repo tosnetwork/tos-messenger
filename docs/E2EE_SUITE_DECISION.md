@@ -8,8 +8,15 @@ must not treat the candidate as frozen.
 
 ## Recommendation
 
-Adopt `tos.messaging.e2ee.x3dh-aes256gcm-dr.v1`, implemented by
+Adopt `tos.messaging.e2ee.x3dh-aes256gcm-dr.v2`, implemented by
 `e2ee.NewDefaultSuite`, for the M0 one-to-one profile.
+
+V2 replaces the pre-freeze v1 candidate because v1 placed the 64-character
+display form of each genesis hash in the associated-data preimage. V2 keeps
+the same cryptographic construction but commits each hash as its
+length-prefixed raw 32-byte value. The domain, algorithm identifier, prekey
+schemas and deterministic vectors all advance explicitly; no v1 object is
+silently reinterpreted.
 
 The profile combines:
 

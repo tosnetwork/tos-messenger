@@ -321,7 +321,8 @@ func decodeTaskStatusRequest(reader *canon.Reader) Payload {
 // proposal in memory cannot drift apart. The asset's network identity travels
 // with it -- the terms digest commits it, so the wire form has to carry it or
 // the two sides would digest different objects; the payload schemas that embed
-// terms moved to v2 when it was added.
+// terms moved to v2 when it was added and to v3 when the two display hashes
+// became raw 32-byte canonical fields.
 func encodeTerms(buffer *bytes.Buffer, terms negotiation.Terms) {
 	canon.Text(buffer, terms.CapabilityID)
 	canon.Text(buffer, terms.CapabilityVersion)
@@ -330,8 +331,8 @@ func encodeTerms(buffer *bytes.Buffer, terms negotiation.Terms) {
 	canon.Text(buffer, terms.ManifestDigest)
 	canon.Text(buffer, terms.TransportBindingDigest)
 	canon.Text(buffer, terms.Price.Asset.Network.ID)
-	canon.Text(buffer, terms.Price.Asset.Network.GenesisRootHash)
-	canon.Text(buffer, terms.Price.Asset.Network.GenesisFileHash)
+	canon.MustHash32(buffer, terms.Price.Asset.Network.GenesisRootHash)
+	canon.MustHash32(buffer, terms.Price.Asset.Network.GenesisFileHash)
 	canon.Uint32(buffer, uint32(terms.Price.Asset.Workchain))
 	canon.Text(buffer, terms.Price.Asset.AccountID)
 	canon.Text(buffer, terms.Price.Asset.MasterCodeHash)
@@ -355,8 +356,8 @@ func decodeTerms(reader *canon.Reader) negotiation.Terms {
 			Asset: negotiation.Asset{
 				Network: negotiation.Network{
 					ID:              reader.Text(MaxShortTextBytes),
-					GenesisRootHash: reader.Text(MaxDigestBytes),
-					GenesisFileHash: reader.Text(MaxDigestBytes),
+					GenesisRootHash: reader.Hash32(),
+					GenesisFileHash: reader.Hash32(),
 				},
 				Workchain:      int32(reader.Uint32()),
 				AccountID:      reader.Text(MaxShortTextBytes),
@@ -382,7 +383,7 @@ type NegotiationProposal struct {
 
 // Schema implements Payload.
 func (NegotiationProposal) Schema() string {
-	return "tos.messaging.payload.negotiation-proposal.v2"
+	return "tos.messaging.payload.negotiation-proposal.v3"
 }
 
 // Validate implements Payload.
@@ -413,7 +414,7 @@ type NegotiationCounterproposal struct {
 
 // Schema implements Payload.
 func (NegotiationCounterproposal) Schema() string {
-	return "tos.messaging.payload.negotiation-counterproposal.v2"
+	return "tos.messaging.payload.negotiation-counterproposal.v3"
 }
 
 // Validate implements Payload.
@@ -477,7 +478,7 @@ type NegotiationIntentAccept struct {
 
 // Schema implements Payload.
 func (NegotiationIntentAccept) Schema() string {
-	return "tos.messaging.payload.negotiation-intent-accept.v2"
+	return "tos.messaging.payload.negotiation-intent-accept.v3"
 }
 
 // Validate implements Payload.

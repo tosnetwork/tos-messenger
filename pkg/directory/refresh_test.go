@@ -74,7 +74,7 @@ func refreshFixture(t *testing.T) (*refreshSource, Refresher, *refreshAdmitter) 
 	delegation := testDelegation(t, key)
 	bundle, err := e2ee.SignBundle(e2ee.Bundle{
 		Network: delegation.Network, AgentID: delegation.AgentID, EndpointID: delegation.EndpointID,
-		DeviceID: "dev_" + strings.Repeat("4", 64), AlgorithmID: "tos.messaging.e2ee.x3dh-aes256gcm-dr.v1",
+		DeviceID: "dev_" + strings.Repeat("4", 64), AlgorithmID: "tos.messaging.e2ee.x3dh-aes256gcm-dr.v2",
 		Material: []byte("published prekey"), IssuedAtUnix: baseUnix, ExpiresAtUnix: baseUnix + 3600,
 	}, key)
 	if err != nil {

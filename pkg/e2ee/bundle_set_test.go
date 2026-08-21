@@ -48,7 +48,7 @@ func TestBundleSetJSONStrictRefusal(t *testing.T) {
 	object["unknown"] = true
 	unknown, _ := json.Marshal(object)
 	empty := []byte(`{"schema":"` + BundleSetSchema + `","bundles":[]}`)
-	wrongSchema := bytes.Replace(valid, []byte(BundleSetSchema), []byte("tos.messaging.prekey-bundle-set.v2"), 1)
+	wrongSchema := bytes.Replace(valid, []byte(BundleSetSchema), []byte("tos.messaging.prekey-bundle-set.v999"), 1)
 	badNested := bytes.Replace(valid, []byte(`"device_id"`), []byte(`"unknown_device_id"`), 1)
 	cases := map[string][]byte{
 		"empty": nil, "empty set": empty, "unknown": unknown,

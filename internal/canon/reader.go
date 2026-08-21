@@ -2,6 +2,7 @@ package canon
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"unicode/utf8"
 )
@@ -111,6 +112,20 @@ func (r *Reader) Text(maximum int) string {
 		return ""
 	}
 	return string(raw)
+}
+
+// Hash32 reads one length-prefixed raw 32-byte hash and returns its strict
+// lowercase bare-hex JSON representation.
+func (r *Reader) Hash32() string {
+	raw := r.Bytes(32)
+	if raw == nil {
+		return ""
+	}
+	if len(raw) != 32 {
+		r.fail("canonical hash is not 32 bytes")
+		return ""
+	}
+	return hex.EncodeToString(raw)
 }
 
 // Count reads a length prefix for a repeated field, bounded by the caller.

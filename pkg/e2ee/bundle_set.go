@@ -11,7 +11,7 @@ const (
 	// BundleSetSchema identifies the bounded JSON publication wrapper for all
 	// device bundles committed by one descriptor. The wrapper is not itself
 	// signed; SetCanonicalBytes is the descriptor-committed representation.
-	BundleSetSchema = "tos.messaging.prekey-bundle-set.v1"
+	BundleSetSchema = "tos.messaging.prekey-bundle-set.v2"
 
 	// MaxBundleSetWireBytes bounds an object fetched before JSON decoding. It
 	// leaves room for MaxDevicesPerSet bundles at their material bound without

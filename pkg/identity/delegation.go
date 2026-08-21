@@ -29,7 +29,7 @@ import (
 
 const (
 	// Schema is the strict wire schema identifier.
-	Schema = "tos.messaging.endpoint-delegation.v1"
+	Schema = "tos.messaging.endpoint-delegation.v2"
 
 	// MaxProtocolVersions bounds the advertised messaging protocol versions.
 	MaxProtocolVersions = 16
@@ -118,8 +118,12 @@ func DeriveEndpointID(network *nativev1.NetworkDomain, agentID string, key ed255
 	}
 	buffer := bytes.NewBufferString(canon.DomainEndpointID)
 	canon.Text(buffer, network.NetworkId)
-	canon.Text(buffer, network.GenesisRootHash)
-	canon.Text(buffer, network.GenesisFileHash)
+	if err := canon.Hash32(buffer, network.GenesisRootHash); err != nil {
+		return "", err
+	}
+	if err := canon.Hash32(buffer, network.GenesisFileHash); err != nil {
+		return "", err
+	}
 	canon.Text(buffer, agentID)
 	buffer.Write(key)
 	sum := sha256.Sum256(buffer.Bytes())
@@ -136,8 +140,12 @@ func CanonicalBytes(delegation Delegation) ([]byte, error) {
 	buffer := bytes.NewBufferString(canon.DomainEndpointDelegation)
 	canon.Text(buffer, Schema)
 	canon.Text(buffer, delegation.Network.NetworkId)
-	canon.Text(buffer, delegation.Network.GenesisRootHash)
-	canon.Text(buffer, delegation.Network.GenesisFileHash)
+	if err := canon.Hash32(buffer, delegation.Network.GenesisRootHash); err != nil {
+		return nil, err
+	}
+	if err := canon.Hash32(buffer, delegation.Network.GenesisFileHash); err != nil {
+		return nil, err
+	}
 	canon.Text(buffer, delegation.AgentID)
 	canon.Text(buffer, delegation.EndpointID)
 	buffer.Write(delegation.IdentityPublicKey)

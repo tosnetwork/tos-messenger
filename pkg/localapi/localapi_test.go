@@ -475,7 +475,7 @@ func TestRuntimeSubmitsAnEvent(t *testing.T) {
 	// The daemon owns what goes on the wire, so a malformed submission is
 	// refused here rather than sealed and sent.
 	bad := h.call(t, Request{
-		Op: OpQueue, Event: json.RawMessage(`{"schema":"tos.messaging.event.v1"}`),
+		Op: OpQueue, Event: json.RawMessage(`{"schema":"tos.messaging.event.v2"}`),
 		SessionID: sessionID, RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 3600,
 	})
 	if bad.OK {

@@ -21,7 +21,7 @@ import (
 
 const (
 	// BundleSchema is the strict wire schema identifier.
-	BundleSchema = "tos.messaging.prekey-bundle.v1"
+	BundleSchema = "tos.messaging.prekey-bundle.v2"
 
 	// MaxMaterialBytes bounds one published prekey bundle's material.
 	MaxMaterialBytes = 4 << 10
@@ -73,8 +73,12 @@ func BundleSigningBytes(bundle Bundle) ([]byte, error) {
 	buffer := bytes.NewBufferString(canon.DomainPrekeyBundle)
 	canon.Text(buffer, BundleSchema)
 	canon.Text(buffer, bundle.Network.NetworkId)
-	canon.Text(buffer, bundle.Network.GenesisRootHash)
-	canon.Text(buffer, bundle.Network.GenesisFileHash)
+	if err := canon.Hash32(buffer, bundle.Network.GenesisRootHash); err != nil {
+		return nil, err
+	}
+	if err := canon.Hash32(buffer, bundle.Network.GenesisFileHash); err != nil {
+		return nil, err
+	}
 	canon.Text(buffer, bundle.AgentID)
 	canon.Text(buffer, bundle.EndpointID)
 	canon.Text(buffer, bundle.DeviceID)

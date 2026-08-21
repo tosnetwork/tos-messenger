@@ -28,7 +28,7 @@ import (
 
 const (
 	// DescriptorSchema is the strict wire schema identifier.
-	DescriptorSchema = "tos.messaging.contact-descriptor.v1"
+	DescriptorSchema = "tos.messaging.contact-descriptor.v2"
 
 	// MaxDescriptorLifetimeSeconds bounds issued_at..expires_at. A descriptor
 	// is a cache entry, so it expires far sooner than the delegation behind it.
@@ -101,8 +101,12 @@ func SigningBytes(descriptor Descriptor) ([]byte, error) {
 	buffer := bytes.NewBufferString(canon.DomainContactDescriptor)
 	canon.Text(buffer, DescriptorSchema)
 	canon.Text(buffer, descriptor.Network.NetworkId)
-	canon.Text(buffer, descriptor.Network.GenesisRootHash)
-	canon.Text(buffer, descriptor.Network.GenesisFileHash)
+	if err := canon.Hash32(buffer, descriptor.Network.GenesisRootHash); err != nil {
+		return nil, err
+	}
+	if err := canon.Hash32(buffer, descriptor.Network.GenesisFileHash); err != nil {
+		return nil, err
+	}
 	canon.Text(buffer, descriptor.AgentID)
 	canon.Text(buffer, descriptor.EndpointID)
 	canon.Text(buffer, descriptor.DelegationDigest)

@@ -27,7 +27,7 @@ func TestHTTPSObjectsFetchesCommittedObjects(t *testing.T) {
 	delegation := testDelegation(t, key)
 	bundle, err := e2ee.SignBundle(e2ee.Bundle{Network: delegation.Network, AgentID: delegation.AgentID,
 		EndpointID: delegation.EndpointID, DeviceID: "dev_" + strings.Repeat("4", 64),
-		AlgorithmID: "tos.messaging.e2ee.x3dh-aes256gcm-dr.v1", Material: []byte("published prekey"),
+		AlgorithmID: "tos.messaging.e2ee.x3dh-aes256gcm-dr.v2", Material: []byte("published prekey"),
 		IssuedAtUnix: baseUnix, ExpiresAtUnix: baseUnix + 3600}, key)
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func httpsObjectFixture(t *testing.T) (e2ee.Bundle, Descriptor, Locator) {
 	key := endpointKey(t, 0x11)
 	delegation := testDelegation(t, key)
 	bundle, err := e2ee.SignBundle(e2ee.Bundle{Network: delegation.Network, AgentID: delegation.AgentID, EndpointID: delegation.EndpointID,
-		DeviceID: "dev_" + strings.Repeat("4", 64), AlgorithmID: "tos.messaging.e2ee.x3dh-aes256gcm-dr.v1", Material: []byte("prekey"), IssuedAtUnix: baseUnix, ExpiresAtUnix: baseUnix + 3600}, key)
+		DeviceID: "dev_" + strings.Repeat("4", 64), AlgorithmID: "tos.messaging.e2ee.x3dh-aes256gcm-dr.v2", Material: []byte("prekey"), IssuedAtUnix: baseUnix, ExpiresAtUnix: baseUnix + 3600}, key)
 	if err != nil {
 		t.Fatal(err)
 	}

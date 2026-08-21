@@ -442,7 +442,7 @@ func TestDecodeEventRejectsMalformedTransport(t *testing.T) {
 	cases := map[string][]byte{
 		"unknown field":  []byte(string(valid[:len(valid)-1]) + `,"extra":1}`),
 		"trailing json":  append(append([]byte{}, valid...), []byte(`{}`)...),
-		"wrong schema":   []byte(strings.Replace(string(valid), EventSchema, "tos.messaging.event.v2", 1)),
+		"wrong schema":   []byte(strings.Replace(string(valid), EventSchema, "tos.messaging.event.v999", 1)),
 		"forged id":      []byte(strings.Replace(string(valid), testEvent(t).EventID, "evt_"+strings.Repeat("0", 64), 1)),
 		"bad base64":     []byte(strings.Replace(string(valid), `"content_base64":"aGVsbG8="`, `"content_base64":"!!!!"`, 1)),
 		"empty":          []byte(""),

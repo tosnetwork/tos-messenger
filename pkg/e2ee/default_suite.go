@@ -18,7 +18,7 @@ import (
 // DefaultCandidateAlgorithmID names the concrete suite proposed for the M0
 // freeze. Its presence does not freeze the value: the owner still has to
 // ratify the decision package before this identifier becomes a wire promise.
-const DefaultCandidateAlgorithmID = "tos.messaging.e2ee.x3dh-aes256gcm-dr.v1"
+const DefaultCandidateAlgorithmID = "tos.messaging.e2ee.x3dh-aes256gcm-dr.v2"
 
 const (
 	materialVersion = byte(1)

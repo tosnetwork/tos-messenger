@@ -3,7 +3,7 @@ package directory
 import "testing"
 
 func FuzzDecodeDescriptorJSON(f *testing.F) {
-	f.Add([]byte(`{"schema":"tos.messaging.contact-descriptor.v1"}`))
+	f.Add([]byte(`{"schema":"tos.messaging.contact-descriptor.v2"}`))
 	f.Add([]byte("{}"))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		decoded, err := DecodeDescriptorJSON(raw)

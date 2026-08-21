@@ -86,13 +86,16 @@ func (a Asset) Same(other Asset) bool {
 		a.Decimals == other.Decimals
 }
 
-func (a Asset) canonical(buffer *bytes.Buffer) {
-	a.Network.canonical(buffer)
+func (a Asset) canonical(buffer *bytes.Buffer) error {
+	if err := a.Network.canonical(buffer); err != nil {
+		return err
+	}
 	canon.Uint32(buffer, uint32(a.Workchain))
 	canon.Text(buffer, a.AccountID)
 	canon.Text(buffer, a.MasterCodeHash)
 	canon.Text(buffer, a.WalletCodeHash)
 	canon.Uint32(buffer, a.Decimals)
+	return nil
 }
 
 // Proto returns the protocol form of an asset identity, so the same identity
@@ -238,9 +241,12 @@ func (m Money) String() string {
 	return whole + "." + fraction + " (" + m.Asset.AccountID[:8] + ")"
 }
 
-func (m Money) canonical(buffer *bytes.Buffer) {
-	m.Asset.canonical(buffer)
+func (m Money) canonical(buffer *bytes.Buffer) error {
+	if err := m.Asset.canonical(buffer); err != nil {
+		return err
+	}
 	canon.Text(buffer, m.Atomic)
+	return nil
 }
 
 func decodeHex(value string) ([]byte, error) {

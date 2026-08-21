@@ -31,7 +31,7 @@ func FuzzDecodeRelayJSON(f *testing.F) {
 }
 
 func FuzzDecodeEventJSON(f *testing.F) {
-	f.Add([]byte(`{"schema":"tos.messaging.event.v1"}`))
+	f.Add([]byte(`{"schema":"tos.messaging.event.v2"}`))
 	f.Add([]byte("{}"))
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		decoded, err := DecodeEventJSON(raw)

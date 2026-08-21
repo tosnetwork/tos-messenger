@@ -35,8 +35,12 @@ func (b Binding) Bytes() ([]byte, error) {
 	}
 	buffer := bytes.NewBufferString(canon.DomainE2EEBinding)
 	canon.Text(buffer, b.Network.NetworkId)
-	canon.Text(buffer, b.Network.GenesisRootHash)
-	canon.Text(buffer, b.Network.GenesisFileHash)
+	if err := canon.Hash32(buffer, b.Network.GenesisRootHash); err != nil {
+		return nil, err
+	}
+	if err := canon.Hash32(buffer, b.Network.GenesisFileHash); err != nil {
+		return nil, err
+	}
 	canon.Text(buffer, b.AlgorithmID)
 	canon.Text(buffer, b.ConversationID)
 	canon.Text(buffer, b.SenderAgentID)

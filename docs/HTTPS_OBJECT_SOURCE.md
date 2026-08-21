@@ -30,12 +30,12 @@ The DHT locator names that exact content-addressed URL. This avoids replacing a
 mutable descriptor path before the DHT has replaced its old digest.
 
 The prekey object uses schema
-`tos.messaging.prekey-bundle-set.v1` and contains `schema` plus `bundles`.
-Each member is an existing strict `tos.messaging.prekey-bundle.v1` object. The
+`tos.messaging.prekey-bundle-set.v2` and contains `schema` plus `bundles`.
+Each member is an existing strict `tos.messaging.prekey-bundle.v2` object. The
 wrapper is bounded to 128 KiB and 1–16 coherent device bundles. It is a
 transport container, not a new authority or signed preimage. The descriptor
 continues to commit the order-independent canonical bundle-digest set under
-the existing `tos.messaging.prekey-bundle-set.v1` domain. Positive vectors now
+the `tos.messaging.prekey-bundle-set.v2` domain. Positive vectors now
 include the wrapper, canonical set bytes, and resulting digest; adversarial
 vectors cover unknown fields, trailing JSON, truncation, and empty input.
 
