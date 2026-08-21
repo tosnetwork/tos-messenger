@@ -45,21 +45,41 @@ func (a *FinalizedAuthority) ResolveAttachmentEndpoint(ctx context.Context, gran
 		grant.GenesisFileHash != a.network.GenesisFileHash {
 		return nil, errors.New("attachment grant belongs to another network")
 	}
-	raw, err := a.source.Delegation(ctx, grant.AgentID)
+	delegation, err := a.VerifyConfiguredDelegation(ctx, grant.AgentID, now)
 	if err != nil {
 		return nil, err
 	}
-	delegation, err := identity.Verify(a.resolver, a.network, a.policy, raw, now)
-	if err != nil {
-		return nil, err
-	}
-	if delegation.AgentID != grant.AgentID || delegation.EndpointID != grant.EndpointID {
+	if delegation.EndpointID != grant.EndpointID {
 		return nil, errors.New("attachment grant names another finalized Endpoint")
 	}
 	if grant.ExpiresAtUnix > delegation.ExpiresAtUnix {
 		return nil, errors.New("attachment grant outlives its Endpoint delegation")
 	}
 	return append(ed25519.PublicKey(nil), delegation.IdentityPublicKey...), nil
+}
+
+// VerifyConfiguredDelegation loads and verifies one provisioned delegation
+// without trusting claims from a capability grant. It lets operator check mode
+// validate the same finalized authority boundary used by live operations.
+func (a *FinalizedAuthority) VerifyConfiguredDelegation(ctx context.Context, agentID string, now time.Time) (identity.Delegation, error) {
+	if a == nil || ctx == nil {
+		return identity.Delegation{}, errors.New("invalid finalized attachment authority lookup")
+	}
+	if err := ctx.Err(); err != nil {
+		return identity.Delegation{}, err
+	}
+	raw, err := a.source.Delegation(ctx, agentID)
+	if err != nil {
+		return identity.Delegation{}, err
+	}
+	delegation, err := identity.Verify(a.resolver, a.network, a.policy, raw, now)
+	if err != nil {
+		return identity.Delegation{}, err
+	}
+	if delegation.AgentID != agentID {
+		return identity.Delegation{}, errors.New("attachment delegation belongs to another Agent")
+	}
+	return delegation, nil
 }
 
 var _ FinalizedEndpointAuthority = (*FinalizedAuthority)(nil)

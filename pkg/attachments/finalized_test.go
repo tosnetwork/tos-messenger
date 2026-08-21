@@ -108,3 +108,15 @@ func TestFinalizedAttachmentAuthorityFailsClosed(t *testing.T) {
 		t.Fatal("delegation source failure was ignored")
 	}
 }
+
+func TestFinalizedAttachmentAuthorityVerifiesProvisionedDelegationForCheckMode(t *testing.T) {
+	authority, _, _, delegation := finalizedAttachmentFixture(t)
+	now := time.Unix(1_800_000_000, 0)
+	verified, err := authority.VerifyConfiguredDelegation(context.Background(), delegation.AgentID, now)
+	if err != nil || verified.EndpointID != delegation.EndpointID {
+		t.Fatalf("verify configured delegation: %+v %v", verified, err)
+	}
+	if _, err := authority.VerifyConfiguredDelegation(context.Background(), "agent_"+strings.Repeat("9", 64), now); err == nil {
+		t.Fatal("delegation mapped under another Agent was accepted")
+	}
+}

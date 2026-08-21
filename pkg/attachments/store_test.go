@@ -138,6 +138,38 @@ func TestCiphertextStoreCollectsExpiredLease(t *testing.T) {
 	}
 }
 
+func TestCiphertextStorePeriodicGCProtectsActiveMultiFrameUpload(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0)
+	_, chunks, _ := storedAttachment(t, now)
+	store, err := OpenStore(filepath.Join(t.TempDir(), "attachments"), DefaultStoreQuota())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.PutObjects(chunks[:1]); err != nil {
+		t.Fatal(err)
+	}
+	stagedAt := time.Unix(1_800_000_000, 0)
+	path := store.objectPath(chunks[0].Digest)
+	if err := os.Chtimes(path, stagedAt, stagedAt); err != nil {
+		t.Fatal(err)
+	}
+	report, err := store.GCWithStagingGrace(stagedAt.Add(DefaultStagingGrace/2), DefaultStagingGrace)
+	if err != nil || report.ObjectsRemoved != 0 {
+		t.Fatalf("active staging collection: %+v err=%v", report, err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("active staged chunk removed: %v", err)
+	}
+	report, err = store.GCWithStagingGrace(stagedAt.Add(DefaultStagingGrace+time.Second), DefaultStagingGrace)
+	if err != nil || report.ObjectsRemoved != 1 {
+		t.Fatalf("stale staging collection: %+v err=%v", report, err)
+	}
+	if _, err := store.GCWithStagingGrace(stagedAt, -time.Second); err == nil {
+		t.Fatal("negative staging grace accepted")
+	}
+}
+
 func TestCiphertextStoreEnforcesQuotaBeforeWriting(t *testing.T) {
 	now := time.Unix(1_900_000_000, 0)
 	ref, chunks, _ := storedAttachment(t, now)

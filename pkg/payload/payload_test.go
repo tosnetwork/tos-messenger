@@ -197,6 +197,31 @@ func TestBodiesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncryptedAttachmentV1HistoryRemainsDecodable(t *testing.T) {
+	legacy := sample("artifact.encrypted").(EncryptedAttachment)
+	legacy.schema = encryptedAttachmentV1Schema
+	legacy.Locator = "relay://legacy-opaque-hint"
+	encoded, err := Encode(legacy)
+	if err != nil {
+		t.Fatalf("encode legacy attachment: %v", err)
+	}
+	decoded, err := DecodeSchema("artifact.encrypted", encryptedAttachmentV1Schema, encoded)
+	if err != nil {
+		t.Fatalf("decode legacy attachment: %v", err)
+	}
+	attachment, ok := decoded.(EncryptedAttachment)
+	if !ok || attachment.Schema() != encryptedAttachmentV1Schema || attachment.Locator != legacy.Locator {
+		t.Fatalf("legacy attachment changed: %#v", decoded)
+	}
+	if _, err := Decode("artifact.encrypted", encoded); err == nil {
+		t.Fatal("legacy bytes were guessed as the current schema")
+	}
+	if !SupportsSchema("artifact.encrypted", encryptedAttachmentV1Schema) ||
+		SupportsSchema("artifact.encrypted", "tos.messaging.payload.encrypted-attachment.v999") {
+		t.Fatal("attachment schema allow-list is wrong")
+	}
+}
+
 // The body's own schema is part of its domain, so bytes that parse under one
 // kind must not parse as another.
 func TestBodiesDoNotCrossKinds(t *testing.T) {

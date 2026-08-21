@@ -270,8 +270,12 @@ func DeriveEventID(event Event) (string, error) {
 // deriving its identifier.
 func NewEvent(event Event) (Event, error) {
 	event.EventID = ""
-	if schema, known := payload.SchemaFor(event.Kind); known && event.PayloadSchema == "" {
-		event.PayloadSchema = schema
+	if schema, known := payload.SchemaFor(event.Kind); known {
+		if event.PayloadSchema == "" {
+			event.PayloadSchema = schema
+		} else if event.PayloadSchema != schema {
+			return Event{}, errors.New("new event must use the current payload schema")
+		}
 	}
 	eventID, err := DeriveEventID(event)
 	if err != nil {
@@ -478,8 +482,8 @@ func validateEventFields(event Event) error {
 	// A known kind carries the schema the protocol fixed for it. An unknown
 	// kind may declare its own, which is what makes a forward-compatible event
 	// storable without making it interpretable.
-	if schema, known := payload.SchemaFor(event.Kind); known {
-		if event.PayloadSchema != schema {
+	if _, known := payload.SchemaFor(event.Kind); known {
+		if !payload.SupportsSchema(event.Kind, event.PayloadSchema) {
 			return errors.New("event payload schema does not match its kind")
 		}
 	} else if !payloadSchemaPattern.MatchString(event.PayloadSchema) {
@@ -498,7 +502,7 @@ func validateEventFields(event Event) error {
 		return err
 	}
 	if event.Kind == "artifact.encrypted" {
-		body, err := payload.Decode(event.Kind, event.Content)
+		body, err := payload.DecodeSchema(event.Kind, event.PayloadSchema, event.Content)
 		if err != nil {
 			return err
 		}

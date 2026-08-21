@@ -1,5 +1,7 @@
 package payload
 
+import "github.com/tosnetwork/tos-messenger/internal/canon"
+
 // codecs binds every event kind to the body it carries.
 //
 // The table is the contract. A kind that appears in the event vocabulary and
@@ -36,7 +38,8 @@ var codecs = map[string]codec{
 
 	"artifact.offer":     {schema: ArtifactOffer{}.Schema(), decode: decodeArtifactOffer},
 	"artifact.reference": {schema: ArtifactReference{}.Schema(), decode: decodeArtifactReference},
-	"artifact.encrypted": {schema: EncryptedAttachment{}.Schema(), decode: decodeEncryptedAttachment},
+	"artifact.encrypted": {schema: EncryptedAttachment{}.Schema(), decode: decodeEncryptedAttachment,
+		legacy: map[string]func(*canon.Reader) Payload{encryptedAttachmentV1Schema: decodeEncryptedAttachmentV1}},
 
 	"service.quote.reference":   {schema: QuoteReference{}.Schema(), decode: decodeQuoteReference},
 	"service.escrow.reference":  {schema: EscrowReference{}.Schema(), decode: decodeEscrowReference},

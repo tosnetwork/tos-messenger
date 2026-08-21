@@ -384,9 +384,15 @@ type EncryptedAttachment struct {
 	ManifestDigest string
 	ReferenceJSON  []byte
 	Locator        string
+	schema         string
 }
 
-func (EncryptedAttachment) Schema() string {
+const encryptedAttachmentV1Schema = "tos.messaging.payload.encrypted-attachment.v1"
+
+func (a EncryptedAttachment) Schema() string {
+	if a.schema != "" {
+		return a.schema
+	}
 	return "tos.messaging.payload.encrypted-attachment.v2"
 }
 
@@ -405,6 +411,9 @@ func (a EncryptedAttachment) Validate() error {
 	if err != nil || digest != a.ManifestDigest {
 		return errors.New("encrypted attachment reference does not match its manifest digest")
 	}
+	if a.Schema() == encryptedAttachmentV1Schema {
+		return requireText("attachment locator", a.Locator, MaxShortTextBytes)
+	}
 	if len(a.Locator) == 0 || len(a.Locator) > MaxShortTextBytes {
 		return errors.New("invalid attachment locator size")
 	}
@@ -420,6 +429,11 @@ func (a EncryptedAttachment) encode(buffer *bytes.Buffer) {
 
 func decodeEncryptedAttachment(reader *canon.Reader) Payload {
 	return EncryptedAttachment{ManifestDigest: reader.Text(MaxDigestBytes), ReferenceJSON: reader.Bytes(MaxOpaqueBytes), Locator: reader.Text(MaxShortTextBytes)}
+}
+
+func decodeEncryptedAttachmentV1(reader *canon.Reader) Payload {
+	return EncryptedAttachment{ManifestDigest: reader.Text(MaxDigestBytes), ReferenceJSON: reader.Bytes(MaxOpaqueBytes),
+		Locator: reader.Text(MaxShortTextBytes), schema: encryptedAttachmentV1Schema}
 }
 
 // ChainReference points at finalized state. It carries no authority of its

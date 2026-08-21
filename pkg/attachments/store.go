@@ -34,6 +34,11 @@ var (
 	ErrLeaseNotFound = errors.New("attachment lease not found")
 )
 
+// DefaultStagingGrace protects chunks belonging to a bounded multi-frame
+// upload from periodic collection. A client that pauses longer can safely
+// resume by retransmitting content-addressed chunks.
+const DefaultStagingGrace = 10 * time.Minute
+
 type StoreQuota struct {
 	MaxLeases    int
 	MaxObjects   int
@@ -393,11 +398,20 @@ func (s *Store) Delete(manifestDigest string) (bool, error) {
 }
 
 func (s *Store) GC(now time.Time) (GCReport, error) {
+	return s.GCWithStagingGrace(now, 0)
+}
+
+// GCWithStagingGrace removes expired leases and unreferenced ciphertext older
+// than stagingGrace. Lease expiry is never delayed by the staging grace.
+func (s *Store) GCWithStagingGrace(now time.Time, stagingGrace time.Duration) (GCReport, error) {
 	if err := s.usable(); err != nil || now.IsZero() || now.Unix() < 0 {
 		if err == nil {
 			err = errors.New("invalid attachment GC time")
 		}
 		return GCReport{}, err
+	}
+	if stagingGrace < 0 || stagingGrace > 24*time.Hour {
+		return GCReport{}, errors.New("invalid attachment staging grace")
 	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -443,6 +457,9 @@ func (s *Store) GC(now time.Time) (GCReport, error) {
 		info, err := os.Lstat(path)
 		if err != nil {
 			return GCReport{}, errors.New("inspect attachment object")
+		}
+		if stagingGrace > 0 && now.Before(info.ModTime().Add(stagingGrace)) {
+			continue
 		}
 		remove = append(remove, removable{path: path, size: info.Size()})
 	}
@@ -680,6 +697,13 @@ func (s *Store) putObject(c Chunk) error {
 		raw, e := readPrivateFile(path, int64(MaxChunkBytes+32))
 		if e != nil || !bytes.Equal(raw, c.Ciphertext) {
 			return fmt.Errorf("%w: stored object differs", ErrStoreConflict)
+		}
+		// A valid retransmission is durable evidence that this staged object is
+		// part of an active multi-frame upload. Refresh its collection grace;
+		// the content itself remains immutable and hash-addressed.
+		now := time.Now()
+		if err := os.Chtimes(path, now, now); err != nil {
+			return errors.New("refresh attachment object staging time")
 		}
 		return nil
 	}

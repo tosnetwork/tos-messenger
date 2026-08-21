@@ -13,8 +13,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/internal/securefile"
@@ -24,6 +26,8 @@ import (
 )
 
 const maxStorageKeyBytes = 256
+
+const attachmentGCInterval = time.Minute
 
 type delegationFlags []string
 
@@ -99,6 +103,21 @@ func run(configPath, state, socket, keyPath string, delegations []string, check 
 	}
 	key := ed25519.PrivateKey(keyBytes)
 	if check {
+		agents := make([]string, 0, len(paths))
+		for agent := range paths {
+			agents = append(agents, agent)
+		}
+		sort.Strings(agents)
+		now := time.Now()
+		for _, agent := range agents {
+			delegation, verifyErr := authority.VerifyConfiguredDelegation(context.Background(), agent, now)
+			if verifyErr != nil {
+				return fmt.Errorf("verify attachment delegation for %s: %w", agent, verifyErr)
+			}
+			if ed25519.PublicKey(key.Public().(ed25519.PublicKey)).Equal(delegation.IdentityPublicKey) {
+				return errors.New("storage and Endpoint signing keys must be distinct")
+			}
+		}
 		fmt.Printf("configuration is valid: state=%s socket=%s delegations=%d storage_public_key=%s\n",
 			state, socket, len(paths), hex.EncodeToString(key.Public().(ed25519.PublicKey)))
 		return nil
@@ -108,6 +127,9 @@ func run(configPath, state, socket, keyPath string, delegations []string, check 
 		return err
 	}
 	defer store.Close()
+	if _, err := store.GCWithStagingGrace(time.Now(), attachments.DefaultStagingGrace); err != nil {
+		return fmt.Errorf("initial attachment garbage collection: %w", err)
+	}
 	authenticated, err := attachments.NewAuthenticatedStore(store, authority, key)
 	if err != nil {
 		return err
@@ -123,7 +145,30 @@ func run(configPath, state, socket, keyPath string, delegations []string, check 
 	defer listener.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	gcErrors := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(attachmentGCInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				if _, gcErr := store.GCWithStagingGrace(now, attachments.DefaultStagingGrace); gcErr != nil {
+					gcErrors <- gcErr
+					stop()
+					return
+				}
+			}
+		}
+	}()
 	fmt.Printf("socket=%s state=%s storage_public_key=%s authority=finalized-chain carrier=private-unix\n",
 		socket, state, hex.EncodeToString(key.Public().(ed25519.PublicKey)))
-	return server.Serve(ctx, listener)
+	serveErr := server.Serve(ctx, listener)
+	select {
+	case gcErr := <-gcErrors:
+		return fmt.Errorf("periodic attachment garbage collection: %w", gcErr)
+	default:
+		return serveErr
+	}
 }

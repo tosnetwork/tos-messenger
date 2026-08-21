@@ -340,6 +340,29 @@ func TestEncryptedAttachmentEventBindsOuterManifestReference(t *testing.T) {
 	if _, err := NewEvent(event); err != nil {
 		t.Fatalf("valid encrypted attachment event: %v", err)
 	}
+	legacySchema := "tos.messaging.payload.encrypted-attachment.v1"
+	legacyBody := bytes.NewBufferString(canon.DomainPayload + legacySchema + "\x00")
+	canon.Text(legacyBody, manifestDigest)
+	canon.Bytes(legacyBody, referenceJSON)
+	canon.Text(legacyBody, "relay://legacy-opaque-hint")
+	legacyEvent := event
+	legacyEvent.PayloadSchema = legacySchema
+	legacyEvent.Content = legacyBody.Bytes()
+	if _, err := NewEvent(legacyEvent); err == nil {
+		t.Fatal("new Event was allowed to emit a legacy attachment schema")
+	}
+	legacyEvent.EventID = ""
+	legacyEvent.EventID, err = DeriveEventID(legacyEvent)
+	if err != nil {
+		t.Fatalf("derive legacy encrypted attachment Event ID: %v", err)
+	}
+	legacyJSON, err := EncodeEventJSON(legacyEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeEventJSON(legacyJSON); err != nil {
+		t.Fatalf("persisted legacy encrypted attachment became unreadable: %v", err)
+	}
 	event.AttachmentReferences = []string{canon.Digest([]byte("other manifest"))}
 	if _, err := NewEvent(event); err == nil {
 		t.Fatal("outer attachment reference diverged from secret manifest")
