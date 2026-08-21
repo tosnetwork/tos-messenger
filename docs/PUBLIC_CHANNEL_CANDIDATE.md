@@ -50,6 +50,13 @@ signature/authority substitution, sequence forks, missing/future parents,
 unauthorized moderation, Event-ID mismatch and arrival-order divergence fail
 closed in the candidate tests.
 
+`testdata/public-channel-vectors.json` freezes the exact profile/Event signing
+preimages, signed JSON, profile digest, Event IDs and convergent history head
+from deterministic Endpoint seeds. Its decode-positive adversarial entries
+separately exercise unknown profile fields, Event-ID and publisher-signature
+substitution, a missing causal parent, and a syntactically valid false head.
+The package rebuilds and consumes this file on every test run.
+
 ## Durable local state
 
 The candidate store writes verified Event objects and a canonical immutable
@@ -69,7 +76,7 @@ derived history matches them.
 
 - Overlay/RLDP/TOS Sites publication, fetch, peer limits and anti-spam policy;
 - independently operated convergence/failover evidence;
-- wire vectors, independent review and second implementation.
+- independent vector consumption/review and a second implementation.
 
 No transport choice or economic history-Relay profile is made here. The latter
 remains Expansion-Gate locked.
