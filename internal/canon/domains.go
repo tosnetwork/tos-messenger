@@ -132,6 +132,16 @@ const (
 	// DomainRoomRolePolicy namespaces the current room authority's bounded
 	// assignment of elevated administrator and moderator powers.
 	DomainRoomRolePolicy = "tos.messaging.room-role-policy.v1\x00"
+	// DomainPublicChannelID namespaces a route-neutral public channel identity.
+	DomainPublicChannelID = "tos.messaging.public-channel-id.v1\x00"
+	// DomainPublicChannelProfile namespaces the authority-signed publisher and
+	// moderator roster for one public-channel epoch.
+	DomainPublicChannelProfile = "tos.messaging.public-channel-profile.v1\x00"
+	// DomainPublicChannelEvent namespaces one publisher-signed public event.
+	DomainPublicChannelEvent = "tos.messaging.public-channel-event.v1\x00"
+	// DomainPublicChannelHistory namespaces a convergent complete event-set
+	// commitment; transport arrival order is deliberately absent.
+	DomainPublicChannelHistory = "tos.messaging.public-channel-history.v1\x00"
 	// DomainStoredAck namespaces a Relay's durable-storage acknowledgement.
 	// It is deliberately distinct from delivery and application ACK payloads:
 	// a Relay storing ciphertext proves neither recipient nor runtime action.
@@ -208,6 +218,10 @@ var Domains = []string{
 	DomainRoomAuthorityTransfer,
 	DomainRoomMembershipAuthorization,
 	DomainRoomRolePolicy,
+	DomainPublicChannelID,
+	DomainPublicChannelProfile,
+	DomainPublicChannelEvent,
+	DomainPublicChannelHistory,
 	DomainStoredAck,
 	DomainConformanceReport,
 	DomainMLSDeviceCredential,
