@@ -393,6 +393,35 @@ func TestSignedEchoMeasurementsCanonicalizeAndRefuseSubstitution(t *testing.T) {
 	}
 }
 
+func TestRLDPPlanParsingAndSignedMeasurement(t *testing.T) {
+	plans, err := parseRLDPTransfers("8000001@2000000@250ms,4000001@2000000@150ms")
+	if err != nil || len(plans) != 2 || plans[0].PayloadBytes != 8_000_001 || plans[1].Interruption != 150*time.Millisecond {
+		t.Fatalf("RLDP plans did not parse exactly: plans=%+v err=%v", plans, err)
+	}
+	for _, malformed := range []string{"4000001", "x@2000000@150ms", "4000001@x@150ms", "4000001@2000000@later"} {
+		if _, err := parseRLDPTransfers(malformed); err == nil {
+			t.Fatalf("malformed RLDP plan %q was accepted", malformed)
+		}
+	}
+
+	measurements, err := signedRLDPMeasurements([]probe.RLDPResult{
+		{PayloadBytes: 8_000_001, PayloadSHA256: "sha256:" + strings.Repeat("b", 64),
+			PartSizeBytes: probe.RLDPPartSizeBytes, ExpectedParts: 5, Succeeded: true, RoundTripMillis: 400,
+			InterruptionAttempted: true, InterruptAfterBytes: probe.RLDPPartSizeBytes,
+			PlannedInterruptionMillis: 250, InterruptionMillis: 250,
+			SuppressedMessages: 9, SameTransferResumed: true},
+		{PayloadBytes: 4_000_001, PayloadSHA256: "sha256:" + strings.Repeat("a", 64),
+			PartSizeBytes: probe.RLDPPartSizeBytes, ExpectedParts: 3, Succeeded: true, RoundTripMillis: 200,
+			InterruptionAttempted: true, InterruptAfterBytes: probe.RLDPPartSizeBytes,
+			PlannedInterruptionMillis: 150, InterruptionMillis: 150,
+			SuppressedMessages: 4, SameTransferResumed: true},
+	})
+	if err != nil || len(measurements) != 2 || measurements[0].PayloadBytes != 4_000_001 ||
+		!measurements[0].SameTransferResumed || measurements[1].PayloadBytes != 8_000_001 {
+		t.Fatalf("RLDP evidence was not canonicalized exactly: measurements=%+v err=%v", measurements, err)
+	}
+}
+
 // startCoordinator serves a probe coordinator on loopback and returns its
 // address and derived identifier.
 func startCoordinator(t *testing.T) (string, string) {

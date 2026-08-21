@@ -16,11 +16,12 @@ Three properties are enforced by the code rather than by convention.
 every report names the policy digest it was judged against. Thresholds invented
 after seeing the data produce a different digest, which is visible in the
 report. The session gates are predeclared the same way: the policy names the
-minimum direct- and tunnel-survival rates, reconnect and paired sized-echo
-success rates, their attempted-sample floors, and the exact bounded echo
-payload sizes, all folded into the digest. At least the native 8176-byte
-maximum must be exercised, so a tiny-packet result cannot qualify a direct
-route.
+minimum direct- and tunnel-survival rates, reconnect, paired sized-echo, RLDP
+large-transfer and same-transfer-recovery rates, their attempted-sample floors,
+and the exact payload/interruption profiles, all folded into the digest. At
+least the native 8176-byte ADNL maximum and one interrupted RLDP response of at
+least 4,000,001 bytes (three pinned parts) must be exercised, so neither a
+tiny-packet result nor an application retry can qualify a direct route.
 
 **A weak study yields no finding.** If any required stratum was never measured,
 or was measured with too few samples, too few distinct operator identifiers, or from
@@ -165,11 +166,24 @@ the trial files as a proxy fallback carrying the direct phase's failure class
 -- which is what gives the `tunnel-first` route decision evidence to read.
 After a confirmed direct session's hold/reconnect phases, the collector also
 runs the policy's bounded sized ADNL echo queries. Each endpoint signs the
-payload size, outcome, and measured latency into its v3 trial. The report reads
+payload size, outcome, and measured latency into its v4 trial. The report reads
 only paired directions and requires every predeclared size to meet both its
 sample floor and operator-balanced success threshold before `direct-first` can
 qualify. A failed maximum-size echo can therefore veto a path that only carries
 small control traffic.
+The in-process collector then runs each predeclared RLDPv2 plan. Responses are
+deterministic and digest-checked, bounded to 16 MiB, and must exceed the pinned
+2,000,000-byte FEC part size. For an interrupted plan, the receiver first
+observes a complete part, suppresses both inbound and outbound RLDP custom
+messages for the predeclared window, records how many messages were actually
+suppressed, and accepts recovery only when the original `DoQuery` completes
+after the window with the exact payload. It never issues an application retry.
+The two directions occupy separate bounded slots so one endpoint's induced
+outage cannot masquerade as the other's. Pairing again requires both signed
+directions; success and same-transfer recovery join by AND, latency by the
+slower half. The native sidecar currently exposes ADNL echo but no RLDP command,
+so a sidecar run loudly refuses RLDP plans rather than claiming a cross-check it
+did not perform.
 With a hold window configured the hold phase also runs over the tunneled
 session, reported through its own status booleans; the survival span stays a
 direct-session measurement, because a relayed lifetime would measure the
@@ -265,7 +279,8 @@ tos-reachability -coordinators host-1:7691,host-2:7691 -session "$SESSION" \
 These examples run the default `udp` probe; `-probe adnl` selects the session
 probe a route decision needs, and it alone accepts the post-establishment
 flags — `-hold` (paced by `-keepalive`) for the survival phase, `-reconnect`
-for the initiator's deliberate drop, and `-tunnel` naming the relay of the
+for the initiator's deliberate drop, `-rldp-transfers` for exact segmented
+response/interruption plans, and `-tunnel` naming the relay of the
 fallback phase. The udp probe refuses all three, because it has no session to
 hold, reconnect, or tunnel.
 
@@ -302,17 +317,18 @@ session establishment, keepalive survival, and reconnect, and only its
 evidence produces `direct-first`, `tunnel-first`, `hybrid-by-network-class`,
 or `relay-required`. The session phases are decisive, not merely surfaced:
 `direct-first` additionally requires every required cell to clear the
-predeclared direct-survival and per-payload sized-echo gates (and every cell
+predeclared direct-survival, per-payload sized-echo, segmented RLDP transfer,
+and same-transfer recovery gates (and every cell
 exercising a mobility event the reconnect gate), `tunnel-first` requires the tunnel-survival gate, and a
 cell that cannot show the predeclared minimum of attempted pair samples for a
 gate its finding depends on makes the finding `insufficient-evidence`, with the
 missing gate named. A study where every session establishes and then dies, or
 where no reconnect ever succeeds, therefore cannot freeze direct-first.
-The bounded ADNL query path is now measured through the protocol maximum, so
-direct qualification is no longer based on ping traffic alone. It remains a
-session-payload check, not an RLDP claim: segmented reliable transfer,
-interruption/resume, and large-envelope acceptance belong to the selected
-transport milestone.
+The bounded ADNL query path is measured through the protocol maximum and the
+RLDPv2 path through a three-part response plus observable mid-transfer loss.
+This is executable local/tooling acceptance, not evidence about public network
+conditions: the multi-operator study must still run these exact predeclared
+plans on the real scenarios before it may freeze a route.
 
 Trials are aggregated per probe and never mixed, and the report names both the
 probe and the kind of question it answered. `Report.SupportsRouteDecision`

@@ -11,10 +11,11 @@ vet:
 test-race:
 	GOWORK=off go test -race -count=1 ./...
 
-# The ADNL gateway cannot run under the race detector (tonutils-go's TL
-# serializer trips checkptr), so its end-to-end tests skip there and run here.
+# The ADNL gateway cannot run under the race detector (tosutils-go's TL
+# serializer trips checkptr), so its ADNL and RLDP end-to-end tests skip there
+# and run here.
 test-adnl:
-	GOWORK=off go test -count=1 -run ADNL ./pkg/probe ./pkg/publicchannel ./cmd/tos-reachability
+	GOWORK=off go test -count=1 -run 'ADNL|RLDP' ./pkg/probe ./pkg/publicchannel ./cmd/tos-reachability
 
 test-openmls:
 	cargo fmt --manifest-path rust/openmls-driver/Cargo.toml -- --check

@@ -77,7 +77,15 @@ type Config struct {
 	// with their SHA-256. The command maps the bounded results into the signed
 	// trial. ADNL probe only.
 	EchoSizes []int
-	Commit    string
+	// RLDPTransfers asks for exact large-response round trips over RLDPv2 after
+	// the bounded ADNL echo phase. Each plan is measured by one uninterrupted
+	// DoQuery: when interruption is requested, the collector first observes a
+	// complete RLDP part, suppresses both directions of RLDP custom messages for
+	// the requested window, and accepts recovery only if that SAME query later
+	// returns the exact deterministic payload. Sidecar runs refuse these plans
+	// until the native sidecar exposes an equivalent command.
+	RLDPTransfers []RLDPTransferPlan
+	Commit        string
 	// ManifestDigest is the digest of this endpoint's collector manifest,
 	// presented to the peer wherever the commit is. The commit names a
 	// repository revision; the manifest names the build that spoke on the wire,
@@ -153,6 +161,9 @@ type Result struct {
 	// confirmed direct session, in the order configured. The orchestrator
 	// canonicalizes it into endpoint-signed trial evidence.
 	EchoResults []EchoResult
+	// RLDPResults are exact large-response outcomes in configuration order.
+	// The orchestrator canonicalizes them into the endpoint-signed trial.
+	RLDPResults []RLDPResult
 	// Observation is the coordinator's signed account of what it saw. A result
 	// without one cannot be filed under a stratum, because the two facts that
 	// place it there would be the endpoint's own claim.
@@ -181,6 +192,34 @@ type EchoResult struct {
 	Bytes  int
 	OK     bool
 	Millis uint64
+}
+
+// RLDPTransferPlan predeclares one segmented transfer and optional transient
+// interruption. PayloadBytes counts the response payload rather than its TL
+// envelope. InterruptAfterBytes must reach at least one complete RLDP part.
+type RLDPTransferPlan struct {
+	PayloadBytes        int
+	InterruptAfterBytes uint64
+	Interruption        time.Duration
+}
+
+// RLDPResult is collector evidence for one plan. SuppressedMessages makes the
+// induced outage observable; SameTransferResumed means the one DoQuery begun
+// before that outage completed after it, without an application retry.
+type RLDPResult struct {
+	PayloadBytes              int
+	PayloadSHA256             string
+	PartSizeBytes             uint32
+	ExpectedParts             uint32
+	Succeeded                 bool
+	RoundTripMillis           uint64
+	InterruptionAttempted     bool
+	InterruptAfterBytes       uint64
+	PlannedInterruptionMillis uint64
+	InterruptionMillis        uint64
+	SuppressedMessages        uint64
+	SameTransferResumed       bool
+	Failure                   string
 }
 
 // NewSessionID returns a fresh session identifier for one measured pair.
@@ -374,7 +413,7 @@ func validateConfig(config *Config) error {
 	// instead.
 	if config.Probe == reachability.ProbeUDP &&
 		(config.HoldWindow > 0 || config.MeasureReconnect || config.TunnelAddr != "" ||
-			config.SidecarPath != "" || len(config.EchoSizes) > 0) {
+			config.SidecarPath != "" || len(config.EchoSizes) > 0 || len(config.RLDPTransfers) > 0) {
 		return errors.New("the udp probe measures datagram establishment only")
 	}
 	// The native sidecar has no tunnel path yet; that is a later production
@@ -383,6 +422,9 @@ func validateConfig(config *Config) error {
 	// works", which is exactly the distinction the tunnel-first route needs.
 	if config.SidecarPath != "" && config.TunnelAddr != "" {
 		return errors.New("the sidecar runner does not measure the tunnel fallback")
+	}
+	if config.SidecarPath != "" && len(config.RLDPTransfers) > 0 {
+		return errors.New("the native sidecar protocol does not measure RLDP transfers")
 	}
 	// An echo that cannot be sent must be refused where the operator can see
 	// it: the native stack caps query payloads, and a size past the cap would
@@ -399,6 +441,19 @@ func validateConfig(config *Config) error {
 			return errors.New("echo sizes must be distinct")
 		}
 		seenEchoSizes[size] = struct{}{}
+	}
+	if len(config.RLDPTransfers) > 4 {
+		return errors.New("too many RLDP transfer plans")
+	}
+	seenRLDP := make(map[int]struct{}, len(config.RLDPTransfers))
+	for _, plan := range config.RLDPTransfers {
+		if err := validateRLDPPlan(plan); err != nil {
+			return err
+		}
+		if _, duplicate := seenRLDP[plan.PayloadBytes]; duplicate {
+			return errors.New("RLDP transfer payloads must be distinct")
+		}
+		seenRLDP[plan.PayloadBytes] = struct{}{}
 	}
 	if config.Commit != "" && !commitPattern.MatchString(config.Commit) {
 		return errors.New("invalid probe commit")

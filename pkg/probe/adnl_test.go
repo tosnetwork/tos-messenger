@@ -421,6 +421,39 @@ func TestEndToEndADNLEchoCrossCheck(t *testing.T) {
 	}
 }
 
+// One application query must survive a real loss window after making
+// measurable progress. The 4,000,001-byte response necessarily spans three
+// pinned RLDP parts; each endpoint drops both inbound and outbound RLDP custom
+// messages after its first decoded part, then requires the original DoQuery to
+// return the exact deterministic payload after the window. No retry is issued.
+func TestEndToEndRLDPSegmentationAndSameTransferRecovery(t *testing.T) {
+	plan := RLDPTransferPlan{
+		PayloadBytes:        4_000_001,
+		InterruptAfterBytes: RLDPPartSizeBytes,
+		Interruption:        150 * time.Millisecond,
+	}
+	results := runADNLPair(t, "127.0.0.1", func(_ Role, config *Config) {
+		config.PunchTimeout = 8 * time.Second
+		config.RLDPTransfers = []RLDPTransferPlan{plan}
+	})
+	for role, result := range results {
+		if !result.Established || len(result.RLDPResults) != 1 {
+			t.Fatalf("role %s did not run one RLDP transfer: %+v", role, result)
+		}
+		measured := result.RLDPResults[0]
+		if measured.PayloadBytes != plan.PayloadBytes || measured.PartSizeBytes != RLDPPartSizeBytes || measured.ExpectedParts != 3 {
+			t.Fatalf("role %s did not prove the pinned three-part shape: %+v", role, measured)
+		}
+		if !measured.Succeeded || measured.PayloadSHA256 == "" || measured.RoundTripMillis == 0 {
+			t.Fatalf("role %s did not verify the exact large response: %+v", role, measured)
+		}
+		if !measured.InterruptionAttempted || measured.InterruptAfterBytes != RLDPPartSizeBytes ||
+			measured.InterruptionMillis < 100 || measured.SuppressedMessages == 0 || !measured.SameTransferResumed {
+			t.Fatalf("role %s did not recover the same transfer after observable interruption: %+v", role, measured)
+		}
+	}
+}
+
 // The gateway library cannot parse the native peer's raw hash answer, so the
 // answer watch and Query completion can become ready together at the timeout
 // boundary. Go deliberately randomizes a select between ready cases; every
@@ -495,6 +528,26 @@ func TestConfigRefusesWhatTheRunnersCannotMeasure(t *testing.T) {
 	udpEcho.EchoSizes = []int{1024}
 	if _, err := Run(ctx, udpEcho); err == nil {
 		t.Fatal("the udp probe accepted an echo it cannot measure")
+	}
+	segmented := RLDPTransferPlan{PayloadBytes: 4_000_001,
+		InterruptAfterBytes: RLDPPartSizeBytes, Interruption: 150 * time.Millisecond}
+	udpRLDP := base
+	udpRLDP.Probe = reachability.ProbeUDP
+	udpRLDP.RLDPTransfers = []RLDPTransferPlan{segmented}
+	if _, err := Run(ctx, udpRLDP); err == nil {
+		t.Fatal("the udp probe accepted an RLDP transfer it cannot measure")
+	}
+	sidecarRLDP := base
+	sidecarRLDP.SidecarPath = "/no/such/sidecar"
+	sidecarRLDP.RLDPTransfers = []RLDPTransferPlan{segmented}
+	if _, err := RunADNLSidecar(ctx, sidecarRLDP); err == nil {
+		t.Fatal("the native sidecar claimed an RLDP command its protocol does not expose")
+	}
+	beforePart := base
+	beforePart.RLDPTransfers = []RLDPTransferPlan{{PayloadBytes: 4_000_001,
+		InterruptAfterBytes: RLDPPartSizeBytes - 1, Interruption: 150 * time.Millisecond}}
+	if _, err := RunADNL(ctx, beforePart); err == nil {
+		t.Fatal("an RLDP interruption before one complete part was accepted")
 	}
 	tunneled := base
 	tunneled.SidecarPath = "/no/such/sidecar"
