@@ -57,6 +57,23 @@ separately exercise unknown profile fields, Event-ID and publisher-signature
 substitution, a missing causal parent, and a syntactically valid false head.
 The package rebuilds and consumes this file on every test run.
 
+## Route-neutral synchronization
+
+A bounded fetch request names at most 64 sorted Event IDs. Its strict response
+must account for every requested ID exactly once as either an Event whose
+content ID and channel/profile binding reproduce, or a sorted `unavailable`
+observation. Unavailability is retryable and never establishes completeness.
+Fetched Events independently recheck the finalized profile, publisher
+delegation, role and signature before joining local staging.
+
+Synchronization begins with the untrusted head's tips, then recursively asks
+for exact missing causal parents. Exact response replay merges idempotently. A
+claimed Event count with no discoverable tip/parent fails as a stalled/dishonest
+head. Only `VerifySyncedHistory` over the complete bounded set, followed by an
+exact derived-head match, permits the durable store to commit it. This protocol
+is suitable for an eventual Overlay, RLDP or Sites object source; it does not
+select one of them.
+
 ## Durable local state
 
 The candidate store writes verified Event objects and a canonical immutable
@@ -74,7 +91,7 @@ derived history matches them.
 
 ## Explicitly still open
 
-- Overlay/RLDP/TOS Sites publication, fetch, peer limits and anti-spam policy;
+- Overlay/RLDP/TOS Sites publication binding, peer limits and anti-spam policy;
 - independently operated convergence/failover evidence;
 - independent vector consumption/review and a second implementation.
 
