@@ -328,6 +328,15 @@ func TestSandboxScannerHelperProcess(t *testing.T) {
 func scannerTestPolicy(t *testing.T, mode string, extra ...string) AgentContentPolicy {
 	t.Helper()
 	policy := scannerTestPolicyWithoutHost(t)
+	var err error
+	policy.BubblewrapDigest, err = ExecutableDigest(bubblewrapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.PrlimitDigest, err = ExecutableDigest(prlimitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	policy.Scanners[0].Args = scannerHelperArgs(mode, extra...)
 	return policy
 }
@@ -368,17 +377,10 @@ func scannerTestPolicyWithoutHost(t *testing.T) AgentContentPolicy {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bubblewrapDigest, err := ExecutableDigest(bubblewrapPath)
-	if err != nil && runtime.GOOS == "linux" {
-		t.Fatal(err)
-	}
-	prlimitDigest, err := ExecutableDigest(prlimitPath)
-	if err != nil && runtime.GOOS == "linux" {
-		t.Fatal(err)
-	}
 	return AgentContentPolicy{MaxPlaintextBytes: 1 << 20, AllowedMediaTypes: map[string]struct{}{"text/plain": {}},
 		Scanners: []ScannerSpec{{ID: "fixture", Executable: executable, ExecutableDigest: scannerDigest,
-			Args: scannerHelperArgs("allow")}}, BubblewrapDigest: bubblewrapDigest, PrlimitDigest: prlimitDigest,
+			Args: scannerHelperArgs("allow")}},
+		BubblewrapDigest: "sha256:" + strings.Repeat("1", 64), PrlimitDigest: "sha256:" + strings.Repeat("2", 64),
 		ScannerTimeout: 5 * time.Second, AddressSpaceBytes: 8 << 30, CPUSeconds: 5, MaxProcesses: 4096}
 }
 
