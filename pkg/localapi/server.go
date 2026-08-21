@@ -241,6 +241,8 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.verifyAcceptedQuote(ctx, request)
 	case OpExportDeviceHistory:
 		return s.exportDeviceHistory(request)
+	case OpListDeviceHistory:
+		return s.listDeviceHistory(request)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
 }
@@ -415,6 +417,26 @@ func (s *Server) exportDeviceHistory(request Request) Response {
 	}
 	return Response{OK: true, Fresh: fresh, EventID: event.EventID,
 		HistorySegmentDigest: canon.Digest(event.Content), LastEventCreatedAt: last.CreatedAtUnix, LastEventID: last.EventID}
+}
+
+func (s *Server) listDeviceHistory(request Request) Response {
+	limit := request.Limit
+	if limit == 0 {
+		limit = MaxHistoryEventsPerResponse
+	}
+	events, err := s.config.Journal.History(request.ConversationID, limit)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	history := make([]json.RawMessage, 0, len(events))
+	for _, event := range events {
+		encoded, err := envelope.EncodeEventJSON(event)
+		if err != nil {
+			return refuse(fault.CodeInternal, err)
+		}
+		history = append(history, encoded)
+	}
+	return Response{OK: true, History: history}
 }
 
 // awaitingAdmission lists what the owner has yet to decide about.

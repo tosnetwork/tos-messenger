@@ -923,6 +923,54 @@ func TestHistoryExportNeedsOwnerAndSignatureCoversTerms(t *testing.T) {
 	}
 }
 
+func TestOwnerListsCommittedDisplayHistoryWithoutApplicationLease(t *testing.T) {
+	h := newHarness(t)
+	historical := h.event(t, "display only")
+	historical.CreatedAtUnix = baseUnix - 10
+	historical.EventID = ""
+	var err error
+	historical, err = envelope.NewEvent(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historicalRaw, err := envelope.EncodeEventJSON(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segment := payload.DeviceHistorySegment{SourceDeviceID: targetDev, TargetDeviceID: senderDev,
+		ConversationID: convoID, Sequence: 1, Events: [][]byte{historicalRaw}}
+	content, err := payload.Encode(segment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, err := envelope.NewEvent(envelope.Event{Network: testNetwork(), ConversationID: convoID,
+		SenderAgentID: senderID, SenderEndpointID: senderMEP, SenderDeviceID: targetDev,
+		CreatedAtUnix: baseUnix, Kind: "device.history.segment", Content: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh, err := h.journal.ApplyHistorySegment(outer, segment, senderID, senderMEP, senderDev,
+		[]string{senderDev, targetDev}, h.clock); err != nil || !fresh {
+		t.Fatalf("apply display history: fresh=%v err=%v", fresh, err)
+	}
+	request := Request{Op: OpListDeviceHistory, ConversationID: convoID, Limit: 1}
+	if response := h.call(t, request); response.OK || response.Code != fault.CodeClassNotDelegated {
+		t.Fatalf("runtime read owner history surface: %+v", response)
+	}
+	response := h.owner(t, request)
+	if !response.OK || len(response.History) != 1 {
+		t.Fatalf("owner history listing: %+v", response)
+	}
+	listed, err := envelope.DecodeEventJSON(response.History[0])
+	if err != nil || listed.EventID != historical.EventID {
+		t.Fatalf("listed history changed: %+v err=%v", listed, err)
+	}
+	if _, err := EncodeRequest(Request{Op: OpListDeviceHistory, ConversationID: convoID,
+		Limit: MaxHistoryEventsPerResponse + 1}); err == nil {
+		t.Fatal("oversized history listing was encoded")
+	}
+}
+
 // The owner's half of the loop: see what is waiting, decide, and only then
 // does the runtime see it.
 func TestOwnerAdmitsAnInboundEvent(t *testing.T) {

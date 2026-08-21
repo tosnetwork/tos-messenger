@@ -39,6 +39,17 @@ The response returns the committed segment digest and last Event cursor for the
 next page. Exact retries retain the first Event ID and bytes even if newer
 messages entered the journal.
 
+Checkpoint-reachable imports are observable from the owner socket without an
+application lease:
+
+```sh
+tos-messenger-owner -socket /run/tos-messenger/owner.sock history \
+  -conversation conv_... -limit 3
+```
+
+`device-history.list` is a bounded read (at most three worst-case Events per
+frame), is absent from the runtime socket, and never changes application state.
+
 ## Eligible and imported state
 
 The exporter reads only durable inbound Events in `applied` state and outbound

@@ -47,7 +47,7 @@ func run(args []string, output io.Writer) error {
 	}
 	rest := global.Args()
 	if len(rest) == 0 {
-		return errors.New("usage: tos-messenger-owner [-socket PATH] <pending|prepare-grant|prepare-deny|prepare-invite|prepare-escrow-location|prepare-history|sign|submit>")
+		return errors.New("usage: tos-messenger-owner [-socket PATH] <pending|history|prepare-grant|prepare-deny|prepare-invite|prepare-escrow-location|prepare-history|sign|submit>")
 	}
 	if rest[0] == "sign" {
 		return signCommand(rest[1:], output)
@@ -68,6 +68,20 @@ func run(args []string, output io.Writer) error {
 			return err
 		}
 		return writeJSON(output, response.Actions)
+	case "history":
+		set := commandFlags("history")
+		conversation := set.String("conversation", "", "direct Conversation identifier")
+		limit := set.Int("limit", localapi.MaxHistoryEventsPerResponse, "maximum recent display Events")
+		if err := set.Parse(rest[1:]); err != nil || set.NArg() != 0 || *conversation == "" {
+			return errors.New("usage: history -conversation CONV_ID [-limit N]")
+		}
+		response, err := client.Call(context.Background(), localapi.Request{
+			Op: localapi.OpListDeviceHistory, ConversationID: *conversation, Limit: *limit,
+		})
+		if err != nil {
+			return err
+		}
+		return writeJSON(output, response.History)
 	case "prepare-grant":
 		if len(rest) != 2 {
 			return errors.New("usage: prepare-grant ACTION_ID")

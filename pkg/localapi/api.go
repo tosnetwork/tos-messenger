@@ -41,6 +41,9 @@ const (
 	MaxFrameBytes = 512 << 10
 	// MaxEventsPerResponse bounds one pending listing.
 	MaxEventsPerResponse = 64
+	// MaxHistoryEventsPerResponse keeps worst-case canonical Event JSON below
+	// the local response frame even when every Event is near its wire bound.
+	MaxHistoryEventsPerResponse = 3
 )
 
 // Operation is what a caller is asking for.
@@ -123,6 +126,9 @@ const (
 	// bounded direct-conversation history page to another current device of
 	// this Endpoint. The Agent runtime may neither request nor receive it.
 	OpExportDeviceHistory Operation = "device-history.export"
+	// OpListDeviceHistory reads checkpoint-reachable display history. It is
+	// owner-side observability, not an application queue or execution trigger.
+	OpListDeviceHistory Operation = "device-history.list"
 )
 
 // Principal is which side of the boundary a connection speaks for.
@@ -156,6 +162,7 @@ var permitted = map[Principal]map[Operation]struct{}{
 		OpCreateAdmissionInvite: {},
 		OpRecordEscrowLocation:  {},
 		OpExportDeviceHistory:   {},
+		OpListDeviceHistory:     {},
 	},
 }
 
@@ -180,6 +187,7 @@ var operations = map[Operation]struct{}{
 	OpRecordEscrowLocation:  {},
 	OpVerifyAcceptedQuote:   {},
 	OpExportDeviceHistory:   {},
+	OpListDeviceHistory:     {},
 }
 
 var (
@@ -373,10 +381,11 @@ type Response struct {
 	Code   fault.Code `json:"code,omitempty"`
 	Detail string     `json:"detail,omitempty"`
 
-	Events  []PendingEvent `json:"events,omitempty"`
-	Event   *PendingEvent  `json:"claimed,omitempty"`
-	Fresh   bool           `json:"fresh,omitempty"`
-	EventID string         `json:"event_id,omitempty"`
+	Events  []PendingEvent    `json:"events,omitempty"`
+	Event   *PendingEvent     `json:"claimed,omitempty"`
+	History []json.RawMessage `json:"history,omitempty"`
+	Fresh   bool              `json:"fresh,omitempty"`
+	EventID string            `json:"event_id,omitempty"`
 
 	// Actions lists decisions waiting for the owner.
 	Actions []WaitingAction `json:"actions,omitempty"`
@@ -554,9 +563,12 @@ func ValidateRequest(request Request) error {
 	if request.Op != OpVerifyAcceptedQuote && request.ExpectedQuoteTerms != nil {
 		return errors.New("only Quote verification carries expected Quote terms")
 	}
-	if request.Op != OpCompose && request.Op != OpExportDeviceHistory &&
+	if request.Op != OpCompose && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
 		(request.ConversationID != "" || request.IdempotencyKey != "") {
 		return errors.New("only outbound composition carries message semantics")
+	}
+	if request.Op == OpListDeviceHistory && request.IdempotencyKey != "" {
+		return errors.New("a history listing has no idempotency key")
 	}
 	if request.Op != OpCompose && (request.RoomID != "" || request.ReplyToEventID != "" ||
 		request.MembershipEpoch != 0 || request.MediaType != "" || request.Body != "") {
@@ -702,6 +714,11 @@ func ValidateRequest(request Request) error {
 			return errors.New("history export needs canonical target, cursor, expiry and idempotency terms")
 		}
 		return requireEmpty(request, "device-history export", request.EventID, request.LeaseID, request.SessionID)
+	case OpListDeviceHistory:
+		if !conversationPattern.MatchString(request.ConversationID) || request.Limit < 0 || request.Limit > MaxHistoryEventsPerResponse {
+			return errors.New("history listing needs a canonical conversation and bounded limit")
+		}
+		return requireEmpty(request, "device-history listing", request.EventID, request.LeaseID, request.SessionID)
 	case OpActionStatus, OpClaimAction:
 		if !actionPattern.MatchString(request.ActionID) {
 			return errors.New("an action status needs an action")
