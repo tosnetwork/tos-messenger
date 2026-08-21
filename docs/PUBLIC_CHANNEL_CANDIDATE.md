@@ -74,6 +74,23 @@ exact derived-head match, permits the durable store to commit it. This protocol
 is suitable for an eventual Overlay, RLDP or Sites object source; it does not
 select one of them.
 
+## Peer resource guard
+
+`SyncGuard` scopes one channel/profile synchronization attempt to authenticated
+native transport peer IDs (`peer_<32-byte-hex>`). Candidate defaults permit at
+most eight peers, four distinct heads and 256 fetches per peer, 64 MiB per peer,
+256 MiB total, and 256 unavailable results. Limits are explicit and validated;
+an adapter must enforce the per-response byte ceiling while reading and then
+charge every completed response. Exact head replay is free, but one peer never
+counts twice toward independent support.
+
+Heads are ordered for fetch work by distinct-peer support and then a stable
+digest tie-break. This grants neither validity nor commit authority: even a
+many-peer candidate must reproduce through `VerifySyncedHistory`. The guard
+contains transport noise without adding unmeasured PoW, stake or payment rules,
+and authorized publication remains governed by the finalized profile. Default
+calibration against the real M0-R carrier and abuse measurements is still open.
+
 ## Durable local state
 
 The candidate store writes verified Event objects and a canonical immutable
@@ -91,7 +108,8 @@ derived history matches them.
 
 ## Explicitly still open
 
-- Overlay/RLDP/TOS Sites publication binding, peer limits and anti-spam policy;
+- Overlay/RLDP/TOS Sites publication binding and measured production calibration
+  of the candidate peer/resource limits;
 - independently operated convergence/failover evidence;
 - independent vector consumption/review and a second implementation.
 
