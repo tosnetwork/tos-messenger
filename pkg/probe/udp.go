@@ -82,8 +82,9 @@ type Config struct {
 	// DoQuery: when interruption is requested, the collector first observes a
 	// complete RLDP part, suppresses both directions of RLDP custom messages for
 	// the requested window, and accepts recovery only if that SAME query later
-	// returns the exact deterministic payload. Sidecar runs refuse these plans
-	// until the native sidecar exposes an equivalent command.
+	// returns the exact deterministic payload. The native sidecar currently
+	// accepts the decision-bearing profile that interrupts after exactly its
+	// first 2,000,000-byte decoded part.
 	RLDPTransfers []RLDPTransferPlan
 	Commit        string
 	// ManifestDigest is the digest of this endpoint's collector manifest,
@@ -422,9 +423,6 @@ func validateConfig(config *Config) error {
 	// works", which is exactly the distinction the tunnel-first route needs.
 	if config.SidecarPath != "" && config.TunnelAddr != "" {
 		return errors.New("the sidecar runner does not measure the tunnel fallback")
-	}
-	if config.SidecarPath != "" && len(config.RLDPTransfers) > 0 {
-		return errors.New("the native sidecar protocol does not measure RLDP transfers")
 	}
 	// An echo that cannot be sent must be refused where the operator can see
 	// it: the native stack caps query payloads, and a size past the cap would

@@ -540,8 +540,20 @@ func TestConfigRefusesWhatTheRunnersCannotMeasure(t *testing.T) {
 	sidecarRLDP := base
 	sidecarRLDP.SidecarPath = "/no/such/sidecar"
 	sidecarRLDP.RLDPTransfers = []RLDPTransferPlan{segmented}
-	if _, err := RunADNLSidecar(ctx, sidecarRLDP); err == nil {
-		t.Fatal("the native sidecar claimed an RLDP command its protocol does not expose")
+	if err := validateConfig(&sidecarRLDP); err != nil {
+		t.Fatalf("the native sidecar's canonical RLDP plan was rejected: %v", err)
+	}
+	if err := validateSidecarRLDPPlan(segmented); err != nil {
+		t.Fatalf("the native sidecar's exact first-part interruption was rejected: %v", err)
+	}
+	for _, invalid := range []RLDPTransferPlan{
+		{PayloadBytes: 4_000_001},
+		{PayloadBytes: 6_000_001, InterruptAfterBytes: 4_000_000, Interruption: 150 * time.Millisecond},
+		{PayloadBytes: 4_000_001, InterruptAfterBytes: RLDPPartSizeBytes, Interruption: 150*time.Millisecond + 1},
+	} {
+		if err := validateSidecarRLDPPlan(invalid); err == nil {
+			t.Fatalf("the native sidecar accepted an unsupported RLDP plan: %+v", invalid)
+		}
 	}
 	beforePart := base
 	beforePart.RLDPTransfers = []RLDPTransferPlan{{PayloadBytes: 4_000_001,

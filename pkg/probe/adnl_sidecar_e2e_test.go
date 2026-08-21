@@ -156,6 +156,37 @@ func TestEndToEndADNLSidecarNativePair(t *testing.T) {
 	}
 }
 
+// Both collectors drive the native RLDPv2 actor itself. Direction slots are
+// intentionally sequential, while each individual result contains one exact
+// query whose complementary response transfer decodes a full part, crosses a
+// real whole-socket loss window, and resumes with the deterministic digest.
+func TestEndToEndADNLSidecarNativeRLDPRecovery(t *testing.T) {
+	plan := RLDPTransferPlan{PayloadBytes: 4_000_001, InterruptAfterBytes: RLDPPartSizeBytes,
+		Interruption: 150 * time.Millisecond}
+	results := runADNLMatrixPair(t, map[Role]bool{RoleA: true, RoleB: true}, func(_ Role, config *Config) {
+		config.PunchTimeout = 10 * time.Second
+		config.RLDPTransfers = []RLDPTransferPlan{plan}
+	})
+	for role, result := range results {
+		if !result.Established || len(result.RLDPResults) != 1 {
+			t.Fatalf("role %s did not run one native RLDP transfer: %+v", role, result)
+		}
+		measured := result.RLDPResults[0]
+		if measured.PayloadBytes != plan.PayloadBytes || measured.PartSizeBytes != RLDPPartSizeBytes ||
+			measured.ExpectedParts != 3 || measured.PayloadSHA256 == "" || measured.RoundTripMillis == 0 {
+			t.Fatalf("role %s returned the wrong native transfer shape: %+v", role, measured)
+		}
+		if !measured.Succeeded || !measured.InterruptionAttempted ||
+			measured.InterruptAfterBytes != RLDPPartSizeBytes || measured.InterruptionMillis < 150 ||
+			measured.SuppressedMessages == 0 || !measured.SameTransferResumed || measured.Failure != "" {
+			t.Fatalf("role %s did not prove native same-transfer recovery: %+v", role, measured)
+		}
+		t.Logf("role %s: native RLDP resumed in %d ms after %d ms loss, suppressed=%d digest=%s",
+			role, measured.RoundTripMillis, measured.InterruptionMillis, measured.SuppressedMessages,
+			measured.PayloadSHA256)
+	}
+}
+
 // The gateway initiates toward a native responder: the first wire-compat
 // proof in the go-to-native direction.
 func TestEndToEndADNLGatewayDialsNative(t *testing.T) {
