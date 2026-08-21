@@ -259,7 +259,11 @@ slower half. A one-sided result therefore cannot become bidirectional route
 evidence. Add `-rldp-transfers 4000001@2000000@150ms` on both collector
 endpoints for the example policy. The first number is response
 bytes, the second is the required progress point, and the third is the induced
-loss window. Role A owns the first bounded transfer slot and role B the second.
+loss window. The in-process collector requires the progress point to be an
+exact 2,000,000-byte part boundary: it starts the window by dropping the first
+inbound symbol of the following part, which the sender can emit only after the
+prior part was decoded and acknowledged. Role A owns the first bounded transfer
+slot and role B the second.
 Expect `rldp=4000001:ok:...:interrupted:...:suppressed=N:resumed=true`; zero
 suppressed messages or `resumed=false` cannot satisfy the gate. The same
 application query must finish after the interruption—reissuing it is not

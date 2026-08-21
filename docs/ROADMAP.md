@@ -57,6 +57,16 @@ client product.
 | Cross-implementation positive vectors and adversarial corpus | 🟡 | `internal/vectors`, `pkg/conformance`, `cmd/tos-vector-report`, `pkg/evidence` | Positive vectors and a self-verifying adversarial corpus exist at object, verify, StoredAck, and concrete E2EE layers. The deterministic evidence bundle now hands their exact hashes to an external consumer, and the strict signed report verifier proves which implementation key claimed to consume them. **Named gap:** no independent implementation has returned a qualifying report — the harness makes that evidence reproducible but cannot manufacture independence |
 | Independent multi-operator interoperability evidence | ⬜ | — | Needs a second implementation |
 
+The M0-R in-process RLDP interruption now binds evidence to the current
+transfer rather than polling client-wide cumulative statistics: it arms before
+the one `DoQuery`, requires an exact complete-part boundary, and starts the
+window by dropping the first inbound symbol of the following part. The sender
+cannot emit that symbol until the prior part was decoded and acknowledged, and
+success still requires counted suppression plus completion of the original
+query. This removes a sequence-dependent zero-loss false measurement found by
+repeated full-package testing; it does not add a single real-network sample or
+change the row's 🟡 status.
+
 ## Scenario acceptance — what "two agents can talk" actually requires
 
 The component table above tracks parts; a Messenger is accepted by scenarios.

@@ -55,18 +55,87 @@ type interruptibleADNL struct {
 	peer    adnl.Peer
 	until   atomic.Int64
 	dropped atomic.Uint64
+
+	interruptionMu sync.Mutex
+	armed          *rldpInterruption
 }
 
-func (a *interruptibleADNL) blocked() bool { return time.Now().UnixNano() < a.until.Load() }
-func (a *interruptibleADNL) block(window time.Duration) {
-	a.until.Store(time.Now().Add(window).UnixNano())
+type rldpInterruption struct {
+	window      time.Duration
+	triggerPart uint32
+	started     chan time.Time
+}
+
+// armInterruption makes the first inbound symbol at or after triggerPart
+// observable loss and starts the requested window at that drop. RLDP advances
+// to that part only after the preceding part was decoded and acknowledged.
+// Starting the clock before any traffic is due can create a quiet pause rather
+// than packet loss when the retransmission interval exceeds the window.
+func (a *interruptibleADNL) armInterruption(window time.Duration, triggerPart uint32) (*rldpInterruption, error) {
+	a.interruptionMu.Lock()
+	defer a.interruptionMu.Unlock()
+	if a.armed != nil || time.Now().UnixNano() < a.until.Load() {
+		return nil, errors.New("RLDP interruption already active")
+	}
+	armed := &rldpInterruption{window: window, triggerPart: triggerPart, started: make(chan time.Time, 1)}
+	a.armed = armed
+	return armed, nil
+}
+
+func (a *interruptibleADNL) disarmInterruption(armed *rldpInterruption) {
+	a.interruptionMu.Lock()
+	if a.armed == armed {
+		a.armed = nil
+	}
+	a.interruptionMu.Unlock()
+}
+
+func (a *interruptibleADNL) dropCustomMessage(message any, inbound bool) bool {
+	now := time.Now()
+	if now.UnixNano() < a.until.Load() {
+		a.dropped.Add(1)
+		return true
+	}
+	a.interruptionMu.Lock()
+	defer a.interruptionMu.Unlock()
+	// Recheck after taking the lock: another direction may have triggered the
+	// armed interruption between the optimistic check and this critical section.
+	now = time.Now()
+	if now.UnixNano() < a.until.Load() {
+		a.dropped.Add(1)
+		return true
+	}
+	if a.armed == nil {
+		return false
+	}
+	part, isPart := rldpMessagePart(message)
+	if !inbound || !isPart || part < a.armed.triggerPart {
+		return false
+	}
+	armed := a.armed
+	a.armed = nil
+	a.until.Store(now.Add(armed.window).UnixNano())
+	a.dropped.Add(1)
+	armed.started <- now
+	close(armed.started)
+	return true
+}
+
+func rldpMessagePart(message any) (uint32, bool) {
+	switch value := message.(type) {
+	case rldp.MessagePart:
+		return value.Part, true
+	case rldp.MessagePartV2:
+		return rldp.MessagePart(value).Part, true
+	default:
+		return 0, false
+	}
 }
 func (a *interruptibleADNL) RemoteAddr() string { return a.peer.RemoteAddr() }
 func (a *interruptibleADNL) GetID() []byte      { return a.peer.GetID() }
 func (a *interruptibleADNL) SetCustomMessageHandler(handler func(*adnl.MessageCustom) error) {
 	a.peer.SetCustomMessageHandler(func(message *adnl.MessageCustom) error {
-		if a.blocked() {
-			a.dropped.Add(1)
+		if a.dropCustomMessage(message.Data, true) {
 			return nil
 		}
 		return handler(message)
@@ -79,8 +148,7 @@ func (a *interruptibleADNL) GetDisconnectHandler() func(string, ed25519.PublicKe
 	return a.peer.GetDisconnectHandler()
 }
 func (a *interruptibleADNL) SendCustomMessage(ctx context.Context, message tl.Serializable) error {
-	if a.blocked() {
-		a.dropped.Add(1)
+	if a.dropCustomMessage(message, false) {
 		return nil
 	}
 	return a.peer.SendCustomMessage(ctx, message)
@@ -162,6 +230,9 @@ func validateRLDPPlan(plan RLDPTransferPlan) error {
 	if plan.InterruptAfterBytes < RLDPPartSizeBytes || plan.InterruptAfterBytes >= uint64(plan.PayloadBytes) {
 		return errors.New("RLDP interruption must follow one complete part and precede completion")
 	}
+	if plan.InterruptAfterBytes%RLDPPartSizeBytes != 0 {
+		return errors.New("RLDP interruption point must be an exact complete-part boundary")
+	}
 	if plan.Interruption < minRLDPInterruption || plan.Interruption > maxRLDPInterruption {
 		return errors.New("RLDP interruption must be between 100ms and 10s")
 	}
@@ -186,6 +257,21 @@ func runRLDPTransfer(ctx context.Context, session *rldpProbeSession, plan RLDPTr
 
 	queryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	var armed *rldpInterruption
+	before := session.transport.dropped.Load()
+	if plan.Interruption > 0 {
+		// RLDP sends part N+1 only after it receives the receiver's completion
+		// for part N. Arming before DoQuery and triggering on the first inbound
+		// symbol of that next part therefore binds the outage to this query's
+		// exact decoded-part boundary without polling process-wide statistics.
+		triggerPart := uint32(plan.InterruptAfterBytes / RLDPPartSizeBytes)
+		var err error
+		armed, err = session.transport.armInterruption(plan.Interruption, triggerPart)
+		if err != nil {
+			result.Failure = err.Error()
+			return result
+		}
+	}
 	done := make(chan error, 1)
 	var response rldpProbeResponse
 	started := time.Now()
@@ -194,47 +280,33 @@ func runRLDPTransfer(ctx context.Context, session *rldpProbeSession, plan RLDPTr
 			rldpProbeRequest{PayloadBytes: uint32(plan.PayloadBytes), Seed: seed}, &response)
 	}()
 
-	if plan.Interruption > 0 {
-		// A warmed-up loopback or LAN peer can send the next part within a few
-		// milliseconds. Sample faster than that boundary so completion cannot
-		// routinely outrun the requested after-part interruption.
-		ticker := time.NewTicker(100 * time.Microsecond)
-		defer ticker.Stop()
-		for {
+	if armed != nil {
+		select {
+		case <-queryCtx.Done():
+			session.transport.disarmInterruption(armed)
+			return result
+		case err := <-done:
+			session.transport.disarmInterruption(armed)
+			if err != nil {
+				result.Failure = err.Error()
+			} else {
+				result.Failure = "transfer completed before observable interruption"
+			}
+			return result
+		case interrupted := <-armed.started:
+			result.InterruptionAttempted = true
+			timer := time.NewTimer(time.Until(interrupted.Add(plan.Interruption)))
 			select {
 			case <-queryCtx.Done():
+				timer.Stop()
 				return result
-			case err := <-done:
-				if err != nil {
-					result.Failure = err.Error()
-				} else {
-					result.Failure = "transfer completed before the configured interruption point"
-				}
-				return result
-			case <-ticker.C:
-				stats := session.client.Stats()
-				if stats.Inbound.PayloadBytesDecoded < plan.InterruptAfterBytes || stats.Active.Requests == 0 {
-					continue
-				}
-				result.InterruptionAttempted = true
-				before := session.transport.dropped.Load()
-				interrupted := time.Now()
-				session.transport.block(plan.Interruption)
-				timer := time.NewTimer(plan.Interruption)
-				select {
-				case <-queryCtx.Done():
-					timer.Stop()
-					return result
-				case <-timer.C:
-				}
-				result.InterruptionMillis = uint64(time.Since(interrupted).Milliseconds())
-				result.SuppressedMessages = session.transport.dropped.Load() - before
-				goto await
+			case <-timer.C:
 			}
+			result.InterruptionMillis = uint64(time.Since(interrupted).Milliseconds())
 		}
+		result.SuppressedMessages = session.transport.dropped.Load() - before
 	}
 
-await:
 	err := <-done
 	elapsed := time.Since(started).Milliseconds()
 	if err != nil {

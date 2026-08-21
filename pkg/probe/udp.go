@@ -79,9 +79,11 @@ type Config struct {
 	EchoSizes []int
 	// RLDPTransfers asks for exact large-response round trips over RLDPv2 after
 	// the bounded ADNL echo phase. Each plan is measured by one uninterrupted
-	// DoQuery: when interruption is requested, the collector first observes a
-	// complete RLDP part, suppresses both directions of RLDP custom messages for
-	// the requested window, and accepts recovery only if that SAME query later
+	// DoQuery: when interruption is requested, the in-process collector arms an
+	// exact complete-part boundary and starts the loss window by dropping the
+	// first inbound symbol of the next part. The sender cannot emit that symbol
+	// until it has the prior part's completion acknowledgement. Both directions
+	// are then suppressed, and recovery counts only if that SAME query later
 	// returns the exact deterministic payload. The native sidecar currently
 	// accepts the decision-bearing profile that interrupts after exactly its
 	// first 2,000,000-byte decoded part.
