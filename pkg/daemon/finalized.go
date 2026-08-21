@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"errors"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/securefile"
 	"github.com/tosnetwork/tos-messenger/pkg/chainagent"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/agentpacket"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 )
 
@@ -16,6 +19,35 @@ type delegationVerifier interface {
 }
 
 type finalizedVerifier struct{}
+
+type finalizedPacketResolver struct {
+	resolver identity.AgentResolver
+	policy   identity.ChainPolicy
+	network  *nativev1.NetworkDomain
+}
+
+func (r finalizedPacketResolver) ResolveAgent(agentID string) (*nativev1.AgentStateV1, bool, error) {
+	if r.resolver == nil {
+		return nil, false, errors.New("no finalized Agent Packet resolver")
+	}
+	state, found, err := r.resolver.ResolveAgent(agentID)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	agent, err := identity.CheckState(r.policy, r.network, agentID, state)
+	if err != nil {
+		return nil, false, err
+	}
+	return agent, true, nil
+}
+
+func newFinalizedPacketResolver(config Config) (agentpacket.AgentResolver, error) {
+	resolver, policy, err := finalizedResolver(config)
+	if err != nil {
+		return nil, err
+	}
+	return finalizedPacketResolver{resolver: resolver, policy: policy, network: config.Network()}, nil
+}
 
 func (finalizedVerifier) Verify(config Config, now time.Time) (identity.Delegation, error) {
 	resolver, policy, err := finalizedResolver(config)

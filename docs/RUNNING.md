@@ -138,14 +138,19 @@ nobody made:
   for what it reaches on its own initiative, and a tighter one for anything a
   received message drove. Neither may be raised to a key or to this
   installation's own configuration, whatever an operator writes; and
-- the **transport**, which today can only be `"none"`.
+- the **transport**, which today can only be `"none"`; and
+- an optional owner-private **Agent Packet receiver socket**. When configured,
+  admitted `agent.packet` Events are re-verified against finalized Agent state,
+  durably nonce-claimed, and sent to the independently verifying OpenFox
+  provider. They are excluded from the general runtime inbox, so packet bytes
+  cannot become model instructions by taking the ordinary message path.
 
 An unknown key in the configuration is refused rather than ignored. A
 misspelled setting that is silently dropped is a setting an operator believes
 is in force.
 
 `docs/daemon-config.example.json` is a complete file with placeholder values.
-Explicit inbox admission makes this schema `tos.messaging.daemon-config.v5`;
+The typed Agent Packet adapter makes this schema `tos.messaging.daemon-config.v6`;
 older files are rejected instead of silently disabling discovery or public
 generation planning, or applying an inbox policy the endpoint never committed.
 

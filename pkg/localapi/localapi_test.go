@@ -334,6 +334,37 @@ func TestRuntimeDrainsTheInbox(t *testing.T) {
 	}
 }
 
+func TestRuntimeCannotListOrClaimDaemonOwnedAgentPacket(t *testing.T) {
+	h := newHarness(t)
+	packetBody, err := payload.Encode(payload.AgentPacketMessage{Foreign: payload.Foreign{
+		Protocol: "agentpacket", Version: "1", Body: []byte("{}"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packetEvent, err := envelope.NewEvent(envelope.Event{
+		Network: testNetwork(), ConversationID: convoID,
+		SenderAgentID: senderID, SenderEndpointID: senderMEP, SenderDeviceID: senderDev,
+		CreatedAtUnix: baseUnix, Kind: "agent.packet", Content: packetBody,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.receive(t, packetEvent)
+	textEvent := h.event(t, "still visible")
+	h.receive(t, textEvent)
+
+	listing := h.call(t, Request{Op: OpPending, Limit: 1})
+	if !listing.OK || len(listing.Events) != 1 || listing.Events[0].EventID != textEvent.EventID {
+		t.Fatalf("typed packet hid or entered the runtime listing: %+v", listing)
+	}
+	claimed := h.call(t, Request{Op: OpClaim, EventID: packetEvent.EventID,
+		LeaseID: leaseID, LeaseSeconds: 60})
+	if claimed.OK || claimed.Code != fault.CodeClassNotDelegated {
+		t.Fatalf("runtime claimed daemon-owned Agent Packet: %+v", claimed)
+	}
+}
+
 func TestRejectedEventIsNotOfferedAgain(t *testing.T) {
 	h := newHarness(t)
 	event := h.event(t, "hello")

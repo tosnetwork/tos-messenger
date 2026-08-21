@@ -12,10 +12,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/agentpacketbridge"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
+	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
 )
 
@@ -37,16 +40,18 @@ type Observer interface {
 
 // Daemon is one running installation.
 type Daemon struct {
-	config    Config
-	journal   *eventlog.Journal
-	dispatch  *dispatch.Dispatcher
-	server    *localapi.Server
-	listener  net.Listener
-	owner     net.Listener
-	salt      []byte
-	observer  Observer
-	discovery *discoveryRuntime
-	prekeys   *prekeyRuntime
+	config       Config
+	journal      *eventlog.Journal
+	dispatch     *dispatch.Dispatcher
+	server       *localapi.Server
+	listener     net.Listener
+	owner        net.Listener
+	salt         []byte
+	observer     Observer
+	discovery    *discoveryRuntime
+	prekeys      *prekeyRuntime
+	agentPackets *agentpacketbridge.Bridge
+	now          func() time.Time
 
 	closeOnce sync.Once
 }
@@ -94,7 +99,7 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 	if err != nil {
 		return nil, err
 	}
-	instance := &Daemon{config: config, journal: journal, observer: observer}
+	instance := &Daemon{config: config, journal: journal, observer: observer, now: time.Now}
 	delegation, err := verifier.Verify(config, time.Now())
 	if err != nil {
 		_ = journal.Close()
@@ -148,6 +153,27 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		return nil, err
 	}
 	instance.server = server
+	if config.AgentPacketReceiverSocket != "" {
+		resolver, resolverErr := newFinalizedPacketResolver(config)
+		if resolverErr != nil {
+			_ = journal.Close()
+			return nil, errors.New("build Agent Packet resolver: " + resolverErr.Error())
+		}
+		receiver, receiverErr := agentpacketbridge.NewUnixReceiver(
+			config.AgentPacketReceiverSocket, config.AgentPacketReceiverTimeout())
+		if receiverErr != nil {
+			_ = journal.Close()
+			return nil, receiverErr
+		}
+		bridge, bridgeErr := agentpacketbridge.New(agentpacketbridge.Config{
+			Resolver: resolver, Journal: journal, Receiver: receiver, RecipientAgentID: config.AgentID,
+		})
+		if bridgeErr != nil {
+			_ = journal.Close()
+			return nil, bridgeErr
+		}
+		instance.agentPackets = bridge
+	}
 	discovery, err := builder.Build(config, journal, observer)
 	if err != nil {
 		_ = journal.Close()
@@ -296,6 +322,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}()
 		}
 	}
+	if d.agentPackets != nil {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			d.runAgentPackets(ctx)
+		}()
+	}
 
 	group.Add(1)
 	go func() {
@@ -313,6 +346,78 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	group.Wait()
 	return d.Close()
+}
+
+func (d *Daemon) runAgentPackets(ctx context.Context) {
+	ticker := time.NewTicker(d.config.SweepInterval())
+	defer ticker.Stop()
+	for {
+		d.sweepAgentPackets(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// sweepAgentPackets consumes only the typed daemon-owned application class.
+// The kind check and lease acquisition are one journal operation, so a stale
+// listing cannot make this adapter take ordinary runtime work.
+func (d *Daemon) sweepAgentPackets(ctx context.Context) {
+	nowFn := d.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	records, err := d.journal.ListPending(nowFn(), 0)
+	if err != nil {
+		d.report("list Agent Packets", err)
+		return
+	}
+	for _, record := range records {
+		if ctx.Err() != nil {
+			return
+		}
+		raw, err := record.Payload()
+		if err != nil {
+			continue
+		}
+		event, err := envelope.DecodeEventJSON(raw)
+		if err != nil || event.Kind != "agent.packet" {
+			continue
+		}
+		decoded, err := payload.Decode(event.Kind, event.Content)
+		body, ok := decoded.(payload.AgentPacketMessage)
+		if err != nil || !ok {
+			d.report("decode Agent Packet", errors.New("invalid admitted Agent Packet payload"))
+			continue
+		}
+		var entropy [32]byte
+		if _, err := rand.Read(entropy[:]); err != nil {
+			d.report("claim Agent Packet", err)
+			return
+		}
+		leaseID, err := eventlog.NewLeaseID(entropy[:])
+		if err != nil {
+			d.report("claim Agent Packet", err)
+			return
+		}
+		now := nowFn()
+		lease := d.config.AgentPacketReceiverTimeout() + 5*time.Second
+		if _, err := d.journal.ClaimForApplicationKind(record.EventID, leaseID, now, lease, "agent.packet"); err != nil {
+			if !errors.Is(err, eventlog.ErrLeaseMismatch) && !errors.Is(err, eventlog.ErrNotPending) {
+				d.report("claim Agent Packet", err)
+			}
+			continue
+		}
+		if err := d.agentPackets.Handle(ctx, event.SenderAgentID, body, now); err != nil {
+			d.report("deliver Agent Packet", err)
+			continue
+		}
+		if _, err := d.journal.CompleteApplication(record.EventID, leaseID, nowFn()); err != nil {
+			d.report("complete Agent Packet", err)
+		}
+	}
 }
 
 // Close releases the state directory and removes the socket.

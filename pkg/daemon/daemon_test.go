@@ -17,6 +17,7 @@ import (
 
 	"github.com/tosnetwork/tos-messenger/internal/dirlock"
 	"github.com/tosnetwork/tos-messenger/internal/securefile"
+	"github.com/tosnetwork/tos-messenger/pkg/agentpacketbridge"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
@@ -24,6 +25,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/agentpacket"
 )
 
 // A real, if trivial, contract code cell. The account binding is recomputed
@@ -97,6 +99,26 @@ type recorder struct {
 	swept      []dispatch.Summary
 	maintained int
 	failures   []string
+}
+
+type packetStates map[string]*nativev1.AgentStateV1
+
+func (s packetStates) ResolveAgent(id string) (*nativev1.AgentStateV1, bool, error) {
+	state, ok := s[id]
+	return state, ok, nil
+}
+
+type packetReceiver struct {
+	calls int
+	fail  bool
+}
+
+func (r *packetReceiver) Receive(context.Context, agentpacket.Packet) error {
+	r.calls++
+	if r.fail {
+		return errors.New("provider unavailable")
+	}
+	return nil
 }
 
 type fakeDirectoryRunner struct {
@@ -561,11 +583,21 @@ func TestConfigurationMustBeStated(t *testing.T) {
 		"registry code that does not hash to its pin": func(c *Config) {
 			c.Registries[0].CodeHash = "tvm-cell-sha256:" + strings.Repeat("a", 64)
 		},
-		"registry with no code": func(c *Config) { c.Registries[0].CodeBOC = "" },
-		"no transport":          func(c *Config) { c.Transport = "" },
-		"unknown transport":     func(c *Config) { c.Transport = "adnl" },
-		"fast sweep":            func(c *Config) { c.SweepIntervalSeconds = 0; c.SweepIntervalSeconds = 0 },
-		"short retention":       func(c *Config) { c.RetentionSeconds = 60 },
+		"registry with no code":         func(c *Config) { c.Registries[0].CodeBOC = "" },
+		"no transport":                  func(c *Config) { c.Transport = "" },
+		"unknown transport":             func(c *Config) { c.Transport = "adnl" },
+		"packet timeout without socket": func(c *Config) { c.AgentPacketReceiverTimeoutSeconds = 30 },
+		"relative packet receiver":      func(c *Config) { c.AgentPacketReceiverSocket = "run/provider.sock" },
+		"packet receiver in state": func(c *Config) {
+			c.AgentPacketReceiverSocket = filepath.Join(c.StateDir, "provider.sock")
+		},
+		"packet receiver shares runtime": func(c *Config) { c.AgentPacketReceiverSocket = c.SocketPath },
+		"packet receiver timeout too long": func(c *Config) {
+			c.AgentPacketReceiverSocket = filepath.Join(filepath.Dir(c.SocketPath), "provider.sock")
+			c.AgentPacketReceiverTimeoutSeconds = 301
+		},
+		"fast sweep":      func(c *Config) { c.SweepIntervalSeconds = 0; c.SweepIntervalSeconds = 0 },
+		"short retention": func(c *Config) { c.RetentionSeconds = 60 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -724,5 +756,98 @@ func TestRuntimeAndOwnerSocketsAreSeparate(t *testing.T) {
 	}
 	if response := call(t, config.OwnerSocketPath, localapi.Request{Op: localapi.OpPending}); response.OK {
 		t.Fatal("the owner socket drained the runtime inbox")
+	}
+}
+
+func TestAgentPacketWorkerRetriesProviderAndCompletesDurably(t *testing.T) {
+	config := testConfig(t)
+	clock := time.Unix(1_900_000_000, 0)
+	sender := "agent_" + strings.Repeat("1", 64)
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x51}, ed25519.SeedSize))
+	states := packetStates{
+		sender:         {AgentId: sender, Policy: &nativev1.ControllerPolicyV1{Controllers: []*nativev1.ControllerV1{{Ed25519PublicKey: key.Public().(ed25519.PublicKey)}}}},
+		config.AgentID: {AgentId: config.AgentID},
+	}
+	journal, err := eventlog.Open(config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := &packetReceiver{fail: true}
+	bridge, err := agentpacketbridge.New(agentpacketbridge.Config{
+		Resolver: states, Journal: journal, Receiver: receiver, RecipientAgentID: config.AgentID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nonce [32]byte
+	copy(nonce[:], bytes.Repeat([]byte{0x27}, len(nonce)))
+	packet, err := agentpacket.Sign(agentpacket.Packet{
+		SenderAgentID: sender, RecipientAgentID: config.AgentID,
+		CapabilityID: "cap_" + strings.Repeat("3", 64), Sequence: 1, Nonce: nonce,
+		Payload: []byte("execute once"), CreatedAtUnix: uint64(clock.Unix()),
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := agentpacket.EncodeJSON(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := payload.Encode(payload.AgentPacketMessage{Foreign: payload.Foreign{
+		Protocol: "agentpacket", Version: "1", Body: wire,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := envelope.NewEvent(envelope.Event{
+		Network: config.Network(), ConversationID: "conv_" + strings.Repeat("8", 64),
+		SenderAgentID: sender, SenderEndpointID: "mep_" + strings.Repeat("6", 64),
+		SenderDeviceID: "dev_" + strings.Repeat("7", 64), CreatedAtUnix: uint64(clock.Unix()),
+		Kind: "agent.packet", Content: content,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventWire, _ := envelope.EncodeEventJSON(event)
+	if _, _, err := journal.Accept(eventlog.Entry{
+		EventID: event.EventID, SenderEndpointID: event.SenderEndpointID,
+		ConversationID: event.ConversationID, Payload: eventWire,
+		Admission: eventlog.AdmissionAdmitted, ReceivedAtUnix: uint64(clock.Unix()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reported := &recorder{}
+	daemon := &Daemon{config: config, journal: journal, agentPackets: bridge, observer: reported, now: func() time.Time { return clock }}
+	daemon.sweepAgentPackets(context.Background())
+	if receiver.calls != 1 || len(reported.failures) != 1 {
+		t.Fatalf("provider failure was not retained for retry: calls=%d failures=%v", receiver.calls, reported.failures)
+	}
+
+	receiver.fail = false
+	clock = clock.Add(config.AgentPacketReceiverTimeout() + 6*time.Second)
+	daemon.sweepAgentPackets(context.Background())
+	if receiver.calls != 2 {
+		t.Fatalf("expired application lease was not retried: calls=%d", receiver.calls)
+	}
+	if pending, err := journal.ListPending(clock, 0); err != nil || len(pending) != 0 {
+		t.Fatalf("completed Agent Packet remained pending: %+v err=%v", pending, err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := eventlog.Open(config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	afterRestart := &packetReceiver{}
+	restartedBridge, _ := agentpacketbridge.New(agentpacketbridge.Config{
+		Resolver: states, Journal: reopened, Receiver: afterRestart, RecipientAgentID: config.AgentID,
+	})
+	restarted := &Daemon{config: config, journal: reopened, agentPackets: restartedBridge, now: func() time.Time { return clock }}
+	restarted.sweepAgentPackets(context.Background())
+	if afterRestart.calls != 0 {
+		t.Fatal("completed Agent Packet reached the provider again after restart")
 	}
 }

@@ -219,7 +219,10 @@ func (s *Server) pending(request Request, now time.Time) Response {
 	if limit == 0 || limit > MaxEventsPerResponse {
 		limit = MaxEventsPerResponse
 	}
-	records, err := s.config.Journal.ListPending(now, limit)
+	// Fetch the complete bounded journal view before filtering. Otherwise a
+	// page filled by daemon-owned typed packets could hide ordinary messages
+	// that follow it from the runtime indefinitely.
+	records, err := s.config.Journal.ListPending(now, 0)
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
 	}
@@ -232,14 +235,21 @@ func (s *Server) pending(request Request, now time.Time) Response {
 			// delivered.
 			continue
 		}
+		decoded, err := envelope.DecodeEventJSON(event.Event)
+		if err != nil || decoded.Kind == "agent.packet" {
+			continue
+		}
 		events = append(events, event)
+		if len(events) == limit {
+			break
+		}
 	}
 	return Response{OK: true, Events: events}
 }
 
 func (s *Server) claim(request Request, now time.Time) Response {
-	record, err := s.config.Journal.ClaimForApplication(request.EventID, request.LeaseID, now,
-		time.Duration(request.LeaseSeconds)*time.Second)
+	record, err := s.config.Journal.ClaimForApplicationExceptKind(request.EventID, request.LeaseID, now,
+		time.Duration(request.LeaseSeconds)*time.Second, "agent.packet")
 	if err != nil {
 		return refuse(claimCode(err), err)
 	}
@@ -383,6 +393,8 @@ func claimCode(err error) fault.Code {
 	case errors.Is(err, eventlog.ErrLeaseMismatch), errors.Is(err, eventlog.ErrNotPending),
 		errors.Is(err, eventlog.ErrNotAdmitted):
 		return fault.CodeReplayed
+	case errors.Is(err, eventlog.ErrApplicationKind):
+		return fault.CodeClassNotDelegated
 	default:
 		return fault.CodeInternal
 	}

@@ -33,7 +33,7 @@ import (
 )
 
 // ConfigSchema is the strict schema of a daemon configuration.
-const ConfigSchema = "tos.messaging.daemon-config.v5"
+const ConfigSchema = "tos.messaging.daemon-config.v6"
 
 // PublicationMode names the route-independent public material maintained by
 // this installation. It does not select an HTTPS, DHT, or message transport.
@@ -166,6 +166,13 @@ type Config struct {
 	// Transport must be stated. There is no default, because a daemon that
 	// quietly carried nothing would look like a working one.
 	Transport TransportMode `json:"transport"`
+
+	// AgentPacketReceiverSocket enables the daemon-owned typed Agent Packet
+	// adapter. Packets are verified and durably claimed here, then handed to an
+	// independently verifying OpenFox provider over this private Unix socket;
+	// they are never exposed through the general runtime inbox.
+	AgentPacketReceiverSocket         string `json:"agent_packet_receiver_socket,omitempty"`
+	AgentPacketReceiverTimeoutSeconds uint64 `json:"agent_packet_receiver_timeout_seconds,omitempty"`
 
 	SweepIntervalSeconds       uint64 `json:"sweep_interval_seconds,omitempty"`
 	MaintenanceIntervalSeconds uint64 `json:"maintenance_interval_seconds,omitempty"`
@@ -542,6 +549,13 @@ func (c Config) Retention() time.Duration {
 	return time.Duration(c.RetentionSeconds) * time.Second
 }
 
+func (c Config) AgentPacketReceiverTimeout() time.Duration {
+	if c.AgentPacketReceiverTimeoutSeconds == 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.AgentPacketReceiverTimeoutSeconds) * time.Second
+}
+
 // Validate enforces what must be true before anything starts.
 func (c Config) Validate() error {
 	if c.Schema != ConfigSchema {
@@ -611,6 +625,25 @@ func (c Config) Validate() error {
 	}
 	if _, known := transports[c.Transport]; !known {
 		return errors.New("transport must be stated explicitly")
+	}
+	if c.AgentPacketReceiverSocket == "" {
+		if c.AgentPacketReceiverTimeoutSeconds != 0 {
+			return errors.New("Agent Packet receiver timeout requires a receiver socket")
+		}
+	} else {
+		if !filepath.IsAbs(c.AgentPacketReceiverSocket) || filepath.Clean(c.AgentPacketReceiverSocket) != c.AgentPacketReceiverSocket {
+			return errors.New("agent_packet_receiver_socket must be an absolute, clean path")
+		}
+		if c.AgentPacketReceiverSocket == c.SocketPath || c.AgentPacketReceiverSocket == c.OwnerSocketPath ||
+			(c.Publication.DeviceSocketPath != "" && c.AgentPacketReceiverSocket == c.Publication.DeviceSocketPath) {
+			return errors.New("Agent Packet receiver socket must be independent")
+		}
+		if pathWithin(c.AgentPacketReceiverSocket, c.StateDir) {
+			return errors.New("Agent Packet receiver socket must not live inside state_dir")
+		}
+		if timeout := c.AgentPacketReceiverTimeout(); timeout < time.Second || timeout > 5*time.Minute {
+			return errors.New("Agent Packet receiver timeout is outside 1s..5m")
+		}
 	}
 	if c.SweepInterval() < MinSweepInterval {
 		return errors.New("sweep interval is below its floor")

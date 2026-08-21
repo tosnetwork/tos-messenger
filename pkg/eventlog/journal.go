@@ -156,6 +156,12 @@ var ErrNotAdmitted = errors.New("event has not been admitted")
 // rather than applied twice.
 var ErrLeaseMismatch = errors.New("application lease does not hold this event")
 
+// ErrApplicationKind reports that a caller tried to claim an event reserved
+// for another application adapter. In particular, typed Agent Packets belong
+// to the daemon-owned provider bridge rather than to the general Agent
+// runtime.
+var ErrApplicationKind = errors.New("event belongs to another application adapter")
+
 // Entry is an inbound event to record.
 type Entry struct {
 	EventID          string
@@ -489,6 +495,29 @@ func (j *Journal) ListPending(now time.Time, limit int) ([]Record, error) {
 // event under a live lease may not, which is what stops two attempts from
 // calling the same tool or asking for the same approval twice.
 func (j *Journal) ClaimForApplication(eventID, leaseID string, now time.Time, lease time.Duration) (Record, error) {
+	return j.claimForApplicationKind(eventID, leaseID, now, lease, "", false)
+}
+
+// ClaimForApplicationKind atomically leases an event only when its decoded
+// kind is exactly kind. This prevents a general runtime and a typed daemon
+// adapter from racing after both observed the same pending listing.
+func (j *Journal) ClaimForApplicationKind(eventID, leaseID string, now time.Time, lease time.Duration, kind string) (Record, error) {
+	if kind == "" {
+		return Record{}, errors.New("application event kind is required")
+	}
+	return j.claimForApplicationKind(eventID, leaseID, now, lease, kind, true)
+}
+
+// ClaimForApplicationExceptKind atomically leases an event unless it carries
+// the reserved kind. It is the claim primitive exposed to the general runtime.
+func (j *Journal) ClaimForApplicationExceptKind(eventID, leaseID string, now time.Time, lease time.Duration, kind string) (Record, error) {
+	if kind == "" {
+		return Record{}, errors.New("excluded application event kind is required")
+	}
+	return j.claimForApplicationKind(eventID, leaseID, now, lease, kind, false)
+}
+
+func (j *Journal) claimForApplicationKind(eventID, leaseID string, now time.Time, lease time.Duration, kind string, require bool) (Record, error) {
 	if err := j.usable(); err != nil {
 		return Record{}, err
 	}
@@ -515,6 +544,22 @@ func (j *Journal) ClaimForApplication(eventID, leaseID string, now time.Time, le
 			return Record{}, ErrUnknown
 		}
 		return Record{}, err
+	}
+	if kind != "" {
+		payload, payloadErr := record.Payload()
+		if payloadErr != nil {
+			return Record{}, payloadErr
+		}
+		var document struct {
+			Kind string `json:"event_kind"`
+		}
+		if json.Unmarshal(payload, &document) != nil || document.Kind == "" {
+			return Record{}, errors.New("stored event has no application kind")
+		}
+		matches := document.Kind == kind
+		if matches != require {
+			return Record{}, ErrApplicationKind
+		}
 	}
 	if record.Admission != AdmissionAdmitted {
 		return Record{}, ErrNotAdmitted
