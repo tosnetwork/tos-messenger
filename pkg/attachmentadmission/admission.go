@@ -82,6 +82,12 @@ func New(config Config) (*Admitter, error) {
 			return nil, errors.New("attachment admission launcher does not match its configured digest")
 		}
 	}
+	if config.ContentPolicy.Cgroup != nil {
+		actual, err := attachments.ExecutableDigest("/usr/bin/systemd-run")
+		if err != nil || actual != config.ContentPolicy.Cgroup.SystemdRunDigest {
+			return nil, errors.New("attachment admission cgroup launcher does not match its configured digest")
+		}
+	}
 	for _, scanner := range config.ContentPolicy.Scanners {
 		actual, err := attachments.ExecutableDigest(scanner.Executable)
 		if err != nil || actual != scanner.ExecutableDigest {
@@ -91,6 +97,10 @@ func New(config Config) (*Admitter, error) {
 	config.OpenPolicy.AllowedMediaTypes = cloneMediaTypes(config.OpenPolicy.AllowedMediaTypes)
 	config.ContentPolicy.AllowedMediaTypes = cloneMediaTypes(config.ContentPolicy.AllowedMediaTypes)
 	config.ContentPolicy.Scanners = append([]attachments.ScannerSpec(nil), config.ContentPolicy.Scanners...)
+	if config.ContentPolicy.Cgroup != nil {
+		cgroup := *config.ContentPolicy.Cgroup
+		config.ContentPolicy.Cgroup = &cgroup
+	}
 	for index := range config.ContentPolicy.Scanners {
 		config.ContentPolicy.Scanners[index].Args = append([]string(nil), config.ContentPolicy.Scanners[index].Args...)
 	}

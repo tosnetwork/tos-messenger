@@ -3,6 +3,7 @@ package attachments
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -34,6 +35,7 @@ const (
 	defaultMaxProcesses   = 4096
 	bubblewrapPath        = "/usr/bin/bwrap"
 	prlimitPath           = "/usr/bin/prlimit"
+	systemdRunPath        = "/usr/bin/systemd-run"
 )
 
 var scannerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9.-]{0,63}$`)
@@ -49,6 +51,15 @@ type ScannerSpec struct {
 	Args             []string
 }
 
+// ScannerCgroupPolicy adds a separate kernel-accounted cgroup around one
+// scanner invocation. MemorySwapMax is deliberately fixed to zero and core
+// dumps are always disabled; callers cannot weaken either invariant.
+type ScannerCgroupPolicy struct {
+	SystemdRunDigest string
+	MemoryMaxBytes   uint64
+	TasksMax         uint64
+}
+
 // AgentContentPolicy is the fail-closed boundary between authenticated
 // plaintext and Agent/model consumption. Bubblewrap and prlimit are pinned as
 // part of the local policy because an untrusted launcher is not a sandbox.
@@ -62,6 +73,7 @@ type AgentContentPolicy struct {
 	AddressSpaceBytes uint64
 	CPUSeconds        uint64
 	MaxProcesses      uint64
+	Cgroup            *ScannerCgroupPolicy
 }
 
 type ScanDecision string
@@ -102,7 +114,8 @@ type AdmittedAttachment struct {
 
 // OpenForAgent authenticates and decrypts an attachment, then releases it only
 // after every pinned scanner permits the exact plaintext inside a networkless,
-// read-only bubblewrap namespace with prlimit resource ceilings.
+// read-only bubblewrap namespace with prlimit resource ceilings and, when the
+// explicit hard-isolation profile is configured, a separate cgroup v2 unit.
 func OpenForAgent(ctx context.Context, ref Reference, chunks []Chunk, openPolicy Policy,
 	contentPolicy AgentContentPolicy, now time.Time) (AdmittedAttachment, error) {
 	if ctx == nil {
@@ -144,6 +157,14 @@ func admitPlaintext(ctx context.Context, plaintext []byte, metadata Metadata, po
 	if err != nil {
 		return AdmissionReport{}, fmt.Errorf("stage prlimit: %w", err)
 	}
+	cgroupLauncherPath := ""
+	if policy.Cgroup != nil {
+		cgroupLauncherPath, err = stagePinnedExecutable(directory, "systemd-run", systemdRunPath,
+			policy.Cgroup.SystemdRunDigest)
+		if err != nil {
+			return AdmissionReport{}, fmt.Errorf("stage cgroup launcher: %w", err)
+		}
+	}
 	input, err := newSealedScanInput(plaintext)
 	if err != nil {
 		return AdmissionReport{}, err
@@ -160,7 +181,8 @@ func admitPlaintext(ctx context.Context, plaintext []byte, metadata Metadata, po
 		if err != nil {
 			return AdmissionReport{}, err
 		}
-		verdict, err := runSandboxedScanner(ctx, input, sandboxPath, resourceLimiterPath, scannerPath, scanner, metadata,
+		verdict, err := runSandboxedScanner(ctx, input, sandboxPath, resourceLimiterPath, cgroupLauncherPath,
+			scannerPath, scanner, metadata,
 			digest, uint64(len(plaintext)), policy)
 		if err != nil {
 			return AdmissionReport{}, err
@@ -244,6 +266,18 @@ func ValidateAgentContentPolicy(policy AgentContentPolicy) error {
 	if maxProcesses < 64 || maxProcesses > 65535 {
 		return errors.New("attachment scanner process limit is outside its bound")
 	}
+	if policy.Cgroup != nil {
+		if !canon.ValidDigest(policy.Cgroup.SystemdRunDigest) {
+			return errors.New("attachment scanner cgroup policy must pin systemd-run")
+		}
+		if policy.Cgroup.MemoryMaxBytes < 64<<20 || policy.Cgroup.MemoryMaxBytes > 4<<30 ||
+			policy.Cgroup.MemoryMaxBytes > addressSpace {
+			return errors.New("attachment scanner cgroup memory limit is outside its bound")
+		}
+		if policy.Cgroup.TasksMax < 8 || policy.Cgroup.TasksMax > 4096 || policy.Cgroup.TasksMax > maxProcesses {
+			return errors.New("attachment scanner cgroup task limit is outside its bound")
+		}
+	}
 	previous := ""
 	for _, scanner := range policy.Scanners {
 		if !scannerIDPattern.MatchString(scanner.ID) || scanner.ID <= previous ||
@@ -262,7 +296,7 @@ func ValidateAgentContentPolicy(policy AgentContentPolicy) error {
 }
 
 func runSandboxedScanner(parent context.Context, input *os.File, sandboxPath, resourceLimiterPath,
-	scannerPath string, scanner ScannerSpec,
+	cgroupLauncherPath, scannerPath string, scanner ScannerSpec,
 	metadata Metadata, plaintextDigest string, plaintextBytes uint64, policy AgentContentPolicy) (ScanVerdict, error) {
 	if _, err := input.Seek(0, 0); err != nil {
 		return ScanVerdict{}, errors.New("rewind attachment scanner input")
@@ -286,7 +320,8 @@ func runSandboxedScanner(parent context.Context, input *os.File, sandboxPath, re
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	arguments := []string{
-		"--die-with-parent", "--new-session", "--unshare-all", "--cap-drop", "ALL", "--clearenv",
+		"--die-with-parent", "--new-session", "--unshare-user", "--unshare-ipc", "--unshare-pid",
+		"--unshare-net", "--unshare-uts", "--cap-drop", "ALL", "--clearenv",
 		"--setenv", "GOMEMLIMIT", "256MiB", "--setenv", "GOMAXPROCS", "2",
 		"--ro-bind", "/usr", "/usr", "--ro-bind-try", "/lib", "/lib",
 		"--ro-bind-try", "/lib64", "/lib64", "--proc", "/proc", "--dev", "/dev",
@@ -299,8 +334,10 @@ func runSandboxedScanner(parent context.Context, input *os.File, sandboxPath, re
 	arguments = append(arguments, scanner.Args...)
 	arguments = append(arguments, "--tos-scanner-id", scanner.ID, "--tos-declared-media-type", metadata.MediaType,
 		"--tos-input", "/work/input")
-	command := exec.CommandContext(ctx, sandboxPath, arguments...)
-	command.Env = []string{}
+	command, err := scannerCommand(ctx, cgroupLauncherPath, sandboxPath, arguments, timeout, policy.Cgroup)
+	if err != nil {
+		return ScanVerdict{}, err
+	}
 	command.Dir = "/"
 	command.Stdin = input
 	command.WaitDelay = time.Second
@@ -327,6 +364,45 @@ func runSandboxedScanner(parent context.Context, input *os.File, sandboxPath, re
 		return ScanVerdict{}, fmt.Errorf("attachment scanner %s verdict does not bind the admitted content", scanner.ID)
 	}
 	return verdict, nil
+}
+
+func scannerCommand(ctx context.Context, cgroupLauncherPath, sandboxPath string, sandboxArguments []string,
+	timeout time.Duration, cgroup *ScannerCgroupPolicy) (*exec.Cmd, error) {
+	if cgroup == nil {
+		command := exec.CommandContext(ctx, sandboxPath, sandboxArguments...)
+		command.Env = []string{}
+		return command, nil
+	}
+	if cgroupLauncherPath == "" {
+		return nil, errors.New("attachment scanner cgroup launcher is missing")
+	}
+	runtimeDirectory := os.Getenv("XDG_RUNTIME_DIR")
+	if !filepath.IsAbs(runtimeDirectory) || filepath.Clean(runtimeDirectory) != runtimeDirectory {
+		return nil, errors.New("attachment scanner cgroup needs a clean user runtime directory")
+	}
+	info, err := os.Lstat(runtimeDirectory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("attachment scanner cgroup user runtime directory is unsafe")
+	}
+	var nonce [16]byte
+	if _, err := io.ReadFull(rand.Reader, nonce[:]); err != nil {
+		return nil, errors.New("create attachment scanner cgroup identity")
+	}
+	unit := "tos-attachment-scan-" + hex.EncodeToString(nonce[:]) + ".service"
+	arguments := []string{
+		"--user", "--wait", "--pipe", "--collect", "--quiet", "--service-type=exec", "--unit=" + unit,
+		"--description=TOS attachment scanner sandbox",
+		"--property=MemoryAccounting=yes", fmt.Sprintf("--property=MemoryMax=%d", cgroup.MemoryMaxBytes),
+		"--property=MemorySwapMax=0", "--property=TasksAccounting=yes",
+		fmt.Sprintf("--property=TasksMax=%d", cgroup.TasksMax), "--property=LimitCORE=0",
+		"--property=NoNewPrivileges=yes", "--property=KillMode=control-group", "--property=SendSIGKILL=yes",
+		"--property=OOMPolicy=stop", "--property=UMask=0077",
+		"--property=RuntimeMaxSec=" + timeout.String(), "--property=TimeoutStopSec=1s", "--", sandboxPath,
+	}
+	arguments = append(arguments, sandboxArguments...)
+	command := exec.CommandContext(ctx, cgroupLauncherPath, arguments...)
+	command.Env = []string{"XDG_RUNTIME_DIR=" + runtimeDirectory}
+	return command, nil
 }
 
 func decodeScanVerdict(raw []byte) (ScanVerdict, error) {

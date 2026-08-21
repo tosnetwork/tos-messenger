@@ -199,18 +199,25 @@ type AttachmentScannerConfig struct {
 	Args             []string `json:"args,omitempty"`
 }
 
+type AttachmentScannerCgroupConfig struct {
+	SystemdRunDigest string `json:"systemd_run_digest"`
+	MemoryMaxBytes   uint64 `json:"memory_max_bytes"`
+	TasksMax         uint64 `json:"tasks_max"`
+}
+
 type AttachmentAdmissionConfig struct {
-	MaxPlaintextBytes          uint64                    `json:"max_plaintext_bytes"`
-	AllowedMediaTypes          []string                  `json:"allowed_media_types"`
-	Scanners                   []AttachmentScannerConfig `json:"scanners"`
-	BubblewrapDigest           string                    `json:"bubblewrap_digest"`
-	PrlimitDigest              string                    `json:"prlimit_digest"`
-	ScannerTimeoutSeconds      uint64                    `json:"scanner_timeout_seconds,omitempty"`
-	AddressSpaceBytes          uint64                    `json:"address_space_bytes,omitempty"`
-	CPUSeconds                 uint64                    `json:"cpu_seconds,omitempty"`
-	MaxProcesses               uint64                    `json:"max_processes,omitempty"`
-	HTTPSRequestTimeoutSeconds uint64                    `json:"https_request_timeout_seconds,omitempty"`
-	HTTPSConnectTimeoutSeconds uint64                    `json:"https_connect_timeout_seconds,omitempty"`
+	MaxPlaintextBytes          uint64                         `json:"max_plaintext_bytes"`
+	AllowedMediaTypes          []string                       `json:"allowed_media_types"`
+	Scanners                   []AttachmentScannerConfig      `json:"scanners"`
+	BubblewrapDigest           string                         `json:"bubblewrap_digest"`
+	PrlimitDigest              string                         `json:"prlimit_digest"`
+	ScannerTimeoutSeconds      uint64                         `json:"scanner_timeout_seconds,omitempty"`
+	AddressSpaceBytes          uint64                         `json:"address_space_bytes,omitempty"`
+	CPUSeconds                 uint64                         `json:"cpu_seconds,omitempty"`
+	MaxProcesses               uint64                         `json:"max_processes,omitempty"`
+	Cgroup                     *AttachmentScannerCgroupConfig `json:"cgroup,omitempty"`
+	HTTPSRequestTimeoutSeconds uint64                         `json:"https_request_timeout_seconds,omitempty"`
+	HTTPSConnectTimeoutSeconds uint64                         `json:"https_connect_timeout_seconds,omitempty"`
 }
 
 func (a AttachmentAdmissionConfig) Policies() (attachments.Policy, attachments.AgentContentPolicy, attachmentapi.HTTPSConfig, error) {
@@ -239,10 +246,16 @@ func (a AttachmentAdmissionConfig) Policies() (attachments.Policy, attachments.A
 		scanners[index] = attachments.ScannerSpec{ID: scanner.ID, Executable: scanner.Executable,
 			ExecutableDigest: scanner.ExecutableDigest, Args: append([]string(nil), scanner.Args...)}
 	}
+	var cgroup *attachments.ScannerCgroupPolicy
+	if a.Cgroup != nil {
+		cgroup = &attachments.ScannerCgroupPolicy{SystemdRunDigest: a.Cgroup.SystemdRunDigest,
+			MemoryMaxBytes: a.Cgroup.MemoryMaxBytes, TasksMax: a.Cgroup.TasksMax}
+	}
 	content := attachments.AgentContentPolicy{MaxPlaintextBytes: a.MaxPlaintextBytes,
 		AllowedMediaTypes: allowed, Scanners: scanners, BubblewrapDigest: a.BubblewrapDigest,
 		PrlimitDigest: a.PrlimitDigest, ScannerTimeout: time.Duration(a.ScannerTimeoutSeconds) * time.Second,
-		AddressSpaceBytes: a.AddressSpaceBytes, CPUSeconds: a.CPUSeconds, MaxProcesses: a.MaxProcesses}
+		AddressSpaceBytes: a.AddressSpaceBytes, CPUSeconds: a.CPUSeconds, MaxProcesses: a.MaxProcesses,
+		Cgroup: cgroup}
 	if err := attachments.ValidateAgentContentPolicy(content); err != nil {
 		return attachments.Policy{}, attachments.AgentContentPolicy{}, attachmentapi.HTTPSConfig{}, err
 	}

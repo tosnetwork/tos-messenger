@@ -267,7 +267,7 @@ For outbound OpenFox attachments, create a mode-`0600` operator document:
 
 The storage and Endpoint keys must be distinct. Startup pins the signer to the
 live finalized Endpoint public key. OpenFox streams exact MediaStore files over
-local API v5; the daemon encrypts each 1 MiB chunk, durably resumes ingestion
+local API v6; the daemon encrypts each 1 MiB chunk, durably resumes ingestion
 and storage upload, signs separate upload/fetch capabilities, verifies the
 final `StoredAck`, and only then queues the v3 Event. The model cannot select
 the storage origin, retention, authority keys, network identity or Event ID.
@@ -284,7 +284,7 @@ go build -trimpath -o /usr/local/libexec/tos-attachment-text-scanner \
   ./cmd/tos-attachment-text-scanner
 chmod 0555 /usr/local/libexec/tos-attachment-text-scanner
 sha256sum /usr/local/libexec/tos-attachment-text-scanner \
-  /usr/bin/bwrap /usr/bin/prlimit
+  /usr/bin/bwrap /usr/bin/prlimit /usr/bin/systemd-run
 ```
 
 Prefix each printed lowercase digest with `sha256:`. Configure an absolute,
@@ -292,8 +292,8 @@ canonical scanner path, scanner ID `reference-text`, its digest, the bubblewrap
 and prlimit digests, a nonzero plaintext ceiling, and only `text/plain` and/or
 `text/markdown` in the media allow-list. A package upgrade changing bubblewrap
 or prlimit deliberately stops admission until an operator reviews and updates
-the pin. Scanner files must be regular, executable, non-writable and not
-symlinks.
+the pin. A hard-isolation deployment additionally pins `systemd-run`. Scanner
+and launcher files must be regular, executable, non-writable and not symlinks.
 
 `tos-attachment-text-scanner` is a parser-free reference inspector, not a
 production malware product. It refuses every non-text type. To enable the
@@ -311,6 +311,11 @@ all three digest placeholders with the reviewed lowercase `sha256:` values:
   }],
   "bubblewrap_digest": "sha256:<bubblewrap>",
   "prlimit_digest": "sha256:<prlimit>",
+  "cgroup": {
+    "systemd_run_digest": "sha256:<systemd-run>",
+    "memory_max_bytes": 268435456,
+    "tasks_max": 32
+  },
   "scanner_timeout_seconds": 30,
   "https_request_timeout_seconds": 30,
   "https_connect_timeout_seconds": 5
@@ -319,10 +324,11 @@ all three digest placeholders with the reviewed lowercase `sha256:` values:
 
 Startup re-hashes every configured executable before opening the runtime
 socket. OpenFox's `tos_messenger` settings must set
-`"enable_attachments": true`; it then uses local request v5/response v3 and
+`"enable_attachments": true`; it then uses local request v6/response v4 and
 receives only admitted `text/plain`, never the Reference or fetch key.
 Production deployment still needs a reviewed scanner selection and corpus,
-hard resource isolation where required, and independently operated evidence.
+must enable the explicit cgroup block when hard RSS/swap/task isolation is
+required, and still needs independently operated evidence.
 
 ## What `"transport": "none"` means
 
