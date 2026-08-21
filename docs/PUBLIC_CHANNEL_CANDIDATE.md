@@ -94,8 +94,9 @@ calibration against the real M0-R carrier and abuse measurements is still open.
 ## Native TOS Overlay/RLDP carrier
 
 `NativeCarrier` binds the candidate to the repository's pinned
-`tosutils-go` native stack. The 32 bytes already committed by
-`channel_<sha256>` are the Overlay ID. Authenticated ADNL peers exchange live
+`tosutils-go` native stack. The 32-byte digest in `channel_<sha256>` is the `pub.overlay` key. Its
+TL-boxed hash is the Overlay short ID used on the wire and in signed DHT
+`overlay.node` records. Authenticated ADNL peers exchange live
 head/Event hints through signed two-step Overlay broadcast; RLDP carries the
 strict fetch request and response when history is larger or missing. Each
 connection authorizes only the remote ADNL transport key and caps native
@@ -117,6 +118,40 @@ the live ADNL test runs separately because the pinned TL serializer is not
 compatible with race/checkptr. This is same-host native-stack/restart evidence,
 not independent-network evidence.
 
+`NativeNode` and `cmd/tos-public-channeld` assemble that carrier into a
+runnable replica. The daemon publishes its separately provisioned ADNL address
+and signed `overlay.node` through the native TOS DHT, discovers a bounded set
+of signed nodes, resolves their owner-signed addresses, and then requires the
+ADNL handshake to reproduce the exact discovered public key. It starts one
+bounded carrier per authenticated peer, announces a locally committed head,
+recursively fetches a different head from an empty staging set, and atomically
+commits it only after full history verification. Publisher and moderator
+private keys never enter this daemon.
+
+The node integration test uses two real UDP Gateways plus a replaceable
+in-memory directory: it starts from one populated and one empty durable store,
+discovers and connects both nodes, transfers the history over Overlay/RLDP,
+then closes and reopens the receiving Gateway/node/store with the same
+identity. The production directory adapter is covered by the same strict
+key/short-ID derivation and native DHT types; independently operated TOS DHT
+evidence remains an operator acceptance task.
+
+Production invocation requires canonical absolute profile/delegation/state/key
+paths and an HTTPS global-config URL. `-check` verifies local authority, key
+reproduction, Overlay derivation and lifecycle bounds without network access
+or state writes. A typical service invocation is:
+
+```text
+tos-public-channeld \
+  -profile /etc/tos-messenger/channel/profile.json \
+  -authority-delegation /etc/tos-messenger/channel/authority.json \
+  -delegation /etc/tos-messenger/channel/publisher-a.json \
+  -state /var/lib/tos-messenger/public-channel \
+  -transport-key /etc/tos-messenger/channel/adnl.key \
+  -listen 0.0.0.0:30303 -public-address 203.0.113.10:30303 \
+  -dht-config-url https://config.example/tos-global.config.json
+```
+
 ## Durable local state
 
 The candidate store writes verified Event objects and a canonical immutable
@@ -134,8 +169,6 @@ derived history matches them.
 
 ## Explicitly still open
 
-- daemon/DHT peer discovery and multi-peer production assembly around the
-  implemented native Overlay/RLDP carrier;
 - TOS Sites history mirroring and measured production calibration of the
   candidate peer/resource limits;
 - independently operated convergence/failover evidence;

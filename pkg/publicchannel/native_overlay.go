@@ -95,9 +95,17 @@ func NativeOverlayID(channelID string) ([]byte, error) {
 	if !channelPattern.MatchString(channelID) {
 		return nil, errors.New("invalid public channel for native Overlay")
 	}
-	id, err := hex.DecodeString(channelID[len("channel_"):])
+	channelDigest, err := hex.DecodeString(channelID[len("channel_"):])
+	if err != nil || len(channelDigest) != 32 {
+		return nil, errors.New("decode public channel native Overlay key")
+	}
+	// The channel digest is the DHT pub.overlay key, not the Overlay short ID.
+	// Both dht.StoreOverlayNodes and overlay.NewNode derive the wire Overlay ID
+	// by hashing the boxed pub.overlay value. Keeping that derivation here is
+	// what makes live Overlay traffic join the nodes discovered through DHT.
+	id, err := tl.Hash(keys.PublicKeyOverlay{Key: channelDigest})
 	if err != nil || len(id) != 32 {
-		return nil, errors.New("decode public channel native Overlay ID")
+		return nil, errors.New("derive public channel native Overlay ID")
 	}
 	return id, nil
 }
