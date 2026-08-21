@@ -178,6 +178,15 @@ func TestHistorySegmentRefusesGapSubstitutionAndUnsafeContent(t *testing.T) {
 	}
 }
 
+func TestDeviceHistoryExportRefusesRoomRoute(t *testing.T) {
+	journal, _ := openJournal(t)
+	if _, err := journal.BuildHistorySegment(historySource, historyTarget,
+		"room_"+strings.Repeat("5", 64), 1, "", 0, "", 1); err == nil ||
+		err.Error() != "invalid history export request" {
+		t.Fatalf("room identifier reached direct-history export: %v", err)
+	}
+}
+
 func TestHistoryListingFailsClosedOnManifestDamageAndIgnoresOrphans(t *testing.T) {
 	journal, root := openJournal(t)
 	now := time.Unix(1_800_000_100, 0)
