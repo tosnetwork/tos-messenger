@@ -101,7 +101,9 @@ func (t Terms) CanonicalBytes() ([]byte, error) {
 	canon.Text(buffer, t.ProviderAgentID)
 	canon.Text(buffer, t.ManifestDigest)
 	canon.Text(buffer, t.TransportBindingDigest)
-	t.Price.canonical(buffer)
+	if err := t.Price.canonical(buffer); err != nil {
+		return nil, err
+	}
 	canon.Text(buffer, t.EscrowTermsDigest)
 	canon.Text(buffer, t.DisputePolicyDigest)
 	canon.Uint64(buffer, t.NotAfterUnix)

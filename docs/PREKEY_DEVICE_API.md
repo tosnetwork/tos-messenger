@@ -30,7 +30,7 @@ Requests use `tos.messaging.prekey-device-request.v1`; responses use
   flag, and finalized set digest when present. It never returns collected
   bundles.
 - `contribution.submit` carries one canonical existing
-  `tos.messaging.prekey-bundle.v1` JSON object. The server strictly decodes it,
+  `tos.messaging.prekey-bundle.v2` JSON object. The server strictly decodes it,
   verifies its 64-byte Ed25519 signature under the live delegated 32-byte
   Endpoint public key, and requires an exact roster/suite/window match before
   durable storage.

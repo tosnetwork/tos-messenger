@@ -44,10 +44,15 @@ func (n Network) Same(other Network) bool {
 		n.GenesisFileHash == other.GenesisFileHash
 }
 
-func (n Network) canonical(buffer *bytes.Buffer) {
+func (n Network) canonical(buffer *bytes.Buffer) error {
 	canon.Text(buffer, n.ID)
-	canon.Text(buffer, n.GenesisRootHash)
-	canon.Text(buffer, n.GenesisFileHash)
+	if err := canon.Hash32(buffer, n.GenesisRootHash); err != nil {
+		return err
+	}
+	if err := canon.Hash32(buffer, n.GenesisFileHash); err != nil {
+		return err
+	}
+	return nil
 }
 
 // NetworkFromDomain converts the protocol form of a network domain into the

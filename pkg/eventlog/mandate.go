@@ -89,8 +89,12 @@ func MandateID(mandate StoredMandate) (string, error) {
 	canon.Text(buffer, mandate.Authority)
 	canon.Text(buffer, mandate.CapabilityClass)
 	canon.Text(buffer, mandate.AssetNetworkID)
-	canon.Text(buffer, mandate.AssetGenesisRootHash)
-	canon.Text(buffer, mandate.AssetGenesisFileHash)
+	if err := canon.Hash32(buffer, mandate.AssetGenesisRootHash); err != nil {
+		return "", err
+	}
+	if err := canon.Hash32(buffer, mandate.AssetGenesisFileHash); err != nil {
+		return "", err
+	}
 	canon.Uint32(buffer, uint32(mandate.Workchain))
 	canon.Text(buffer, mandate.AssetAccountID)
 	canon.Text(buffer, mandate.AssetMasterCodeHash)

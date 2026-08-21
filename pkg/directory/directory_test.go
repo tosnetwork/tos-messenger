@@ -334,7 +334,7 @@ func TestDecodeDescriptorRejectsMalformedTransport(t *testing.T) {
 	cases := map[string][]byte{
 		"unknown field": []byte(string(valid[:len(valid)-1]) + `,"extra":1}`),
 		"trailing json": append(append([]byte{}, valid...), []byte(`{}`)...),
-		"wrong schema":  []byte(strings.Replace(string(valid), DescriptorSchema, "tos.messaging.contact-descriptor.v2", 1)),
+		"wrong schema":  []byte(strings.Replace(string(valid), DescriptorSchema, "tos.messaging.contact-descriptor.v999", 1)),
 		"empty":         []byte(""),
 		"array":         []byte(`[]`),
 	}

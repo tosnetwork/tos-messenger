@@ -44,6 +44,50 @@ func TestBytesArePrefixed(t *testing.T) {
 	}
 }
 
+func TestHash32CommitsRawBytes(t *testing.T) {
+	buffer := &bytes.Buffer{}
+	value := strings.Repeat("ab", 32)
+	if err := Hash32(buffer, value); err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte{0, 0, 0, 32}, bytes.Repeat([]byte{0xab}, 32)...)
+	if !bytes.Equal(buffer.Bytes(), want) {
+		t.Fatalf("hash used its display encoding: %x", buffer.Bytes())
+	}
+	reader := NewReader("", buffer.Bytes())
+	if got := reader.Hash32(); got != value {
+		t.Fatalf("hash round trip changed: %q", got)
+	}
+	if err := reader.Done(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHash32RefusesNonCanonicalDisplayForms(t *testing.T) {
+	for name, value := range map[string]string{
+		"empty":     "",
+		"short":     strings.Repeat("a", 63),
+		"uppercase": strings.Repeat("A", 64),
+		"prefixed":  "sha256:" + strings.Repeat("a", 64),
+		"non-hex":   strings.Repeat("z", 64),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := Hash32(&bytes.Buffer{}, value); err == nil {
+				t.Fatal("accepted a non-canonical hash")
+			}
+		})
+	}
+	if err := Hash32(nil, strings.Repeat("a", 64)); err == nil {
+		t.Fatal("accepted a nil destination")
+	}
+	short := &bytes.Buffer{}
+	Bytes(short, bytes.Repeat([]byte{0xaa}, 31))
+	reader := NewReader("", short.Bytes())
+	if got := reader.Hash32(); got != "" || reader.Done() == nil {
+		t.Fatal("reader accepted a non-32-byte canonical hash")
+	}
+}
+
 func TestDigestShape(t *testing.T) {
 	digest := Digest([]byte("preimage"))
 	if !DigestPattern.MatchString(digest) {
@@ -134,7 +178,7 @@ func TestEveryUsedSeparatorIsRegistered(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
-			if entry.Name() == ".git" {
+			if entry.Name() == ".git" || entry.Name() == ".claude" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -198,5 +242,40 @@ func TestEveryDeclaredSeparatorIsRegistered(t *testing.T) {
 	}
 	if len(matches) != len(Domains) {
 		t.Fatalf("%d separators are declared and %d are registered", len(matches), len(Domains))
+	}
+}
+
+// The network representation decision requires display hex only in strict
+// JSON. A newly added canonical preimage must use Hash32 rather than silently
+// reintroducing 64 UTF-8 bytes through Text.
+func TestGenesisHashesNeverUseTextCanonicalEncoding(t *testing.T) {
+	root := filepath.Join("..", "..")
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" || entry.Name() == ".claude" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for number, line := range strings.Split(string(content), "\n") {
+			if strings.Contains(line, "canon.Text") &&
+				(strings.Contains(line, "GenesisRootHash") || strings.Contains(line, "GenesisFileHash")) {
+				t.Errorf("%s:%d commits a genesis hash as display text", path, number+1)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
 	}
 }

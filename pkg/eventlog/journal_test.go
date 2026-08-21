@@ -350,6 +350,79 @@ func TestSecondWriterIsRefused(t *testing.T) {
 	defer replacement.Close()
 }
 
+func TestCanonicalStateMarkerIsPrivateAndRestartStable(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	journal, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, canonicalStateMarkerName)
+	raw, err := os.ReadFile(path)
+	if err != nil || string(raw) != canonicalStateMarker {
+		t.Fatalf("unexpected canonical state marker: %q %v", raw, err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("canonical state marker is not a private regular file: %v %v", info, err)
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatalf("reopen marked state: %v", err)
+	}
+	defer reopened.Close()
+}
+
+func TestUnmarkedOrSubstitutedStateIsRefusedWithoutMutation(t *testing.T) {
+	t.Run("legacy nonempty root", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "state")
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		legacy := filepath.Join(root, "legacy.json")
+		if err := os.WriteFile(legacy, []byte("legacy\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Open(root); err == nil || !strings.Contains(err.Error(), "explicit state migration") {
+			t.Fatalf("unmarked state was not refused: %v", err)
+		}
+		if raw, err := os.ReadFile(legacy); err != nil || string(raw) != "legacy\n" {
+			t.Fatalf("legacy state was changed: %q %v", raw, err)
+		}
+		if _, err := os.Lstat(filepath.Join(root, canonicalStateMarkerName)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("a failed open marked legacy state as migrated")
+		}
+	})
+
+	for name, setup := range map[string]func(string) error{
+		"future generation": func(path string) error {
+			return os.WriteFile(path, []byte("tos.messaging.canonical-network-preimages.v999\n"), 0o600)
+		},
+		"public marker": func(path string) error {
+			return os.WriteFile(path, []byte(canonicalStateMarker), 0o644)
+		},
+		"symlink": func(path string) error {
+			return os.Symlink("missing", path)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "state")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, canonicalStateMarkerName)
+			if err := setup(path); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(root); err == nil {
+				t.Fatal("substituted canonical state marker was accepted")
+			}
+		})
+	}
+}
+
 func TestClosedJournalRefusesWork(t *testing.T) {
 	journal, _ := openJournal(t)
 	if err := journal.Close(); err != nil {

@@ -185,8 +185,12 @@ func (m Mandate) CanonicalBytes() ([]byte, error) {
 	canon.Text(buffer, m.Objective)
 	canon.Text(buffer, string(m.Authority))
 	canon.Text(buffer, m.CapabilityClass)
-	m.MaxTotal.canonical(buffer)
-	m.ApprovalAbove.canonical(buffer)
+	if err := m.MaxTotal.canonical(buffer); err != nil {
+		return nil, err
+	}
+	if err := m.ApprovalAbove.canonical(buffer); err != nil {
+		return nil, err
+	}
 	canon.Uint32(buffer, m.MaxCounteroffers)
 	canon.Uint64(buffer, m.ExpiresAtUnix)
 	return buffer.Bytes(), nil

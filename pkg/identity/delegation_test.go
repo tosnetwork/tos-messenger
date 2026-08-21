@@ -149,7 +149,7 @@ func TestRoundTripPreservesDigest(t *testing.T) {
 func TestDigestIsStable(t *testing.T) {
 	// A fixed vector. A change here is a wire-format change and must be a
 	// deliberate decision, not an accident of refactoring.
-	const expected = "sha256:bee29335371a5eb8940a07494c8839b407cbffb55689118938d01688eb208f17"
+	const expected = "sha256:f992d179ee370b57c2f7f9d94f5f7ba499132914ea4821d7db15b672e95fd680"
 	digest, err := Digest(testDelegation(t))
 	if err != nil {
 		t.Fatalf("digest: %v", err)
@@ -250,7 +250,7 @@ func TestDecodeRejectsMalformedTransport(t *testing.T) {
 		"unknown field":  []byte(string(valid[:len(valid)-1]) + `,"extra":1}`),
 		"trailing json":  append(append([]byte{}, valid...), []byte(`{}`)...),
 		"empty":          []byte(""),
-		"wrong schema":   []byte(strings.Replace(string(valid), Schema, "tos.messaging.endpoint-delegation.v2", 1)),
+		"wrong schema":   []byte(strings.Replace(string(valid), Schema, "tos.messaging.endpoint-delegation.v999", 1)),
 		"short key":      []byte(strings.Replace(string(valid), hex.EncodeToString(testKey(t)), "00", 1)),
 		"not an object":  []byte(`[]`),
 		"null":           []byte(`null`),

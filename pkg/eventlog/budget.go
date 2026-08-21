@@ -72,8 +72,12 @@ func BudgetID(asset negotiation.Asset) (string, error) {
 	}
 	buffer := bytes.NewBufferString(canon.DomainBudget)
 	canon.Text(buffer, asset.Network.ID)
-	canon.Text(buffer, asset.Network.GenesisRootHash)
-	canon.Text(buffer, asset.Network.GenesisFileHash)
+	if err := canon.Hash32(buffer, asset.Network.GenesisRootHash); err != nil {
+		return "", err
+	}
+	if err := canon.Hash32(buffer, asset.Network.GenesisFileHash); err != nil {
+		return "", err
+	}
 	canon.Uint32(buffer, uint32(asset.Workchain))
 	canon.Text(buffer, asset.AccountID)
 	canon.Text(buffer, asset.MasterCodeHash)
@@ -100,8 +104,12 @@ func MandateBudgetID(mandateID string, asset negotiation.Asset) (string, error) 
 	buffer := bytes.NewBufferString(canon.DomainMandateBudget)
 	canon.Text(buffer, mandateID)
 	canon.Text(buffer, asset.Network.ID)
-	canon.Text(buffer, asset.Network.GenesisRootHash)
-	canon.Text(buffer, asset.Network.GenesisFileHash)
+	if err := canon.Hash32(buffer, asset.Network.GenesisRootHash); err != nil {
+		return "", err
+	}
+	if err := canon.Hash32(buffer, asset.Network.GenesisFileHash); err != nil {
+		return "", err
+	}
 	canon.Uint32(buffer, uint32(asset.Workchain))
 	canon.Text(buffer, asset.AccountID)
 	canon.Text(buffer, asset.MasterCodeHash)

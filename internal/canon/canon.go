@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"regexp"
 )
 
@@ -32,6 +33,32 @@ func Text(buffer *bytes.Buffer, value string) {
 func Bytes(buffer *bytes.Buffer, value []byte) {
 	Uint32(buffer, uint32(len(value)))
 	buffer.Write(value)
+}
+
+// Hash32 appends a strict lowercase bare-hex hash as its length-prefixed raw
+// 32-byte value. JSON carries hashes as display hex, but a canonical preimage
+// must never commit those 64 display characters. Callers propagate the error
+// so malformed input cannot silently collapse to an empty or partial field.
+func Hash32(buffer *bytes.Buffer, value string) error {
+	if buffer == nil || !HashPattern.MatchString(value) {
+		return errors.New("invalid canonical 32-byte hash")
+	}
+	raw, err := hex.DecodeString(value)
+	if err != nil || len(raw) != sha256.Size {
+		return errors.New("invalid canonical 32-byte hash")
+	}
+	Bytes(buffer, raw)
+	return nil
+}
+
+// MustHash32 is for package-private encoders whose public entry point has
+// already validated the complete object and whose interface cannot return an
+// error. A panic here is an internal invariant failure, never peer-input error
+// handling; exported canonical encoders use Hash32 and propagate errors.
+func MustHash32(buffer *bytes.Buffer, value string) {
+	if err := Hash32(buffer, value); err != nil {
+		panic(err)
+	}
 }
 
 // Uint32 appends a big-endian 32-bit value.

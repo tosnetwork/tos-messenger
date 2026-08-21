@@ -42,6 +42,12 @@ import (
 const (
 	// Schema is the on-disk record schema identifier.
 	Schema = "tos.messaging.event-journal.v1"
+	// canonicalStateMarker prevents a binary whose content-addressed network
+	// preimages changed from silently treating an older state tree as empty.
+	// There is deliberately no automatic upgrade: events, mandates, budgets,
+	// approvals and sessions must migrate as one reviewed transaction.
+	canonicalStateMarkerName = ".canonical-network-preimages"
+	canonicalStateMarker     = "tos.messaging.canonical-network-preimages.v2\n"
 
 	lockName       = ".messenger-event-journal.lock"
 	inboundDir     = "inbound"
@@ -304,6 +310,9 @@ func openJournalAt(root string, quota Quota) (*Journal, error) {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return nil, errors.New("event journal root must be a private directory")
 	}
+	if err := ensureCanonicalStateMarker(root); err != nil {
+		return nil, err
+	}
 	for _, name := range []string{inboundDir, outboundDir, compositionDir, moderationDir, historySyncDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, devicePrekeyDir, prekeyContributionDir, prekeyPublicationDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, escrowLocatorDir, agentPacketDir, admissionInviteDir} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			return nil, errors.New("create event journal directory")
@@ -329,6 +338,68 @@ func openJournalAt(root string, quota Quota) (*Journal, error) {
 		return nil, err
 	}
 	return journal, nil
+}
+
+func ensureCanonicalStateMarker(root string) error {
+	path := filepath.Join(root, canonicalStateMarkerName)
+	if err := verifyCanonicalStateMarker(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return errors.New("read event journal root")
+	}
+	if len(entries) != 0 {
+		if err := verifyCanonicalStateMarker(path); err == nil {
+			return nil
+		}
+		return errors.New("event journal predates the canonical network representation; explicit state migration is required")
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return verifyCanonicalStateMarker(path)
+	}
+	if err != nil {
+		return errors.New("create canonical state marker")
+	}
+	remove := true
+	defer func() {
+		_ = file.Close()
+		if remove {
+			_ = os.Remove(path)
+		}
+	}()
+	if _, err := file.WriteString(canonicalStateMarker); err != nil {
+		return errors.New("write canonical state marker")
+	}
+	if err := file.Sync(); err != nil {
+		return errors.New("sync canonical state marker")
+	}
+	if err := file.Close(); err != nil {
+		return errors.New("close canonical state marker")
+	}
+	if err := syncDirectory(root); err != nil {
+		return err
+	}
+	remove = false
+	return nil
+}
+
+func verifyCanonicalStateMarker(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || info.Size() != int64(len(canonicalStateMarker)) {
+		return errors.New("invalid canonical state marker")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || string(raw) != canonicalStateMarker {
+		return errors.New("unsupported canonical state generation")
+	}
+	return nil
 }
 
 // Accept durably records an event exactly once, together with the event

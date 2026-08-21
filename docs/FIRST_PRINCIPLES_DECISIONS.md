@@ -23,14 +23,14 @@ positive and adversarial vectors.
 
 ## 2. One-to-one E2EE
 
-The construction of `tos.messaging.e2ee.x3dh-aes256gcm-dr.v1` is approved:
+The construction of `tos.messaging.e2ee.x3dh-aes256gcm-dr.v2` is approved:
 endpoint-authenticated X25519 three-DH establishment, HKDF/HMAC-SHA-256,
 AES-256-GCM, and the Double Ratchet. Algorithm selection is closed; the wire
 identifier is not called frozen until an independent cryptographic review and
 a second-language vector consumer both succeed.
 
 One-time prekeys and a hybrid post-quantum successor are separate protocol
-versions. They are not silently added to v1.
+versions. They are not silently added to v2.
 
 ## 3. Independent implementation evidence
 
@@ -97,7 +97,9 @@ interoperability evidence.
 
 The critical path is:
 
-1. apply the canonical network representation to every candidate preimage;
+1. apply the canonical network representation to every candidate preimage
+   (implemented with explicit pre-freeze version advances and regenerated
+   vectors);
 2. implement scoped Mailbox authentication;
 3. implement production DHT/descriptor adapters;
 4. run the multi-operator M0-R study;

@@ -11,11 +11,12 @@ table is the one that matters, because a readiness document that only lists
 what was finished is an advertisement.
 
 **Verdict from this side: not ready.** The genesis-hash representation and the
-one-to-one construction choice were decided on 2026-08-20. Two evidence items
-still block the freeze directly: independent cryptographic review and a
-second-language implementation report. The reachability study is separate and
-blocks M1 scope freeze and start rather than this review; it needs independent
-operators and networks.
+one-to-one construction choice were decided on 2026-08-20, and the canonical
+representation migration is now implemented with explicit version advances.
+Two evidence items still block the freeze directly: independent cryptographic
+review and a second-language implementation report. The reachability study is
+separate and blocks M1 scope freeze and start rather than this review; it needs
+independent operators and networks.
 
 ## What a freeze would fix
 
@@ -49,16 +50,25 @@ that closed it so a reviewer can check the code instead of the claim.
 | An inbox policy declared its own digest | `ContactPolicy` is closed and built from the published document | `95f6a61` |
 | This endpoint's own delegation was taken on the caller's word | it is resolved against finalized state and required to be this installation's | `95f6a61` |
 | A negotiation lost its state on restart while its budget hold stayed | every transition is durable, and the mandate is referenced rather than copied | `f84a02c` |
+| Candidate preimages committed 64-character genesis display hashes despite the raw-32-byte decision | Endpoint delegation/ID, Descriptor, Event, prekey bundle/set, E2EE binding, negotiation terms, mandate and budget domains advance explicitly; all encode raw bytes, vectors are regenerated, and a repository audit rejects future `canon.Text(...Genesis*Hash)` uses | `internal/canon.Hash32`, `TestGenesisHashesNeverUseTextCanonicalEncoding` |
 
 ## Not closed, and why
 
-### 1. Canonical network representation — decision closed, migration open
+### 1. Canonical network representation — decision and migration closed
 
 Genesis hashes are raw 32-byte values in canonical preimages and lowercase bare
-hex in strict JSON. `sha256:` is SDK boundary syntax only. Every candidate
-preimage must now be audited against that rule; a mismatch takes an explicit
-schema/domain bump and regenerated vectors. That migration must finish before
-freeze, but representation is no longer an owner decision.
+hex in strict JSON. `sha256:` is SDK boundary syntax only. The candidate audit
+found and migrated Endpoint delegation/ID, Descriptor, Event, prekey
+bundle/set, E2EE binding, negotiation terms, mandate and budget preimages. Each
+already-versioned object advanced its domain or schema rather than silently
+reinterpreting old bytes, and all affected positive/adversarial vectors were
+regenerated. `internal/canon.Hash32` is the shared encoder/decoder boundary and
+a source audit fails if a production preimage writes either genesis hash with
+`canon.Text`. The single-writer journal also persists a private canonical-state
+generation marker: an unmarked nonempty tree or substituted/future marker is
+refused without mutation, preventing changed Event, mandate or budget IDs from
+silently resetting durable authority. This closes migration work, not
+independent review or the second-implementation gate.
 
 ### 2. The reachability study has never been run — blocks M1, not the freeze
 
