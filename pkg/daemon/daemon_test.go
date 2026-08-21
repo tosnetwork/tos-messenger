@@ -875,3 +875,75 @@ func TestAgentPacketWorkerRetriesProviderAndCompletesDurably(t *testing.T) {
 		t.Fatal("completed Agent Packet reached the provider again after restart")
 	}
 }
+
+func TestHistoryWorkerAppliesOnlyToDisplayHistoryAndCompletesDurably(t *testing.T) {
+	config := testConfig(t)
+	clock := time.Unix(1_900_000_000, 0)
+	sourceDevice := "dev_" + strings.Repeat("1", 64)
+	config.Publication.DeviceIDs = []string{sourceDevice, config.DeviceID}
+	conversation := "conv_" + strings.Repeat("8", 64)
+	historical, err := envelope.NewEvent(envelope.Event{
+		Network: config.Network(), ConversationID: conversation,
+		SenderAgentID: "agent_" + strings.Repeat("5", 64), SenderEndpointID: "mep_" + strings.Repeat("6", 64),
+		SenderDeviceID: "dev_" + strings.Repeat("7", 64), CreatedAtUnix: uint64(clock.Add(-time.Hour).Unix()),
+		Kind: "text", Content: testBody(t, "past message"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	historicalRaw, err := envelope.EncodeEventJSON(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segmentBody, err := payload.Encode(payload.DeviceHistorySegment{
+		SourceDeviceID: sourceDevice, TargetDeviceID: config.DeviceID, ConversationID: conversation,
+		Sequence: 1, Events: [][]byte{historicalRaw},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	segmentEvent, err := envelope.NewEvent(envelope.Event{
+		Network: config.Network(), ConversationID: conversation, SenderAgentID: config.AgentID,
+		SenderEndpointID: config.EndpointID, SenderDeviceID: sourceDevice,
+		CreatedAtUnix: uint64(clock.Unix()), Kind: "device.history.segment", Content: segmentBody,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	segmentRaw, err := envelope.EncodeEventJSON(segmentEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := eventlog.Open(config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := journal.Accept(eventlog.Entry{EventID: segmentEvent.EventID, SenderEndpointID: config.EndpointID,
+		ConversationID: conversation, Payload: segmentRaw, Admission: eventlog.AdmissionAdmitted,
+		ReceivedAtUnix: uint64(clock.Unix())}); err != nil {
+		t.Fatal(err)
+	}
+	instance := &Daemon{config: config, journal: journal, now: func() time.Time { return clock }}
+	instance.sweepHistorySync(context.Background())
+	history, err := journal.History(conversation, 0)
+	if err != nil || len(history) != 1 || history[0].EventID != historical.EventID {
+		t.Fatalf("history worker: %+v err=%v", history, err)
+	}
+	if pending, err := journal.ListPending(clock, 0); err != nil || len(pending) != 0 {
+		t.Fatalf("completed segment remained in application queue: %+v err=%v", pending, err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := eventlog.Open(config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restarted := &Daemon{config: config, journal: reopened, now: func() time.Time { return clock }}
+	restarted.sweepHistorySync(context.Background())
+	history, err = reopened.History(conversation, 0)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("restart duplicated or lost history: %+v err=%v", history, err)
+	}
+}

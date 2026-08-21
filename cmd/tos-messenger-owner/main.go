@@ -47,7 +47,7 @@ func run(args []string, output io.Writer) error {
 	}
 	rest := global.Args()
 	if len(rest) == 0 {
-		return errors.New("usage: tos-messenger-owner [-socket PATH] <pending|prepare-grant|prepare-deny|prepare-invite|prepare-escrow-location|sign|submit>")
+		return errors.New("usage: tos-messenger-owner [-socket PATH] <pending|prepare-grant|prepare-deny|prepare-invite|prepare-escrow-location|prepare-history|sign|submit>")
 	}
 	if rest[0] == "sign" {
 		return signCommand(rest[1:], output)
@@ -101,6 +101,25 @@ func run(args []string, output io.Writer) error {
 		}
 		return prepare(client, localapi.Request{Op: localapi.OpRecordEscrowLocation,
 			QuoteCommitment: *commitment, EscrowAddress: *address, CapabilityClass: *class}, output)
+	case "prepare-history":
+		set := commandFlags("prepare-history")
+		target := set.String("target-device", "", "current destination Device identifier")
+		conversation := set.String("conversation", "", "direct Conversation identifier")
+		sequence := set.Uint64("sequence", 1, "segment sequence starting at one")
+		previous := set.String("previous-digest", "", "prior segment sha256 digest")
+		afterUnix := set.Uint64("after-unix", 0, "prior page's last Event creation time")
+		afterEvent := set.String("after-event", "", "prior page's last Event identifier")
+		limit := set.Int("limit", 0, "page size; zero selects the protocol maximum")
+		idempotency := set.String("idempotency", "", "unique idem_ identifier for this page")
+		expiresAt := set.Uint64("expires-at", 0, "absolute Unix Event expiry")
+		if err := set.Parse(rest[1:]); err != nil || set.NArg() != 0 || *target == "" ||
+			*conversation == "" || *idempotency == "" || *expiresAt == 0 {
+			return errors.New("usage: prepare-history -target-device DEV_ID -conversation CONV_ID -idempotency IDEM_ID -expires-at UNIX [-sequence N -previous-digest DIGEST -after-unix UNIX -after-event EVT_ID -limit N]")
+		}
+		return prepare(client, localapi.Request{Op: localapi.OpExportDeviceHistory,
+			TargetDeviceID: *target, ConversationID: *conversation, HistorySequence: *sequence,
+			PreviousSegmentDigest: *previous, AfterCreatedAtUnix: *afterUnix, AfterEventID: *afterEvent,
+			Limit: *limit, IdempotencyKey: *idempotency, ExpiresAtUnix: *expiresAt}, output)
 	case "submit":
 		set := commandFlags("submit")
 		path := set.String("decision", "", "signed decision JSON")

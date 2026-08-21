@@ -583,6 +583,28 @@ func TestEndpointDelegationLimitsOutboundEventClasses(t *testing.T) {
 	if _, found, err := h.journal.LookupDelivery(event.EventID); err != nil || found {
 		t.Fatalf("unauthorized event reached durable delivery state: found=%v err=%v", found, err)
 	}
+	if _, _, err := h.dispatcher.ComposeAndQueue(ComposeRequest{ConversationID: convoID,
+		MediaType: "text/plain; charset=utf-8", Body: "composition bypass",
+		IdempotencyKey: "idem_" + strings.Repeat("1", 64), SessionID: sessionID,
+		RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 3600}); err == nil {
+		t.Fatal("daemon-owned text composition bypassed endpoint authority")
+	}
+	if _, _, _, err := h.dispatcher.ComposeHistoryAndQueue(HistoryRequest{TargetDeviceID: peerDev,
+		ConversationID: convoID, Sequence: 1, Limit: 1,
+		IdempotencyKey: "idem_" + strings.Repeat("2", 64), ExpiresAtUnix: baseUnix + 3600}); err == nil {
+		t.Fatal("daemon-owned history composition bypassed endpoint authority")
+	}
+}
+
+func TestEndpointDelegationAuthorizesClassRatherThanKindSpelling(t *testing.T) {
+	h := newHarness(t)
+	h.dispatcher.allowed = map[string]struct{}{"device.sync": {}}
+	if !h.dispatcher.authorizedKind("device.history.segment") {
+		t.Fatal("device.sync class did not authorize its history Event kind")
+	}
+	if h.dispatcher.authorizedKind("text") || h.dispatcher.authorizedKind("unknown.kind") {
+		t.Fatal("a foreign or unknown Event kind inherited device.sync authority")
+	}
 }
 
 func TestEndpointDelegationAuthorityMustBeNonEmptyAndUnique(t *testing.T) {

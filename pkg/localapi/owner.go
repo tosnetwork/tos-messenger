@@ -33,6 +33,7 @@ var deciding = map[Operation]struct{}{
 	OpPlaceMandate: {}, OpRevokeMandate: {},
 	OpCreateAdmissionInvite: {},
 	OpRecordEscrowLocation:  {},
+	OpExportDeviceHistory:   {},
 }
 
 // Deciding reports whether an operation needs the owner's signature.
@@ -128,6 +129,17 @@ func DecisionBytes(request Request, challenge string) ([]byte, error) {
 		canon.Text(buffer, request.QuoteCommitment)
 		canon.Text(buffer, request.EscrowAddress)
 		canon.Text(buffer, request.CapabilityClass)
+	}
+	if request.Op == OpExportDeviceHistory {
+		canon.Text(buffer, request.TargetDeviceID)
+		canon.Text(buffer, request.ConversationID)
+		canon.Uint64(buffer, request.HistorySequence)
+		canon.Text(buffer, request.PreviousSegmentDigest)
+		canon.Uint64(buffer, request.AfterCreatedAtUnix)
+		canon.Text(buffer, request.AfterEventID)
+		canon.Uint32(buffer, uint32(request.Limit))
+		canon.Text(buffer, request.IdempotencyKey)
+		canon.Uint64(buffer, request.ExpiresAtUnix)
 	}
 	// A mandate is placed by value, so what is signed is the authorisation
 	// itself rather than a name for it.

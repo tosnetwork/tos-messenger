@@ -34,6 +34,7 @@ const (
 	senderMEP = "mep_" + "3333333333333333333333333333333333333333333333333333333333333333"
 	peerMEP   = "mep_" + "6666666666666666666666666666666666666666666666666666666666666666"
 	senderDev = "dev_" + "4444444444444444444444444444444444444444444444444444444444444444"
+	targetDev = "dev_" + "7777777777777777777777777777777777777777777777777777777777777777"
 	convoID   = "conv_" + "1111111111111111111111111111111111111111111111111111111111111111"
 	sessionID = "ses_" + "8888888888888888888888888888888888888888888888888888888888888888"
 	leaseID   = "lease_" + "9999999999999999999999999999999999999999999999999999999999999999"
@@ -120,10 +121,11 @@ func testNetwork() *nativev1.NetworkDomain {
 }
 
 type harness struct {
-	server  *Server
-	journal *eventlog.Journal
-	sender  *stubSender
-	clock   time.Time
+	server     *Server
+	journal    *eventlog.Journal
+	sender     *stubSender
+	dispatcher *dispatch.Dispatcher
+	clock      time.Time
 }
 
 func newHarness(t *testing.T) *harness { return newHarnessWithPolicy(t, firewall.Default()) }
@@ -149,12 +151,13 @@ func newHarnessWithPolicy(t *testing.T, policy firewall.Policy) *harness {
 	server, err := NewServer(Config{
 		Journal: journal, Dispatcher: dispatcher, Policy: policy,
 		OwnerKey: testOwnerPublic(), LocalEndpointID: peerMEP,
-		Now: func() time.Time { return instance.clock },
+		Now: func() time.Time { return instance.clock }, DeviceIDs: []string{senderDev, targetDev},
 	})
 	if err != nil {
 		t.Fatalf("server: %v", err)
 	}
 	instance.server = server
+	instance.dispatcher = dispatcher
 	if err := journal.PutSessionState(sessionID, algorithm, e2ee.State(make([]byte, 8)), instance.clock); err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -354,7 +357,7 @@ func TestRuntimeDrainsTheInbox(t *testing.T) {
 	}
 }
 
-func TestRuntimeCannotListOrClaimDaemonOwnedAgentPacket(t *testing.T) {
+func TestRuntimeCannotListOrClaimDaemonOwnedTypedAdapters(t *testing.T) {
 	h := newHarness(t)
 	packetBody, err := payload.Encode(payload.AgentPacketMessage{Foreign: payload.Foreign{
 		Protocol: "agentpacket", Version: "1", Body: []byte("{}"),
@@ -371,6 +374,27 @@ func TestRuntimeCannotListOrClaimDaemonOwnedAgentPacket(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.receive(t, packetEvent)
+	historical := h.event(t, "historical")
+	historicalRaw, err := envelope.EncodeEventJSON(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyBody, err := payload.Encode(payload.DeviceHistorySegment{
+		SourceDeviceID: senderDev, TargetDeviceID: "dev_" + strings.Repeat("9", 64),
+		ConversationID: convoID, Sequence: 1, Events: [][]byte{historicalRaw},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyEvent, err := envelope.NewEvent(envelope.Event{
+		Network: testNetwork(), ConversationID: convoID,
+		SenderAgentID: senderID, SenderEndpointID: senderMEP, SenderDeviceID: senderDev,
+		CreatedAtUnix: baseUnix + 1, Kind: "device.history.segment", Content: historyBody,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.receive(t, historyEvent)
 	textEvent := h.event(t, "still visible")
 	h.receive(t, textEvent)
 
@@ -382,6 +406,11 @@ func TestRuntimeCannotListOrClaimDaemonOwnedAgentPacket(t *testing.T) {
 		LeaseID: leaseID, LeaseSeconds: 60})
 	if claimed.OK || claimed.Code != fault.CodeClassNotDelegated {
 		t.Fatalf("runtime claimed daemon-owned Agent Packet: %+v", claimed)
+	}
+	claimed = h.call(t, Request{Op: OpClaim, EventID: historyEvent.EventID,
+		LeaseID: "lease_" + strings.Repeat("7", 64), LeaseSeconds: 60})
+	if claimed.OK || claimed.Code != fault.CodeClassNotDelegated {
+		t.Fatalf("runtime claimed daemon-owned history segment: %+v", claimed)
 	}
 }
 
@@ -798,6 +827,99 @@ func TestRuntimeCannotApproveAnything(t *testing.T) {
 	}
 	if Permits("someone-else", OpPending) {
 		t.Fatal("an unknown principal was permitted")
+	}
+}
+
+func TestOwnerHistoryExportIsBoundedAndRetryStable(t *testing.T) {
+	h := newHarness(t)
+	composed := h.call(t, Request{Op: OpCompose, ConversationID: convoID, SessionID: sessionID,
+		RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 3600,
+		MediaType: "text/plain; charset=utf-8", Body: "durable history",
+		IdempotencyKey: "idem_" + strings.Repeat("1", 64)})
+	if !composed.OK {
+		t.Fatalf("compose history source: %+v", composed)
+	}
+	if summary, err := h.dispatcher.Sweep(context.Background(), 0); err != nil || summary.Sent != 1 {
+		t.Fatalf("deliver history source: %+v err=%v", summary, err)
+	}
+	request := Request{Op: OpExportDeviceHistory, TargetDeviceID: targetDev, ConversationID: convoID,
+		HistorySequence: 1, Limit: 1, IdempotencyKey: "idem_" + strings.Repeat("2", 64),
+		ExpiresAtUnix: baseUnix + 3600}
+	first := h.owner(t, request)
+	if !first.OK || !first.Fresh || first.EventID == "" || first.HistorySegmentDigest == "" ||
+		first.LastEventID != composed.EventID || first.LastEventCreatedAt == 0 {
+		t.Fatalf("export first history page: %+v", first)
+	}
+
+	// Arrival of more eligible history cannot change a page already bound to
+	// this idempotency intent.
+	h.clock = h.clock.Add(time.Second)
+	secondSource := h.call(t, Request{Op: OpCompose, ConversationID: convoID, SessionID: sessionID,
+		RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 3600,
+		MediaType: "text/plain; charset=utf-8", Body: "newer history",
+		IdempotencyKey: "idem_" + strings.Repeat("3", 64)})
+	if !secondSource.OK {
+		t.Fatalf("compose newer source: %+v", secondSource)
+	}
+	if summary, err := h.dispatcher.Sweep(context.Background(), 0); err != nil || summary.Sent != 1 {
+		t.Fatalf("deliver newer source: %+v err=%v", summary, err)
+	}
+	retry := h.owner(t, request)
+	if !retry.OK || retry.Fresh || retry.EventID != first.EventID ||
+		retry.HistorySegmentDigest != first.HistorySegmentDigest || retry.LastEventID != first.LastEventID {
+		t.Fatalf("history retry changed the committed page: first=%+v retry=%+v", first, retry)
+	}
+}
+
+func TestHistoryExportNeedsOwnerAndSignatureCoversTerms(t *testing.T) {
+	h := newHarness(t)
+	base := Request{Op: OpExportDeviceHistory, TargetDeviceID: targetDev, ConversationID: convoID,
+		HistorySequence: 2, PreviousSegmentDigest: "sha256:" + strings.Repeat("a", 64),
+		AfterCreatedAtUnix: baseUnix, AfterEventID: "evt_" + strings.Repeat("b", 64), Limit: 1,
+		IdempotencyKey: "idem_" + strings.Repeat("c", 64), ExpiresAtUnix: baseUnix + 3600}
+	if Permits(PrincipalRuntime, OpExportDeviceHistory) || !Permits(PrincipalOwner, OpExportDeviceHistory) ||
+		!Deciding(OpExportDeviceHistory) {
+		t.Fatal("history export is not confined to an owner decision")
+	}
+	if response := h.runtimeAttempt(t, base); response.OK || response.Code != fault.CodeClassNotDelegated {
+		t.Fatalf("runtime exported history: %+v", response)
+	}
+	challenge := h.callAs(t, PrincipalOwner, Request{Op: OpChallenge}).Challenge
+	signature, err := SignDecision(base, challenge, testOwnerKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	substituted := base
+	substituted.TargetDeviceID = "dev_" + strings.Repeat("8", 64)
+	substituted.Challenge, substituted.OwnerSignature = challenge, signature
+	if response := h.callAs(t, PrincipalOwner, substituted); response.OK || response.Code != fault.CodeNotAuthentic {
+		t.Fatalf("target substitution used an owner signature: %+v", response)
+	}
+
+	original, err := DecisionBytes(base, strings.Repeat("d", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := map[string]func(*Request){
+		"target":         func(r *Request) { r.TargetDeviceID = "dev_" + strings.Repeat("8", 64) },
+		"conversation":   func(r *Request) { r.ConversationID = "conv_" + strings.Repeat("9", 64) },
+		"sequence":       func(r *Request) { r.HistorySequence++ },
+		"predecessor":    func(r *Request) { r.PreviousSegmentDigest = "sha256:" + strings.Repeat("e", 64) },
+		"created cursor": func(r *Request) { r.AfterCreatedAtUnix++ },
+		"event cursor":   func(r *Request) { r.AfterEventID = "evt_" + strings.Repeat("f", 64) },
+		"limit":          func(r *Request) { r.Limit++ },
+		"idempotency":    func(r *Request) { r.IdempotencyKey = "idem_" + strings.Repeat("0", 64) },
+		"expiry":         func(r *Request) { r.ExpiresAtUnix++ },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			mutate(&changed)
+			encoded, err := DecisionBytes(changed, strings.Repeat("d", 64))
+			if err != nil || bytes.Equal(encoded, original) {
+				t.Fatalf("term is not committed: err=%v", err)
+			}
+		})
 	}
 }
 

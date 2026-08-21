@@ -101,9 +101,10 @@ var eventKinds = map[string]kindSpec{
 	"service.escrow.reference":  {class: "service"},
 	"service.receipt.reference": {class: "service"},
 
-	"delivery.ack":    {class: "delivery"},
-	"application.ack": {class: "application"},
-	"read.ack":        {class: "read"},
+	"delivery.ack":           {class: "delivery"},
+	"application.ack":        {class: "application"},
+	"read.ack":               {class: "read"},
+	"device.history.segment": {class: "device.sync"},
 
 	"room.invite":            {class: "room"},
 	"room.membership.commit": {class: "room"},

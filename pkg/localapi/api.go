@@ -23,9 +23,11 @@ import (
 	"io"
 	"regexp"
 
+	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/localwire"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
+	"github.com/tosnetwork/tos-messenger/pkg/payload"
 )
 
 const (
@@ -117,6 +119,10 @@ const (
 	// the commitment and every expected purchase term plus this installation's
 	// complete network identity matches.
 	OpVerifyAcceptedQuote Operation = "quotes.verify"
+	// OpExportDeviceHistory is an explicit owner decision to disclose one
+	// bounded direct-conversation history page to another current device of
+	// this Endpoint. The Agent runtime may neither request nor receive it.
+	OpExportDeviceHistory Operation = "device-history.export"
 )
 
 // Principal is which side of the boundary a connection speaks for.
@@ -149,6 +155,7 @@ var permitted = map[Principal]map[Operation]struct{}{
 		OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {}, OpChallenge: {},
 		OpCreateAdmissionInvite: {},
 		OpRecordEscrowLocation:  {},
+		OpExportDeviceHistory:   {},
 	},
 }
 
@@ -172,6 +179,7 @@ var operations = map[Operation]struct{}{
 	OpCreateAdmissionInvite: {},
 	OpRecordEscrowLocation:  {},
 	OpVerifyAcceptedQuote:   {},
+	OpExportDeviceHistory:   {},
 }
 
 var (
@@ -185,6 +193,7 @@ var (
 	roomPattern         = regexp.MustCompile(`^room_[0-9a-f]{64}$`)
 	mandatePattern      = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
 	agentPattern        = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
+	devicePattern       = regexp.MustCompile(`^dev_[0-9a-f]{64}$`)
 	challengePattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	quotePattern        = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
 )
@@ -245,6 +254,14 @@ type Request struct {
 	EscrowAddress      string         `json:"escrow_address,omitempty"`
 	CapabilityClass    string         `json:"capability_class,omitempty"`
 	ExpectedQuoteTerms *PurchaseTerms `json:"expected_quote_terms,omitempty"`
+
+	// Device-history export terms are all owner-signed. The source device,
+	// recipient Endpoint and pair-session identifier are daemon-derived.
+	TargetDeviceID        string `json:"target_device_id,omitempty"`
+	HistorySequence       uint64 `json:"history_sequence,omitempty"`
+	PreviousSegmentDigest string `json:"previous_segment_digest,omitempty"`
+	AfterCreatedAtUnix    uint64 `json:"after_created_at_unix,omitempty"`
+	AfterEventID          string `json:"after_event_id,omitempty"`
 }
 
 // AssetIdentity names an asset the way the chain does.
@@ -383,6 +400,11 @@ type Response struct {
 	// FinalizedQuote is present only after the daemon resolved and exactly
 	// matched a finalized Accepted Quote to the submitted terms and network.
 	FinalizedQuote *FinalizedQuoteEvidence `json:"finalized_quote,omitempty"`
+	// History export returns the committed page cursor and digest needed to
+	// authorize the next segment without exposing the page body on this API.
+	HistorySegmentDigest string `json:"history_segment_digest,omitempty"`
+	LastEventCreatedAt   uint64 `json:"last_event_created_at_unix,omitempty"`
+	LastEventID          string `json:"last_event_id,omitempty"`
 }
 
 type FinalizedQuoteEvidence struct {
@@ -532,10 +554,17 @@ func ValidateRequest(request Request) error {
 	if request.Op != OpVerifyAcceptedQuote && request.ExpectedQuoteTerms != nil {
 		return errors.New("only Quote verification carries expected Quote terms")
 	}
-	if request.Op != OpCompose && (request.ConversationID != "" || request.RoomID != "" ||
-		request.ReplyToEventID != "" || request.MembershipEpoch != 0 || request.MediaType != "" ||
-		request.Body != "" || request.IdempotencyKey != "") {
+	if request.Op != OpCompose && request.Op != OpExportDeviceHistory &&
+		(request.ConversationID != "" || request.IdempotencyKey != "") {
 		return errors.New("only outbound composition carries message semantics")
+	}
+	if request.Op != OpCompose && (request.RoomID != "" || request.ReplyToEventID != "" ||
+		request.MembershipEpoch != 0 || request.MediaType != "" || request.Body != "") {
+		return errors.New("only message composition carries message body semantics")
+	}
+	if request.Op != OpExportDeviceHistory && (request.TargetDeviceID != "" || request.HistorySequence != 0 ||
+		request.PreviousSegmentDigest != "" || request.AfterCreatedAtUnix != 0 || request.AfterEventID != "") {
+		return errors.New("only device-history export carries history terms")
 	}
 	switch request.Op {
 	case OpPending, OpAwaitingAdmission:
@@ -662,6 +691,17 @@ func ValidateRequest(request Request) error {
 			return errors.New("Quote verification carries invalid expected terms")
 		}
 		return requireEmpty(request, "Quote verification", request.EventID, request.LeaseID, request.SessionID)
+	case OpExportDeviceHistory:
+		validCursor := (request.HistorySequence == 1 && request.PreviousSegmentDigest == "" &&
+			request.AfterCreatedAtUnix == 0 && request.AfterEventID == "") ||
+			(request.HistorySequence > 1 && canon.ValidDigest(request.PreviousSegmentDigest) &&
+				request.AfterCreatedAtUnix > 0 && eventPattern.MatchString(request.AfterEventID))
+		if !conversationPattern.MatchString(request.ConversationID) ||
+			!devicePattern.MatchString(request.TargetDeviceID) || !idempotencyPattern.MatchString(request.IdempotencyKey) ||
+			request.ExpiresAtUnix == 0 || request.Limit < 0 || request.Limit > payload.MaxHistoryEventsPerSegment || !validCursor {
+			return errors.New("history export needs canonical target, cursor, expiry and idempotency terms")
+		}
+		return requireEmpty(request, "device-history export", request.EventID, request.LeaseID, request.SessionID)
 	case OpActionStatus, OpClaimAction:
 		if !actionPattern.MatchString(request.ActionID) {
 			return errors.New("an action status needs an action")

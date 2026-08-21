@@ -42,9 +42,10 @@ var codecs = map[string]codec{
 	"service.escrow.reference":  {schema: EscrowReference{}.Schema(), decode: decodeEscrowReference},
 	"service.receipt.reference": {schema: ReceiptReference{}.Schema(), decode: decodeReceiptReference},
 
-	"delivery.ack":    {schema: DeliveryAck{}.Schema(), decode: decodeDeliveryAck},
-	"application.ack": {schema: ApplicationAck{}.Schema(), decode: decodeApplicationAck},
-	"read.ack":        {schema: ReadAck{}.Schema(), decode: decodeReadAck},
+	"delivery.ack":           {schema: DeliveryAck{}.Schema(), decode: decodeDeliveryAck},
+	"application.ack":        {schema: ApplicationAck{}.Schema(), decode: decodeApplicationAck},
+	"read.ack":               {schema: ReadAck{}.Schema(), decode: decodeReadAck},
+	"device.history.segment": {schema: DeviceHistorySegment{}.Schema(), decode: decodeDeviceHistorySegment},
 
 	"room.invite":            {schema: RoomInvite{}.Schema(), decode: decodeRoomInvite},
 	"room.membership.commit": {schema: RoomMembershipCommit{}.Schema(), decode: decodeRoomMembershipCommit},

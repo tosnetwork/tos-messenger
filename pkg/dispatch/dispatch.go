@@ -98,6 +98,19 @@ type ComposeRequest struct {
 	ExpiresAtUnix                          uint64
 }
 
+// HistoryRequest is one owner-authorized direct-history page. The dispatcher
+// derives the source identity, recipient endpoint, device session, network,
+// Event kind, and Event ID; none is supplied by the caller.
+type HistoryRequest struct {
+	TargetDeviceID, ConversationID string
+	Sequence                       uint64
+	PreviousSegmentDigest          string
+	AfterCreatedAtUnix             uint64
+	AfterEventID, IdempotencyKey   string
+	Limit                          int
+	ExpiresAtUnix                  uint64
+}
+
 // DefaultAttemptLease is how long one sweep holds a delivery by default.
 const DefaultAttemptLease = 2 * time.Minute
 
@@ -199,6 +212,14 @@ func (d *Dispatcher) CanSend() bool {
 	return d != nil && d.config.Suite != nil && d.config.Sender != nil && d.config.Bindings != nil
 }
 
+// LocalIdentity returns the daemon-owned identity used for every composition.
+func (d *Dispatcher) LocalIdentity() Identity {
+	if d == nil {
+		return Identity{}
+	}
+	return d.config.Identity
+}
+
 // Queue records an event for delivery.
 //
 // The plaintext is stored before anything is sealed, so a crash between
@@ -211,10 +232,8 @@ func (d *Dispatcher) Queue(event envelope.Event, sessionID, recipientEndpointID 
 	if err := envelope.ValidateEvent(event); err != nil {
 		return false, eventlog.Delivery{}, err
 	}
-	if d.allowed != nil {
-		if _, authorized := d.allowed[event.Kind]; !authorized {
-			return false, eventlog.Delivery{}, errors.New("event class is not authorized by the endpoint delegation")
-		}
+	if !d.authorizedKind(event.Kind) {
+		return false, eventlog.Delivery{}, errors.New("event class is not authorized by the endpoint delegation")
 	}
 	// A local-only kind carries authority granted here. The receiving side
 	// refuses it on every route, and refusing to send it is what makes the
@@ -272,6 +291,9 @@ func (d *Dispatcher) ComposeAndQueue(request ComposeRequest) (envelope.Event, bo
 		kind = "room.message"
 		body = payload.RoomMessage{RoomID: request.RoomID, Epoch: request.MembershipEpoch, MediaType: request.MediaType, Body: request.Body}
 	}
+	if !d.authorizedKind(kind) {
+		return envelope.Event{}, false, errors.New("event class is not authorized by the endpoint delegation")
+	}
 	content, err := payload.Encode(body)
 	if err != nil {
 		return envelope.Event{}, false, err
@@ -312,6 +334,94 @@ func (d *Dispatcher) ComposeAndQueue(request ComposeRequest) (envelope.Event, bo
 	}
 	fresh, _, err := d.config.Journal.Enqueue(chosen)
 	return event, fresh, err
+}
+
+// ComposeHistoryAndQueue builds a stable page from durable applied/delivered
+// Events and queues it to another device of this Endpoint. The idempotency
+// intent describes the requested page, not the current journal contents, so a
+// retry returns the first committed Event even if newer messages arrived.
+func (d *Dispatcher) ComposeHistoryAndQueue(request HistoryRequest) (envelope.Event, payload.DeviceHistorySegment, bool, error) {
+	if d == nil || d.config.Network == nil {
+		return envelope.Event{}, payload.DeviceHistorySegment{}, false, errors.New("history composition has no network")
+	}
+	if !d.authorizedKind("device.history.segment") {
+		return envelope.Event{}, payload.DeviceHistorySegment{}, false,
+			errors.New("event class is not authorized by the endpoint delegation")
+	}
+	now := d.config.Now()
+	if now.IsZero() || now.Unix() < 0 || request.ExpiresAtUnix <= uint64(now.Unix()) {
+		return envelope.Event{}, payload.DeviceHistorySegment{}, false, errors.New("invalid history lifetime")
+	}
+	sessionID, err := e2ee.DeviceSessionID(d.config.Identity.DeviceID, request.TargetDeviceID)
+	if err != nil {
+		return envelope.Event{}, payload.DeviceHistorySegment{}, false, err
+	}
+	segment, err := d.config.Journal.BuildHistorySegment(d.config.Identity.DeviceID, request.TargetDeviceID,
+		request.ConversationID, request.Sequence, request.PreviousSegmentDigest,
+		request.AfterCreatedAtUnix, request.AfterEventID, request.Limit)
+	if err != nil {
+		return envelope.Event{}, payload.DeviceHistorySegment{}, false, err
+	}
+	content, err := payload.Encode(segment)
+	if err != nil {
+		return envelope.Event{}, payload.DeviceHistorySegment{}, false, err
+	}
+	event, err := envelope.NewEvent(envelope.Event{Network: d.config.Network,
+		ConversationID: request.ConversationID, SenderAgentID: d.config.Identity.AgentID,
+		SenderEndpointID: d.config.Identity.EndpointID, SenderDeviceID: d.config.Identity.DeviceID,
+		CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: request.ExpiresAtUnix,
+		Kind: "device.history.segment", IdempotencyKey: strings.TrimPrefix(request.IdempotencyKey, "idem_"), Content: content})
+	if err != nil {
+		return envelope.Event{}, payload.DeviceHistorySegment{}, false, err
+	}
+	encoded, err := envelope.EncodeEventJSON(event)
+	if err != nil {
+		return envelope.Event{}, payload.DeviceHistorySegment{}, false, err
+	}
+	intent := bytes.NewBufferString(canon.DomainOutboundIntent)
+	for _, value := range []string{d.config.Network.NetworkId, d.config.Network.GenesisRootHash,
+		d.config.Network.GenesisFileHash, d.config.Identity.AgentID, d.config.Identity.EndpointID,
+		d.config.Identity.DeviceID, request.TargetDeviceID, request.ConversationID,
+		request.PreviousSegmentDigest, request.AfterEventID, request.IdempotencyKey, sessionID} {
+		canon.Text(intent, value)
+	}
+	canon.Uint64(intent, request.Sequence)
+	canon.Uint64(intent, request.AfterCreatedAtUnix)
+	canon.Uint32(intent, uint32(request.Limit))
+	canon.Uint64(intent, request.ExpiresAtUnix)
+	chosen, _, err := d.config.Journal.ClaimOutboundComposition(request.IdempotencyKey,
+		canon.Digest(intent.Bytes()), eventlog.Outbound{EventID: event.EventID, SessionID: sessionID,
+			RecipientEndpointID: d.config.Identity.EndpointID, ConversationID: request.ConversationID,
+			Payload: encoded, CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: request.ExpiresAtUnix})
+	if err != nil {
+		return envelope.Event{}, payload.DeviceHistorySegment{}, false, err
+	}
+	if chosen.EventID != event.EventID {
+		event, err = envelope.DecodeEventJSON(chosen.Payload)
+		if err != nil {
+			return envelope.Event{}, payload.DeviceHistorySegment{}, false, err
+		}
+		decoded, decodeErr := payload.Decode(event.Kind, event.Content)
+		var ok bool
+		segment, ok = decoded.(payload.DeviceHistorySegment)
+		if decodeErr != nil || !ok {
+			return envelope.Event{}, payload.DeviceHistorySegment{}, false, errors.New("invalid committed history composition")
+		}
+	}
+	fresh, _, err := d.config.Journal.Enqueue(chosen)
+	return event, segment, fresh, err
+}
+
+func (d *Dispatcher) authorizedKind(kind string) bool {
+	class, known := envelope.ClassOf(kind)
+	if !known {
+		return false
+	}
+	if d.allowed == nil {
+		return true
+	}
+	_, authorized := d.allowed[class]
+	return authorized
 }
 
 // Sweep attempts every delivery whose next attempt has arrived.

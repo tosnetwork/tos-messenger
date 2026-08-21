@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"sort"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/internal/localwire"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
@@ -47,6 +49,9 @@ type Config struct {
 	Timeout           time.Duration
 	QuoteResolver     AddressedQuoteResolver
 	Network           *nativev1.NetworkDomain
+	// DeviceIDs is the complete, sorted current Endpoint roster. An empty
+	// roster disables owner-authorized history export.
+	DeviceIDs []string
 }
 
 // AddressedQuoteResolver treats a runtime-supplied escrow address only as a
@@ -95,6 +100,23 @@ func NewServer(config Config) (*Server, error) {
 		}
 	} else if config.Network != nil {
 		return nil, errors.New("a local API network binding requires a Quote resolver")
+	}
+	if len(config.DeviceIDs) > 0 {
+		if !sort.StringsAreSorted(config.DeviceIDs) {
+			return nil, errors.New("device-history roster must be sorted")
+		}
+		localDeviceID := config.Dispatcher.LocalIdentity().DeviceID
+		foundLocal := false
+		for index, deviceID := range config.DeviceIDs {
+			if !ids.Device.MatchString(deviceID) || index > 0 && config.DeviceIDs[index-1] == deviceID {
+				return nil, errors.New("invalid device-history roster")
+			}
+			foundLocal = foundLocal || deviceID == localDeviceID
+		}
+		if !foundLocal {
+			return nil, errors.New("device-history roster omits the local device")
+		}
+		config.DeviceIDs = append([]string(nil), config.DeviceIDs...)
 	}
 	return &Server{config: config, challenges: newChallenges(config.ChallengeLifetime)}, nil
 }
@@ -217,6 +239,8 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.recordEscrowLocation(request)
 	case OpVerifyAcceptedQuote:
 		return s.verifyAcceptedQuote(ctx, request)
+	case OpExportDeviceHistory:
+		return s.exportDeviceHistory(request)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
 }
@@ -293,7 +317,7 @@ func (s *Server) pending(request Request, now time.Time) Response {
 			continue
 		}
 		decoded, err := envelope.DecodeEventJSON(event.Event)
-		if err != nil || decoded.Kind == "agent.packet" {
+		if err != nil || daemonApplicationKind(decoded.Kind) {
 			continue
 		}
 		events = append(events, event)
@@ -305,8 +329,8 @@ func (s *Server) pending(request Request, now time.Time) Response {
 }
 
 func (s *Server) claim(request Request, now time.Time) Response {
-	record, err := s.config.Journal.ClaimForApplicationExceptKind(request.EventID, request.LeaseID, now,
-		time.Duration(request.LeaseSeconds)*time.Second, "agent.packet")
+	record, err := s.config.Journal.ClaimForApplicationExceptKinds(request.EventID, request.LeaseID, now,
+		time.Duration(request.LeaseSeconds)*time.Second, []string{"agent.packet", "device.history.segment"})
 	if err != nil {
 		return refuse(claimCode(err), err)
 	}
@@ -315,6 +339,10 @@ func (s *Server) claim(request Request, now time.Time) Response {
 		return refuse(fault.CodeInternal, err)
 	}
 	return Response{OK: true, Event: &event}
+}
+
+func daemonApplicationKind(kind string) bool {
+	return kind == "agent.packet" || kind == "device.history.segment"
 }
 
 func (s *Server) complete(request Request, now time.Time) Response {
@@ -362,6 +390,31 @@ func (s *Server) compose(request Request) Response {
 		return refuse(fault.CodeInternal, err)
 	}
 	return Response{OK: true, Fresh: fresh, EventID: event.EventID}
+}
+
+func (s *Server) exportDeviceHistory(request Request) Response {
+	found := false
+	for _, deviceID := range s.config.DeviceIDs {
+		found = found || deviceID == request.TargetDeviceID
+	}
+	if !found || request.TargetDeviceID == s.config.Dispatcher.LocalIdentity().DeviceID {
+		return refuse(fault.CodeDeviceRevoked, errors.New("history target is not another current device"))
+	}
+	event, segment, fresh, err := s.config.Dispatcher.ComposeHistoryAndQueue(dispatch.HistoryRequest{
+		TargetDeviceID: request.TargetDeviceID, ConversationID: request.ConversationID,
+		Sequence: request.HistorySequence, PreviousSegmentDigest: request.PreviousSegmentDigest,
+		AfterCreatedAtUnix: request.AfterCreatedAtUnix, AfterEventID: request.AfterEventID,
+		Limit: request.Limit, IdempotencyKey: request.IdempotencyKey, ExpiresAtUnix: request.ExpiresAtUnix,
+	})
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	last, err := envelope.DecodeEventJSON(segment.Events[len(segment.Events)-1])
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, Fresh: fresh, EventID: event.EventID,
+		HistorySegmentDigest: canon.Digest(event.Content), LastEventCreatedAt: last.CreatedAtUnix, LastEventID: last.EventID}
 }
 
 // awaitingAdmission lists what the owner has yet to decide about.

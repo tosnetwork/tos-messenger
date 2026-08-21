@@ -48,6 +48,7 @@ const (
 	outboundDir    = "outbound"
 	compositionDir = "outbound-compositions"
 	moderationDir  = "room-moderation"
+	historySyncDir = "history-sync"
 
 	// MaxRecordBytes bounds one on-disk record. It has to hold a complete
 	// event, because a record without its event cannot be re-delivered, and an
@@ -303,7 +304,7 @@ func openJournalAt(root string, quota Quota) (*Journal, error) {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return nil, errors.New("event journal root must be a private directory")
 	}
-	for _, name := range []string{inboundDir, outboundDir, compositionDir, moderationDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, devicePrekeyDir, prekeyContributionDir, prekeyPublicationDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, escrowLocatorDir, agentPacketDir, admissionInviteDir} {
+	for _, name := range []string{inboundDir, outboundDir, compositionDir, moderationDir, historySyncDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, devicePrekeyDir, prekeyContributionDir, prekeyPublicationDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, escrowLocatorDir, agentPacketDir, admissionInviteDir} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			return nil, errors.New("create event journal directory")
 		}
@@ -495,7 +496,7 @@ func (j *Journal) ListPending(now time.Time, limit int) ([]Record, error) {
 // event under a live lease may not, which is what stops two attempts from
 // calling the same tool or asking for the same approval twice.
 func (j *Journal) ClaimForApplication(eventID, leaseID string, now time.Time, lease time.Duration) (Record, error) {
-	return j.claimForApplicationKind(eventID, leaseID, now, lease, "", false)
+	return j.claimForApplicationKind(eventID, leaseID, now, lease, "", nil)
 }
 
 // ClaimForApplicationKind atomically leases an event only when its decoded
@@ -505,7 +506,7 @@ func (j *Journal) ClaimForApplicationKind(eventID, leaseID string, now time.Time
 	if kind == "" {
 		return Record{}, errors.New("application event kind is required")
 	}
-	return j.claimForApplicationKind(eventID, leaseID, now, lease, kind, true)
+	return j.claimForApplicationKind(eventID, leaseID, now, lease, kind, nil)
 }
 
 // ClaimForApplicationExceptKind atomically leases an event unless it carries
@@ -514,10 +515,29 @@ func (j *Journal) ClaimForApplicationExceptKind(eventID, leaseID string, now tim
 	if kind == "" {
 		return Record{}, errors.New("excluded application event kind is required")
 	}
-	return j.claimForApplicationKind(eventID, leaseID, now, lease, kind, false)
+	return j.ClaimForApplicationExceptKinds(eventID, leaseID, now, lease, []string{kind})
 }
 
-func (j *Journal) claimForApplicationKind(eventID, leaseID string, now time.Time, lease time.Duration, kind string, require bool) (Record, error) {
+// ClaimForApplicationExceptKinds atomically excludes every daemon-owned typed
+// adapter from the general runtime claim path.
+func (j *Journal) ClaimForApplicationExceptKinds(eventID, leaseID string, now time.Time, lease time.Duration, kinds []string) (Record, error) {
+	if len(kinds) == 0 || len(kinds) > 16 {
+		return Record{}, errors.New("excluded application event kinds are required and bounded")
+	}
+	excluded := make(map[string]struct{}, len(kinds))
+	for _, kind := range kinds {
+		if kind == "" {
+			return Record{}, errors.New("excluded application event kind is required")
+		}
+		if _, duplicate := excluded[kind]; duplicate {
+			return Record{}, errors.New("excluded application event kinds must be unique")
+		}
+		excluded[kind] = struct{}{}
+	}
+	return j.claimForApplicationKind(eventID, leaseID, now, lease, "", excluded)
+}
+
+func (j *Journal) claimForApplicationKind(eventID, leaseID string, now time.Time, lease time.Duration, required string, excluded map[string]struct{}) (Record, error) {
 	if err := j.usable(); err != nil {
 		return Record{}, err
 	}
@@ -545,7 +565,7 @@ func (j *Journal) claimForApplicationKind(eventID, leaseID string, now time.Time
 		}
 		return Record{}, err
 	}
-	if kind != "" {
+	if required != "" || len(excluded) != 0 {
 		payload, payloadErr := record.Payload()
 		if payloadErr != nil {
 			return Record{}, payloadErr
@@ -556,8 +576,10 @@ func (j *Journal) claimForApplicationKind(eventID, leaseID string, now time.Time
 		if json.Unmarshal(payload, &document) != nil || document.Kind == "" {
 			return Record{}, errors.New("stored event has no application kind")
 		}
-		matches := document.Kind == kind
-		if matches != require {
+		if required != "" && document.Kind != required {
+			return Record{}, ErrApplicationKind
+		}
+		if _, blocked := excluded[document.Kind]; blocked {
 			return Record{}, ErrApplicationKind
 		}
 	}

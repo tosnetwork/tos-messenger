@@ -98,6 +98,10 @@ func sample(kind string) Payload {
 			DecidedAtUnix: 1_800_000_000}
 	case "read.ack":
 		return ReadAck{EventID: "evt_" + strings.Repeat("8", 64), ReadAtUnix: 1_800_000_000}
+	case "device.history.segment":
+		return DeviceHistorySegment{SourceDeviceID: "dev_" + strings.Repeat("1", 64),
+			TargetDeviceID: "dev_" + strings.Repeat("2", 64), ConversationID: "conv_" + strings.Repeat("3", 64),
+			Sequence: 1, Events: [][]byte{[]byte("historical Event JSON")}}
 	case "room.invite":
 		return RoomInvite{RoomID: "room_" + strings.Repeat("9", 64),
 			InviteeAgentID: "agent_" + strings.Repeat("a", 64),

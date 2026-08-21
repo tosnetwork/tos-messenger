@@ -18,6 +18,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
+	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
@@ -165,6 +166,7 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 	serverConfig := localapi.Config{
 		Policy: config.FirewallPolicy(), OwnerKey: ownerKey,
 		Journal: journal, Dispatcher: dispatcher, LocalEndpointID: config.EndpointID,
+		DeviceIDs: append([]string(nil), config.Publication.DeviceIDs...),
 	}
 	if quoteResolver != nil {
 		serverConfig.QuoteResolver = quoteResolver
@@ -353,6 +355,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.runAgentPackets(ctx)
 		}()
 	}
+	group.Add(1)
+	go func() {
+		defer group.Done()
+		d.runHistorySync(ctx)
+	}()
 
 	group.Add(1)
 	go func() {
@@ -370,6 +377,91 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	group.Wait()
 	return d.Close()
+}
+
+func (d *Daemon) runHistorySync(ctx context.Context) {
+	ticker := time.NewTicker(d.config.SweepInterval())
+	defer ticker.Stop()
+	for {
+		d.sweepHistorySync(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (d *Daemon) sweepHistorySync(ctx context.Context) {
+	nowFn := d.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	records, err := d.journal.ListPending(nowFn(), 0)
+	if err != nil {
+		d.report("list device history", err)
+		return
+	}
+	for _, record := range records {
+		if ctx.Err() != nil {
+			return
+		}
+		raw, err := record.Payload()
+		if err != nil {
+			continue
+		}
+		event, err := envelope.DecodeEventJSON(raw)
+		if err != nil || event.Kind != "device.history.segment" {
+			continue
+		}
+		decoded, err := payload.Decode(event.Kind, event.Content)
+		segment, ok := decoded.(payload.DeviceHistorySegment)
+		if err != nil || !ok {
+			d.report("decode device history", errors.New("invalid admitted device history payload"))
+			continue
+		}
+		var entropy [32]byte
+		if _, err := rand.Read(entropy[:]); err != nil {
+			d.report("claim device history", err)
+			return
+		}
+		leaseID, err := eventlog.NewLeaseID(entropy[:])
+		if err != nil {
+			d.report("claim device history", err)
+			return
+		}
+		now := nowFn()
+		if _, err := d.journal.ClaimForApplicationKind(record.EventID, leaseID, now, time.Minute, "device.history.segment"); err != nil {
+			if !errors.Is(err, eventlog.ErrLeaseMismatch) && !errors.Is(err, eventlog.ErrNotPending) {
+				d.report("claim device history", err)
+			}
+			continue
+		}
+		_, applyErr := d.journal.ApplyHistorySegment(event, segment, d.config.AgentID, d.config.EndpointID,
+			d.config.DeviceID, d.config.Publication.DeviceIDs, now)
+		if applyErr == nil {
+			if _, err := d.journal.CompleteApplication(record.EventID, leaseID, nowFn()); err != nil {
+				d.report("complete device history", err)
+			}
+			continue
+		}
+		if errors.Is(applyErr, eventlog.ErrHistorySequence) {
+			d.report("await prior device history", applyErr)
+			continue
+		}
+		code := fault.CodePayloadMalformed
+		if errors.Is(applyErr, eventlog.ErrHistoryDevice) {
+			code = fault.CodeDeviceRevoked
+		}
+		if errors.Is(applyErr, eventlog.ErrHistoryContent) || errors.Is(applyErr, eventlog.ErrHistoryRoute) ||
+			errors.Is(applyErr, eventlog.ErrHistoryDevice) {
+			if _, err := d.journal.RejectApplication(record.EventID, leaseID, code, nowFn()); err != nil {
+				d.report("reject device history", err)
+			}
+			continue
+		}
+		d.report("apply device history", applyErr)
+	}
 }
 
 func (d *Daemon) runAgentPackets(ctx context.Context) {
