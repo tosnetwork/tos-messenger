@@ -28,8 +28,10 @@ existing transport-independent at-most-once claim.
 The bridge is compatible with `tos-ai/pkg/agentpacketadapter`, which already
 maps purchase-bound packet payloads into the same Native Execution Gate used by
 A2A and MCP. This repository does not import `tos-ai` or duplicate that mapping.
-`tos-ai` `a3c06d5` adds the concurrent A2A/MCP/Agent Packet execution matrix:
+`tos-ai` `a3c06d5` and `a9928de` add the A2A/MCP/Agent Packet execution matrix:
 all three adapters race one purchase through one shared Gate, exactly one
 transport succeeds, all three claims reach the Gate, and the runner executes
-once. The daemon/OpenFox typed receiver wiring remains to add, and live
-Messenger transport remains blocked on M0-R.
+once. The four ordered pairs A2A→Packet, MCP→Packet, Packet→A2A and Packet→MCP
+also permit only the first transport to execute. The daemon/OpenFox typed
+receiver wiring remains to add, and live Messenger transport remains blocked
+on M0-R.
