@@ -66,7 +66,7 @@ func TestOpenMLSProxiesEncryptOpaqueRelayAndRestart(t *testing.T) {
 	}
 
 	opening := "plaintext must never reach the relay"
-	sent := callProxy[labgroup.Message](t, proxies[0], members[0], tokens[0], http.MethodPost, "/v1/messages", map[string]string{"room_id": room.RoomID, "client_id": "opening-1", "content": opening})
+	sent := callProxy[Message](t, proxies[0], members[0], tokens[0], http.MethodPost, "/v1/messages", map[string]string{"room_id": room.RoomID, "client_id": "opening-1", "content": opening})
 	if sent.Content != opening {
 		t.Fatalf("send response = %q", sent.Content)
 	}
@@ -74,7 +74,7 @@ func TestOpenMLSProxiesEncryptOpaqueRelayAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	retried := callProxy[labgroup.Message](t, proxies[0], members[0], tokens[0], http.MethodPost, "/v1/messages", map[string]string{"room_id": room.RoomID, "client_id": "opening-1", "content": opening})
+	retried := callProxy[Message](t, proxies[0], members[0], tokens[0], http.MethodPost, "/v1/messages", map[string]string{"room_id": room.RoomID, "client_id": "opening-1", "content": opening})
 	if retried.MessageID != sent.MessageID {
 		t.Fatal("exact retry created another Relay message")
 	}
@@ -119,7 +119,7 @@ func TestOpenMLSProxiesEncryptOpaqueRelayAndRestart(t *testing.T) {
 	}
 	for i := 1; i < len(proxies); i++ {
 		messages := callProxy[struct {
-			Messages []labgroup.Message `json:"messages"`
+			Messages []Message `json:"messages"`
 		}](t, proxies[i], members[i], tokens[i], http.MethodGet, "/v1/messages?room_id="+room.RoomID+"&after=0", nil)
 		if len(messages.Messages) != 1 || messages.Messages[0].Content != opening {
 			t.Fatalf("agent %d messages = %+v", i, messages.Messages)
@@ -128,13 +128,27 @@ func TestOpenMLSProxiesEncryptOpaqueRelayAndRestart(t *testing.T) {
 
 	proxies = openTestProxies(t, stateDir, members, tokens, driver, relay)
 	reply := "reply after every Agent proxy restarted"
-	_ = callProxy[labgroup.Message](t, proxies[2], members[2], tokens[2], http.MethodPost, "/v1/messages", map[string]string{"room_id": room.RoomID, "client_id": "reply-1", "content": reply})
+	replied := callProxy[Message](t, proxies[2], members[2], tokens[2], http.MethodPost, "/v1/messages", map[string]string{
+		"room_id": room.RoomID, "client_id": "reply-1", "content": reply, "reply_to_event_id": sent.MessageID,
+	})
+	if replied.ReplyToEventID != sent.MessageID {
+		t.Fatalf("send response lost encrypted reply binding: %+v", replied)
+	}
 	messages := callProxy[struct {
-		Messages []labgroup.Message `json:"messages"`
+		Messages []Message `json:"messages"`
 	}](t, proxies[0], members[0], tokens[0], http.MethodGet, "/v1/messages?room_id="+room.RoomID+"&after=1", nil)
-	if len(messages.Messages) != 1 || messages.Messages[0].Content != reply {
+	if len(messages.Messages) != 1 || messages.Messages[0].Content != reply ||
+		messages.Messages[0].ReplyToEventID != sent.MessageID {
 		t.Fatalf("post-restart reply = %+v", messages.Messages)
 	}
+	relayRaw, err = os.ReadFile(relayPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(relayRaw, []byte(reply)) || bytes.Contains(relayRaw, []byte("reply_to_event_id")) {
+		t.Fatal("opaque Relay persisted reply plaintext metadata")
+	}
+	assertReplySubstitutionRefused(t, proxies[2], members[2], tokens[2], room.RoomID, reply)
 	wrong := httptest.NewRequest(http.MethodGet, "/v1/rooms", nil)
 	wrong.Header.Set("X-Tos-Agent-Id", members[0])
 	wrong.Header.Set("Authorization", "Bearer wrong-secret-token")
@@ -142,6 +156,25 @@ func TestOpenMLSProxiesEncryptOpaqueRelayAndRestart(t *testing.T) {
 	proxies[0].ServeHTTP(recorder, wrong)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong credential status = %d", recorder.Code)
+	}
+}
+
+func assertReplySubstitutionRefused(t *testing.T, handler http.Handler, agentID, token, roomID, content string) {
+	t.Helper()
+	encoded, err := json.Marshal(map[string]string{
+		"room_id": roomID, "client_id": "reply-1", "content": content,
+		"reply_to_event_id": "msg_" + strings.Repeat("f", 64),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(encoded))
+	request.Header.Set("X-Tos-Agent-Id", agentID)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("reply-reference substitution status = %d, want %d", recorder.Code, http.StatusConflict)
 	}
 }
 
@@ -232,5 +265,34 @@ func TestMessageAADSeparatesSenderAndClient(t *testing.T) {
 	second := messageAAD("room_"+strings.Repeat("a", 64), "agent_"+strings.Repeat("b", 64), "two")
 	if bytes.Equal(first, second) {
 		t.Fatal("client id did not separate MLS AAD")
+	}
+}
+
+func TestEncryptedMessageFrameIsStrictAndMigratesLegacyContent(t *testing.T) {
+	replyTo := "msg_" + strings.Repeat("a", 64)
+	encoded, err := encodeEncryptedMessage("bound reply", replyTo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, decodedReply, err := decodeEncryptedMessage(encoded)
+	if err != nil || content != "bound reply" || decodedReply != replyTo {
+		t.Fatalf("round trip = %q, %q, %v", content, decodedReply, err)
+	}
+	legacyContent, legacyReply, err := decodeEncryptedMessage([]byte("legacy in-flight content"))
+	if err != nil || legacyContent != "legacy in-flight content" || legacyReply != "" {
+		t.Fatalf("legacy migration = %q, %q, %v", legacyContent, legacyReply, err)
+	}
+	for name, raw := range map[string][]byte{
+		"unknown field":   append(append([]byte(encryptedMessagePrefix), []byte(`{"schema":"`+EncryptedMessageSchema+`","content":"x","extra":true}`)...), '\n'),
+		"duplicate field": append([]byte(encryptedMessagePrefix), []byte(`{"schema":"`+EncryptedMessageSchema+`","content":"first","content":"second"}`)...),
+		"noncanonical":    append([]byte(encryptedMessagePrefix), []byte(`{ "schema":"`+EncryptedMessageSchema+`", "content":"x" }`)...),
+		"bad reply":       append([]byte(encryptedMessagePrefix), []byte(`{"schema":"`+EncryptedMessageSchema+`","content":"x","reply_to_event_id":"msg_bad"}`)...),
+		"trailing":        append(encoded, []byte(`{"extra":true}`)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := decodeEncryptedMessage(raw); err == nil {
+				t.Fatal("invalid encrypted message frame was accepted")
+			}
+		})
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,10 +30,15 @@ import (
 )
 
 const (
-	StateSchema      = "tos.messaging.openfox-mls-agent.v1"
-	MaxReplyBytes    = 2 << 20
-	MaxCachedMessage = 10_000
+	StateSchema            = "tos.messaging.openfox-mls-agent.v1"
+	EncryptedMessageSchema = "tos.messaging.openfox-mls-plaintext.v1"
+	MaxReplyBytes          = 2 << 20
+	MaxCachedMessage       = 10_000
 )
+
+const encryptedMessagePrefix = "tos-openfox-mls-message/1\n"
+
+var messageIDPattern = regexp.MustCompile(`^msg_[0-9a-f]{64}$`)
 
 type RoomState struct {
 	RoomID            string   `json:"room_id"`
@@ -45,8 +51,24 @@ type RoomState struct {
 
 type Pending struct {
 	ClientID        string `json:"client_id"`
+	PlaintextSchema string `json:"plaintext_schema,omitempty"`
 	PlaintextDigest string `json:"plaintext_digest"`
+	ReplyToEventID  string `json:"reply_to_event_id,omitempty"`
 	Ciphertext      string `json:"ciphertext_base64"`
+}
+
+// Message is the authenticated plaintext view returned to one OpenFox
+// process. ReplyToEventID is encrypted inside the MLS application message; it
+// is never part of the opaque Relay record.
+type Message struct {
+	Sequence       uint64 `json:"sequence"`
+	MessageID      string `json:"message_id"`
+	ClientID       string `json:"client_id"`
+	RoomID         string `json:"room_id"`
+	SenderAgentID  string `json:"sender_agent_id"`
+	ReplyToEventID string `json:"reply_to_event_id,omitempty"`
+	Content        string `json:"content"`
+	CreatedAtUnix  uint64 `json:"created_at_unix"`
 }
 
 type AgentState struct {
@@ -56,7 +78,7 @@ type AgentState struct {
 	RelayAfter uint64             `json:"relay_after"`
 	Pending    map[string]Pending `json:"pending"`
 	Sent       map[string]Pending `json:"sent"`
-	Messages   []labgroup.Message `json:"messages,omitempty"`
+	Messages   []Message          `json:"messages,omitempty"`
 }
 
 type Proxy struct {
@@ -177,25 +199,32 @@ func (p *Proxy) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		RoomID   string `json:"room_id"`
-		ClientID string `json:"client_id"`
-		Content  string `json:"content"`
+		RoomID         string `json:"room_id"`
+		ClientID       string `json:"client_id"`
+		ReplyToEventID string `json:"reply_to_event_id,omitempty"`
+		Content        string `json:"content"`
 	}
 	if !decodeBody(w, r, &request) {
 		return
 	}
-	if request.RoomID != p.state.Room.RoomID || !validClientID(request.ClientID) || request.Content == "" || len(request.Content) > labgroup.MaxContentBytes {
+	if request.RoomID != p.state.Room.RoomID || !validClientID(request.ClientID) ||
+		!validReplyTo(request.ReplyToEventID) || request.Content == "" || len(request.Content) > labgroup.MaxContentBytes {
 		writeError(w, http.StatusBadRequest, "invalid encrypted room message")
+		return
+	}
+	plaintext, err := encodeEncryptedMessage(request.Content, request.ReplyToEventID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	digest := canon.Digest([]byte(request.Content))
+	digest := canon.Digest(plaintext)
 	pending, found := p.state.Pending[request.ClientID]
 	if sent, completed := p.state.Sent[request.ClientID]; completed {
 		pending, found = sent, true
 	}
-	if found && pending.PlaintextDigest != digest {
+	if found && !matchesPlaintext(pending, request.Content, request.ReplyToEventID, digest) {
 		writeError(w, http.StatusConflict, "client id was already used for different plaintext")
 		return
 	}
@@ -210,13 +239,15 @@ func (p *Proxy) sendMessage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		next, ciphertext, err := p.driver.Seal(state, messageAAD(request.RoomID, p.state.AgentID, request.ClientID), []byte(request.Content))
+		next, ciphertext, err := p.driver.Seal(state, messageAAD(request.RoomID, p.state.AgentID, request.ClientID), plaintext)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		setOpaque(&working.Room, next)
-		pending = Pending{ClientID: request.ClientID, PlaintextDigest: digest, Ciphertext: base64.StdEncoding.EncodeToString(ciphertext)}
+		pending = Pending{ClientID: request.ClientID, PlaintextSchema: EncryptedMessageSchema,
+			PlaintextDigest: digest, ReplyToEventID: request.ReplyToEventID,
+			Ciphertext: base64.StdEncoding.EncodeToString(ciphertext)}
 		working.Pending[request.ClientID] = pending
 		if err := persist(p.path, working); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -225,7 +256,7 @@ func (p *Proxy) sendMessage(w http.ResponseWriter, r *http.Request) {
 		p.state = working
 	}
 	var result labgroup.Message
-	err := p.relay(r.Context(), http.MethodPost, "/v1/messages", map[string]string{
+	err = p.relay(r.Context(), http.MethodPost, "/v1/messages", map[string]string{
 		"room_id": request.RoomID, "client_id": request.ClientID, "content": pending.Ciphertext,
 	}, &result)
 	if err != nil {
@@ -244,8 +275,7 @@ func (p *Proxy) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.state = working
-	result.Content = request.Content
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, decryptedMessage(result, request.Content, request.ReplyToEventID))
 }
 
 func (p *Proxy) listMessages(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +306,7 @@ func (p *Proxy) listMessages(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "opaque relay returned an invalid sequence")
 			return
 		}
-		plain := ""
+		plain, replyTo := "", ""
 		if message.SenderAgentID != working.AgentID {
 			ciphertext, err := base64.StdEncoding.Strict().DecodeString(message.Content)
 			if err != nil || len(ciphertext) == 0 || len(ciphertext) > group.MaxOpenMLSMessageBytes {
@@ -294,16 +324,17 @@ func (p *Proxy) listMessages(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			setOpaque(&working.Room, next)
-			plain = string(plaintext)
-			if plain == "" || len(plain) > labgroup.MaxContentBytes {
+			plain, replyTo, err = decodeEncryptedMessage(plaintext)
+			if err != nil {
 				writeError(w, http.StatusBadGateway, "invalid decrypted message")
 				return
 			}
+		} else if sent, ok := working.Sent[message.ClientID]; ok && sent.PlaintextSchema == EncryptedMessageSchema {
+			replyTo = sent.ReplyToEventID
 		}
-		message.Content = plain
-		working.Messages = append(working.Messages, message)
+		working.Messages = append(working.Messages, decryptedMessage(message, plain, replyTo))
 		if len(working.Messages) > MaxCachedMessage {
-			working.Messages = append([]labgroup.Message(nil), working.Messages[len(working.Messages)-MaxCachedMessage:]...)
+			working.Messages = append([]Message(nil), working.Messages[len(working.Messages)-MaxCachedMessage:]...)
 		}
 		working.RelayAfter = message.Sequence
 		changed = true
@@ -315,7 +346,7 @@ func (p *Proxy) listMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		p.state = working
 	}
-	result := make([]labgroup.Message, 0)
+	result := make([]Message, 0)
 	for _, message := range p.state.Messages {
 		if message.Sequence > after {
 			result = append(result, message)
@@ -338,7 +369,7 @@ func cloneState(state AgentState) AgentState {
 	for key, value := range state.Sent {
 		cloned.Sent[key] = value
 	}
-	cloned.Messages = append([]labgroup.Message(nil), state.Messages...)
+	cloned.Messages = append([]Message(nil), state.Messages...)
 	return cloned
 }
 
@@ -422,6 +453,13 @@ func validateState(state AgentState, driver *group.OpenMLSSidecar) error {
 			if !validClientID(clientID) || pending.ClientID != clientID || !canon.ValidDigest(pending.PlaintextDigest) || err != nil || len(ciphertext) == 0 || len(ciphertext) > group.MaxOpenMLSMessageBytes {
 				return errors.New("invalid durable MLS send record")
 			}
+			if pending.PlaintextSchema == "" {
+				if pending.ReplyToEventID != "" {
+					return errors.New("legacy MLS send record carries a reply reference")
+				}
+			} else if pending.PlaintextSchema != EncryptedMessageSchema || !validReplyTo(pending.ReplyToEventID) {
+				return errors.New("invalid durable MLS plaintext binding")
+			}
 		}
 	}
 	for clientID := range state.Pending {
@@ -431,7 +469,8 @@ func validateState(state AgentState, driver *group.OpenMLSSidecar) error {
 	}
 	var prior uint64
 	for _, message := range state.Messages {
-		if message.Sequence <= prior || message.Sequence > state.RelayAfter || message.RoomID != state.Room.RoomID || !contains(members, message.SenderAgentID) {
+		if message.Sequence <= prior || message.Sequence > state.RelayAfter || message.RoomID != state.Room.RoomID ||
+			!contains(members, message.SenderAgentID) || !validReplyTo(message.ReplyToEventID) {
 			return errors.New("invalid decrypted MLS message cache")
 		}
 		prior = message.Sequence
@@ -458,6 +497,67 @@ func messageAAD(roomID, sender, clientID string) []byte {
 	canon.Text(buffer, sender)
 	canon.Text(buffer, clientID)
 	return buffer.Bytes()
+}
+
+type encryptedMessage struct {
+	Schema         string `json:"schema"`
+	Content        string `json:"content"`
+	ReplyToEventID string `json:"reply_to_event_id,omitempty"`
+}
+
+func encodeEncryptedMessage(content, replyTo string) ([]byte, error) {
+	if content == "" || len(content) > labgroup.MaxContentBytes || !validReplyTo(replyTo) {
+		return nil, errors.New("invalid encrypted message plaintext")
+	}
+	encoded, err := json.Marshal(encryptedMessage{Schema: EncryptedMessageSchema, Content: content, ReplyToEventID: replyTo})
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(encryptedMessagePrefix), encoded...), nil
+}
+
+func decodeEncryptedMessage(raw []byte) (string, string, error) {
+	if !bytes.HasPrefix(raw, []byte(encryptedMessagePrefix)) {
+		// States created before the authenticated reply-reference frame sealed
+		// raw content. Accept it only as a reply-less legacy message so an
+		// in-flight durable retry survives this pre-launch migration.
+		if len(raw) == 0 || len(raw) > labgroup.MaxContentBytes {
+			return "", "", errors.New("invalid legacy MLS plaintext")
+		}
+		return string(raw), "", nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw[len(encryptedMessagePrefix):]))
+	decoder.DisallowUnknownFields()
+	var message encryptedMessage
+	if err := decoder.Decode(&message); err != nil {
+		return "", "", errors.New("invalid encrypted message frame")
+	}
+	var trailing any
+	canonical, marshalErr := json.Marshal(message)
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) || marshalErr != nil ||
+		!bytes.Equal(canonical, raw[len(encryptedMessagePrefix):]) || message.Schema != EncryptedMessageSchema ||
+		message.Content == "" || len(message.Content) > labgroup.MaxContentBytes || !validReplyTo(message.ReplyToEventID) {
+		return "", "", errors.New("invalid encrypted message frame")
+	}
+	return message.Content, message.ReplyToEventID, nil
+}
+
+func matchesPlaintext(pending Pending, content, replyTo, framedDigest string) bool {
+	if pending.PlaintextSchema == "" {
+		return replyTo == "" && pending.PlaintextDigest == canon.Digest([]byte(content))
+	}
+	return pending.PlaintextSchema == EncryptedMessageSchema && pending.ReplyToEventID == replyTo &&
+		pending.PlaintextDigest == framedDigest
+}
+
+func decryptedMessage(relay labgroup.Message, content, replyTo string) Message {
+	return Message{Sequence: relay.Sequence, MessageID: relay.MessageID, ClientID: relay.ClientID,
+		RoomID: relay.RoomID, SenderAgentID: relay.SenderAgentID, ReplyToEventID: replyTo,
+		Content: content, CreatedAtUnix: relay.CreatedAtUnix}
+}
+
+func validReplyTo(value string) bool {
+	return value == "" || messageIDPattern.MatchString(value)
 }
 
 func persist(path string, state AgentState) error {
