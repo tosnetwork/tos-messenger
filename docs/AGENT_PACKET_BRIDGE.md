@@ -32,6 +32,15 @@ A2A and MCP. This repository does not import `tos-ai` or duplicate that mapping.
 all three adapters race one purchase through one shared Gate, exactly one
 transport succeeds, all three claims reach the Gate, and the runner executes
 once. The four ordered pairs A2A→Packet, MCP→Packet, Packet→A2A and Packet→MCP
-also permit only the first transport to execute. The daemon/OpenFox typed
-receiver wiring remains to add, and live Messenger transport remains blocked
+also permit only the first transport to execute.
+
+`NewUnixReceiver` now defines the typed local handoff to an OpenFox provider.
+It sends only the canonical signed Packet to a clean absolute Unix socket,
+uses a proxy-free bounded HTTP client, and treats every non-`202` result as a
+receiver failure so the Messenger claim remains pending. The OpenFox peer
+socket is owner-private and independently runs the protocol's finalized
+signature verifier before the shared Gate; neither side converts packet bytes
+to model text or trusts untyped channel metadata. Assembly of this receiver
+into the production daemon's future admitted `agent.packet` route remains to
+add after the transport is selected; live Messenger transport remains blocked
 on M0-R.
