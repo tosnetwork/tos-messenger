@@ -159,6 +159,247 @@ func TestOpenMLSProxiesEncryptOpaqueRelayAndRestart(t *testing.T) {
 	}
 }
 
+func TestOpenMLSProxyRemovalSurvivesRestartAndExcludesFormerMember(t *testing.T) {
+	binary := os.Getenv("TOS_OPENMLS_DRIVER")
+	if binary == "" {
+		t.Skip("TOS_OPENMLS_DRIVER is set by make test-openmls")
+	}
+	driver := &group.OpenMLSSidecar{Command: []string{binary}, Timeout: 10 * time.Second}
+	members := []string{
+		"agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"agent_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+	}
+	tokens := []string{"alice-secret-token", "bob-secret-token-01", "carol-secret-token"}
+	stateDir := filepath.Join(t.TempDir(), "agents")
+	room, err := Bootstrap(stateDir, "removal-builders", members, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayPath := filepath.Join(t.TempDir(), "relay.json")
+	credentials := make([]labgroup.Credential, len(members))
+	for i := range members {
+		credentials[i] = labgroup.Credential{AgentID: members[i], Token: tokens[i]}
+	}
+	hub, err := labgroup.Open(relayPath, credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := httptest.NewServer(hub.Handler())
+	defer relay.Close()
+	proxies := openTestProxies(t, stateDir, members, tokens, driver, relay)
+	callProxy[labgroup.Room](t, proxies[0], members[0], tokens[0], http.MethodPost, "/v1/rooms",
+		map[string]any{"label": room.Label, "members": room.Members})
+
+	opening := callProxy[Message](t, proxies[0], members[0], tokens[0], http.MethodPost, "/v1/messages",
+		map[string]string{"room_id": room.RoomID, "client_id": "before-removal", "content": "three members are live"})
+	for i := 1; i < len(proxies); i++ {
+		messages := callProxy[struct {
+			Messages []Message `json:"messages"`
+		}](t, proxies[i], members[i], tokens[i], http.MethodGet, "/v1/messages?room_id="+room.RoomID+"&after=0", nil)
+		if len(messages.Messages) != 1 || messages.Messages[0].MessageID != opening.MessageID {
+			t.Fatalf("member %d did not receive the opening: %+v", i, messages.Messages)
+		}
+	}
+	aliceRaw, err := os.ReadFile(StatePath(stateDir, members[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aliceBeforeRemoval AgentState
+	if err := json.Unmarshal(aliceRaw, &aliceBeforeRemoval); err != nil {
+		t.Fatal(err)
+	}
+	legacy := cloneState(aliceBeforeRemoval)
+	legacy.Schema = LegacyStateSchema
+	legacy.Room.ControllerAgentID = ""
+	legacy.Room.ActiveMembers = nil
+	legacyPath := filepath.Join(t.TempDir(), "legacy-alice.json")
+	if err := persist(legacyPath, legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacyProxy, err := Open(legacyPath, members[0], tokens[0], driver, relay.Client(), relay.URL)
+	if err != nil {
+		t.Fatalf("v1 message-only state no longer opens: %v", err)
+	}
+	if status := proxyStatus(t, legacyProxy.Handler(), members[0], tokens[0], http.MethodPost, "/v1/members/remove",
+		map[string]string{"room_id": room.RoomID, "client_id": "legacy-remove", "removed_agent_id": members[2]}); status != http.StatusConflict {
+		t.Fatalf("legacy state removal status = %d", status)
+	}
+	aliceOpaque, err := decodeOpaque(aliceBeforeRemoval.Room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, alternateCommit, _, err := driver.Commit(aliceOpaque, []group.LeafOperation{{
+		Kind: group.LeafRemove, Prior: &group.Leaf{CredentialIdentity: []byte(members[1])},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed := callProxy[MembershipChange](t, proxies[0], members[0], tokens[0], http.MethodPost, "/v1/members/remove",
+		map[string]string{"room_id": room.RoomID, "client_id": "remove-carol-1", "removed_agent_id": members[2]})
+	if removed.RemovedAgentID != members[2] || removed.MLSEpoch != 3 {
+		t.Fatalf("removal = %+v", removed)
+	}
+	retried := callProxy[MembershipChange](t, proxies[0], members[0], tokens[0], http.MethodPost, "/v1/members/remove",
+		map[string]string{"room_id": room.RoomID, "client_id": "remove-carol-1", "removed_agent_id": members[2]})
+	if retried != removed {
+		t.Fatalf("exact removal retry changed result: first=%+v retry=%+v", removed, retried)
+	}
+	conflict := proxyStatus(t, proxies[0], members[0], tokens[0], http.MethodPost, "/v1/members/remove",
+		map[string]string{"room_id": room.RoomID, "client_id": "remove-carol-1", "removed_agent_id": members[1]})
+	if conflict != http.StatusConflict {
+		t.Fatalf("removal substitution status = %d", conflict)
+	}
+	if status := proxyStatus(t, proxies[1], members[1], tokens[1], http.MethodPost, "/v1/members/remove",
+		map[string]string{"room_id": room.RoomID, "client_id": "bob-removes-carol", "removed_agent_id": members[2]}); status != http.StatusForbidden {
+		t.Fatalf("non-controller removal status = %d", status)
+	}
+	removalWire := callRelay[struct {
+		Messages []labgroup.Message `json:"messages"`
+	}](t, relay, members[2], tokens[2], "/v1/messages?room_id="+room.RoomID+"&after=1")
+	if len(removalWire.Messages) != 1 || removalWire.Messages[0].MessageID != removed.MessageID {
+		t.Fatalf("Relay removal frame = %+v", removalWire.Messages)
+	}
+	opaqueRemoval, err := base64.StdEncoding.Strict().DecodeString(removalWire.Messages[0].Content)
+	if err != nil || bytes.Contains(opaqueRemoval, []byte(members[2])) ||
+		bytes.Contains(opaqueRemoval, []byte(base64.StdEncoding.EncodeToString([]byte(members[2])))) {
+		t.Fatal("Relay-visible removal frame disclosed the removed Agent identity")
+	}
+	carolBeforeTamper, err := os.ReadFile(StatePath(stateDir, members[2]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedClient := &http.Client{Transport: spliceRemovalCommit{base: relay.Client().Transport, commit: alternateCommit}}
+	tamperedCarol, err := Open(StatePath(stateDir, members[2]), members[2], tokens[2], driver, tamperedClient, relay.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := proxyStatus(t, tamperedCarol.Handler(), members[2], tokens[2], http.MethodGet,
+		"/v1/messages?room_id="+room.RoomID+"&after=0", nil); status != http.StatusBadGateway {
+		t.Fatalf("tampered removal frame status = %d", status)
+	}
+	carolAfterTamper, err := os.ReadFile(StatePath(stateDir, members[2]))
+	if err != nil || !bytes.Equal(carolBeforeTamper, carolAfterTamper) {
+		t.Fatal("tampered removal frame changed durable MLS state")
+	}
+
+	messages := callProxy[struct {
+		Messages []Message `json:"messages"`
+	}](t, proxies[1], members[1], tokens[1], http.MethodGet, "/v1/messages?room_id="+room.RoomID+"&after=0", nil)
+	if len(messages.Messages) != 1 {
+		t.Fatalf("membership control leaked into Bob transcript: %+v", messages.Messages)
+	}
+	rooms := callProxy[struct {
+		Rooms []labgroup.Room `json:"rooms"`
+	}](t, proxies[1], members[1], tokens[1], http.MethodGet, "/v1/rooms", nil)
+	if len(rooms.Rooms) != 1 || !equalStrings(rooms.Rooms[0].Members, members[:2]) {
+		t.Fatalf("Bob active room view = %+v", rooms.Rooms)
+	}
+	proxies = openTestProxies(t, stateDir, members, tokens, driver, relay)
+	postRemoval := callProxy[Message](t, proxies[0], members[0], tokens[0], http.MethodPost, "/v1/messages",
+		map[string]string{"room_id": room.RoomID, "client_id": "after-removal", "content": "only Alice and Bob can read this"})
+	bobMessages := callProxy[struct {
+		Messages []Message `json:"messages"`
+	}](t, proxies[1], members[1], tokens[1], http.MethodGet, "/v1/messages?room_id="+room.RoomID+"&after=0", nil)
+	if len(bobMessages.Messages) != 2 || bobMessages.Messages[1].MessageID != postRemoval.MessageID {
+		t.Fatalf("remaining member did not receive future message: %+v", bobMessages.Messages)
+	}
+	carolBefore, err := os.ReadFile(StatePath(stateDir, members[2]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := proxyStatus(t, proxies[2], members[2], tokens[2], http.MethodGet,
+		"/v1/messages?room_id="+room.RoomID+"&after=0", nil); status != http.StatusBadGateway {
+		t.Fatalf("removed member future-ciphertext status = %d", status)
+	}
+	carolAfter, err := os.ReadFile(StatePath(stateDir, members[2]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(carolBefore, carolAfter) {
+		var durable AgentState
+		decoder := json.NewDecoder(bytes.NewReader(carolAfter))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&durable); err != nil || contains(durable.Room.ActiveMembers, members[2]) ||
+			durable.Room.MLSEpoch != removed.MLSEpoch || durable.RelayAfter != 2 {
+			t.Fatalf("batch failure did not preserve the exact removal boundary: state=%+v err=%v", durable.Room, err)
+		}
+	} else {
+		t.Fatal("batch failure rolled the authenticated removal back")
+	}
+	carolRooms := callProxy[struct {
+		Rooms []labgroup.Room `json:"rooms"`
+	}](t, proxies[2], members[2], tokens[2], http.MethodGet, "/v1/rooms", nil)
+	if len(carolRooms.Rooms) != 0 {
+		t.Fatalf("removed Carol still lists the room: %+v", carolRooms.Rooms)
+	}
+	if status := proxyStatus(t, proxies[2], members[2], tokens[2], http.MethodPost, "/v1/messages",
+		map[string]string{"room_id": room.RoomID, "client_id": "removed-send", "content": "should fail"}); status != http.StatusForbidden {
+		t.Fatalf("removed member send status = %d", status)
+	}
+
+	var relayMessages struct {
+		Messages []labgroup.Message `json:"messages"`
+	}
+	relayMessages = callRelay[struct {
+		Messages []labgroup.Message `json:"messages"`
+	}](t, relay, members[2], tokens[2], "/v1/messages?room_id="+room.RoomID+"&after=2")
+	if len(relayMessages.Messages) != 1 || relayMessages.Messages[0].MessageID != postRemoval.MessageID {
+		t.Fatalf("Relay did not continue delivering ciphertext to removed member: %+v", relayMessages.Messages)
+	}
+	relayRaw, err := os.ReadFile(relayPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(relayRaw, []byte("only Alice and Bob can read this")) {
+		t.Fatal("Relay persisted post-removal plaintext")
+	}
+}
+
+func proxyStatus(t *testing.T, handler http.Handler, agentID, token, method, path string, body any) int {
+	t.Helper()
+	var input io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input = bytes.NewReader(raw)
+	}
+	request := httptest.NewRequest(method, path, input)
+	request.Header.Set("X-Tos-Agent-Id", agentID)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder.Code
+}
+
+func callRelay[T any](t *testing.T, relay *httptest.Server, agentID, token, path string) T {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, relay.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Tos-Agent-Id", agentID)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := relay.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("Relay status = %d", response.StatusCode)
+	}
+	var result T
+	decoder := json.NewDecoder(response.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func assertReplySubstitutionRefused(t *testing.T, handler http.Handler, agentID, token, roomID, content string) {
 	t.Helper()
 	encoded, err := json.Marshal(map[string]string{
@@ -204,6 +445,53 @@ func (t tamperMessages) RoundTrip(request *http.Request) (*http.Response, error)
 		ciphertext[len(ciphertext)-1] ^= 0x80
 		result.Messages[0].Content = base64.StdEncoding.EncodeToString(ciphertext)
 		result.Messages[0].MessageID = labgroup.DeriveMessageID(result.Messages[0].RoomID, result.Messages[0].SenderAgentID, result.Messages[0].ClientID, result.Messages[0].Content)
+	}
+	raw, err = json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	response.Body = io.NopCloser(bytes.NewReader(raw))
+	response.ContentLength = int64(len(raw))
+	return response, nil
+}
+
+type spliceRemovalCommit struct {
+	base   http.RoundTripper
+	commit []byte
+}
+
+func (s spliceRemovalCommit) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := s.base.RoundTrip(request)
+	if err != nil || request.Method != http.MethodGet || request.URL.Path != "/v1/messages" {
+		return response, err
+	}
+	raw, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Messages []labgroup.Message `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	if len(result.Messages) > 0 {
+		frame, err := base64.StdEncoding.Strict().DecodeString(result.Messages[0].Content)
+		if err != nil {
+			return nil, err
+		}
+		notice, _, err := decodeRemovalFrame(frame)
+		if err != nil {
+			return nil, err
+		}
+		frame, err = encodeRemovalFrame(notice, s.commit)
+		if err != nil {
+			return nil, err
+		}
+		result.Messages[0].Content = base64.StdEncoding.EncodeToString(frame)
+		result.Messages[0].MessageID = labgroup.DeriveMessageID(result.Messages[0].RoomID,
+			result.Messages[0].SenderAgentID, result.Messages[0].ClientID, result.Messages[0].Content)
 	}
 	raw, err = json.Marshal(result)
 	if err != nil {

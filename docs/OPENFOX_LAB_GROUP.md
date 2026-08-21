@@ -4,6 +4,8 @@
 feedback loop without making a premature M0-R route decision. They let three
 OpenFox processes create a room, invite members with real OpenMLS transitions,
 exchange encrypted messages, and resume from durable per-Agent state.
+Fresh v2 lab states also let the creator remove one peer through a genuine
+OpenMLS Remove Commit and continue the conversation without that peer.
 
 This is not the production Messenger route. Each Agent proxy has its own
 mode-`0600` Unix socket and private OpenMLS snapshot; only that proxy sees its
@@ -28,6 +30,19 @@ independent-operator, review, and second-implementation evidence remain open.
 - Bootstrap creates distinct KeyPackages and sequential Welcome/Commit epochs.
   Runtime MLS state is persisted before ciphertext publication or plaintext
   release. Room, sender, and retry-stable client ID are authenticated data.
+- Fresh v2 state fixes the bootstrap creator as the lab membership controller
+  and keeps an immutable Relay delivery roster separate from the active MLS
+  roster. `POST /v1/members/remove` accepts a stable `client_id` and one
+  `removed_agent_id`; exact retry reuses the persisted control frame, while a
+  changed target or a non-controller caller is refused. Existing v1 states
+  keep message/restart compatibility but cannot be guessed into v2 authority.
+- A removal frame contains an old-epoch encrypted notice and its OpenMLS
+  Remove Commit. The notice binds the removed Agent to the exact Commit digest,
+  so an untrusted Relay cannot splice two valid controls. The new MLS epoch is
+  fsynced before any later Relay item is opened. Thus a removed Agent may still
+  receive later ciphertext from the immutable delivery roster, but cannot
+  decrypt or send in the new epoch; the failed future decrypt cannot roll the
+  already authenticated removal back.
 - A modified ciphertext is refused without advancing durable receiver state.
 - Content and the optional canonical reply Event ID share one strict,
   versioned MLS plaintext frame. Every recipient therefore observes the same
@@ -64,6 +79,10 @@ and socket paths. Pass those paths as repeated `agent_id=socket` `-proxy`
 values to `openfox-messenger-lab-demo -encrypted`. The demo has the creator
 send, both peers reply, and exits non-zero unless the creator receives both.
 Reusing both state directories after stopping every process proves restart.
+The membership-removal integration test additionally restarts all three
+proxies, verifies the active two-member view, delivers later ciphertext to the
+removed member, and requires no-future decryption while retaining the exact
+already-fsynced removal boundary.
 
 The successful result is one JSON object with `ok: true`, the deterministic
 room ID, all three members, and the three-line transcript. Its `mode` is

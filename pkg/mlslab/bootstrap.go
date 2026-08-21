@@ -115,7 +115,9 @@ func Bootstrap(stateDir, label string, members []string, driver *group.OpenMLSSi
 		state := AgentState{
 			Schema:  StateSchema,
 			AgentID: member,
-			Room:    RoomState{RoomID: roomID, Label: strings.TrimSpace(label), Members: append([]string(nil), normalized...), MLSEpoch: info.Epoch},
+			Room: RoomState{RoomID: roomID, Label: strings.TrimSpace(label),
+				Members: append([]string(nil), normalized...), ControllerAgentID: members[0],
+				ActiveMembers: append([]string(nil), normalized...), MLSEpoch: info.Epoch},
 			Pending: map[string]Pending{},
 			Sent:    map[string]Pending{},
 		}
