@@ -13,17 +13,25 @@ import (
 
 const (
 	accessClaimSchema = "tos.messaging.attachment-access-claim.v1"
+	accessClockSchema = "tos.messaging.attachment-access-clock.v1"
+	accessClockName   = ".attachment-access-clock"
 	MaxAccessClaims   = 100_000
 	MaxClaimBytes     = 1024
 )
 
 var ErrAccessReplay = errors.New("attachment access request was replayed")
+var ErrClockRollback = errors.New("attachment access clock moved backwards")
 
 type accessClaim struct {
 	Schema        string `json:"schema"`
 	GrantDigest   string `json:"grant_digest"`
 	NonceHex      string `json:"nonce_hex"`
 	ExpiresAtUnix uint64 `json:"expires_at_unix"`
+}
+
+type accessClock struct {
+	Schema          string `json:"schema"`
+	HighestUnixTime uint64 `json:"highest_unix_time"`
 }
 
 // claimAccess persists the nonce before an operation. A crash consumes the
@@ -40,6 +48,9 @@ func (s *Store) claimAccess(request AccessRequest, now time.Time) error {
 	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+	if err := s.advanceAccessClock(uint64(now.Unix())); err != nil {
+		return err
+	}
 
 	directory := filepath.Join(s.root, accessClaimsDir)
 	entries, err := os.ReadDir(directory)
@@ -101,6 +112,35 @@ func (s *Store) claimAccess(request AccessRequest, now time.Time) error {
 		return errors.New("create attachment access claim")
 	}
 	return writeSync(file, path, encoded)
+}
+
+// advanceAccessClock persists a monotonic wall-clock watermark before expired
+// claims can be removed. A later process cannot roll the clock back and make a
+// previously expired signed request valid again.
+func (s *Store) advanceAccessClock(now uint64) error {
+	path := filepath.Join(s.root, accessClockName)
+	raw, err := readPrivateFile(path, MaxClaimBytes)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("read attachment access clock")
+	}
+	if err == nil {
+		var checkpoint accessClock
+		if decodeErr := strictAuthJSON(raw, MaxClaimBytes, &checkpoint); decodeErr != nil ||
+			checkpoint.Schema != accessClockSchema || checkpoint.HighestUnixTime == 0 {
+			return errors.New("invalid attachment access clock")
+		}
+		if now < checkpoint.HighestUnixTime {
+			return ErrClockRollback
+		}
+		if now == checkpoint.HighestUnixTime {
+			return nil
+		}
+	}
+	encoded, err := json.Marshal(accessClock{Schema: accessClockSchema, HighestUnixTime: now})
+	if err != nil {
+		return errors.New("encode attachment access clock")
+	}
+	return replaceFile(path, encoded)
 }
 
 func accessClaimName(grantDigest, nonceHex string) string {

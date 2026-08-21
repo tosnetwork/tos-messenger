@@ -156,3 +156,58 @@ func TestCiphertextStoreEnforcesQuotaBeforeWriting(t *testing.T) {
 		t.Fatalf("quota failure left objects: count=%d err=%v", len(entries), err)
 	}
 }
+
+func TestCiphertextStoreGenerationFailsClosed(t *testing.T) {
+	t.Run("unmarked nonempty", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "attachments")
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "legacy"), []byte("state"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenStore(root, DefaultStoreQuota()); err == nil {
+			t.Fatal("unmarked nonempty attachment state opened")
+		}
+	})
+	t.Run("public marker", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "attachments")
+		store, err := OpenStore(root, DefaultStoreQuota())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(root, storeGenerationName), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenStore(root, DefaultStoreQuota()); err == nil {
+			t.Fatal("public attachment generation marker accepted")
+		}
+	})
+	t.Run("symlink marker", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "attachments")
+		store, err := OpenStore(root, DefaultStoreQuota())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(root, storeGenerationName)
+		target := filepath.Join(t.TempDir(), "marker")
+		if err := os.WriteFile(target, []byte(storeGenerationValue), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(marker); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, marker); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenStore(root, DefaultStoreQuota()); err == nil {
+			t.Fatal("symlink attachment generation marker accepted")
+		}
+	})
+}

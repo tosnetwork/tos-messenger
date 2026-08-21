@@ -17,13 +17,15 @@ import (
 )
 
 const (
-	storeLockName         = ".attachment-store.lock"
-	objectsDir            = "objects"
-	leasesDir             = "leases"
-	accessClaimsDir       = "access-claims"
-	leaseSchema           = "tos.messaging.attachment-lease.v1"
-	MaxStoreObjects       = 100_000
-	MaxStoreBytes   int64 = 1 << 40
+	storeLockName              = ".attachment-store.lock"
+	storeGenerationName        = ".attachment-store-generation"
+	storeGenerationValue       = "tos.messaging.attachment-store-generation.v2\n"
+	objectsDir                 = "objects"
+	leasesDir                  = "leases"
+	accessClaimsDir            = "access-claims"
+	leaseSchema                = "tos.messaging.attachment-lease.v1"
+	MaxStoreObjects            = 100_000
+	MaxStoreBytes        int64 = 1 << 40
 )
 
 var (
@@ -94,6 +96,9 @@ func OpenStore(root string, quota StoreQuota) (*Store, error) {
 	if err := requirePrivateDirectory(root); err != nil {
 		return nil, err
 	}
+	if err := ensureStoreGeneration(root); err != nil {
+		return nil, err
+	}
 	for _, name := range []string{objectsDir, leasesDir, accessClaimsDir} {
 		path := filepath.Join(root, name)
 		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
@@ -108,6 +113,39 @@ func OpenStore(root string, quota StoreQuota) (*Store, error) {
 		return nil, err
 	}
 	return &Store{root: root, quota: quota, lock: lock}, nil
+}
+
+func ensureStoreGeneration(root string) error {
+	path := filepath.Join(root, storeGenerationName)
+	raw, err := readPrivateFile(path, 256)
+	if err == nil {
+		if string(raw) != storeGenerationValue {
+			return errors.New("unsupported attachment store generation")
+		}
+		return nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("invalid attachment store generation marker")
+	}
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil {
+		return errors.New("inspect attachment store generation")
+	}
+	if len(entries) != 0 {
+		return errors.New("unmarked attachment store state requires explicit migration")
+	}
+	file, createErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(createErr, os.ErrExist) {
+		raw, createErr = readPrivateFile(path, 256)
+		if createErr == nil && string(raw) == storeGenerationValue {
+			return nil
+		}
+		return errors.New("invalid concurrent attachment store generation")
+	}
+	if createErr != nil {
+		return errors.New("create attachment store generation")
+	}
+	return writeSync(file, path, []byte(storeGenerationValue))
 }
 
 func (s *Store) Close() error {

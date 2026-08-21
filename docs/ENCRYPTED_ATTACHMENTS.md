@@ -54,7 +54,12 @@ fresh 256-bit nonce. The store rereads the committed delegation and finalized
 Agent state on every operation and persists the nonce before touching storage.
 Crashes therefore consume a request rather than reopening it; a retry uses a
 fresh nonce against idempotent content-addressed storage. Replay claims survive
-restart, and cross-operation, body, storage-key, Endpoint, network, manifest,
+restart, and a private fsynced monotonic time watermark refuses wall-clock
+rollback before expired claims are collected. A private store-generation
+marker prevents a missing clock/claim set from being mistaken for fresh state;
+unmarked legacy or substituted state requires explicit migration and never
+opens implicitly. Cross-operation, body,
+storage-key, Endpoint, network, manifest,
 chunk, order, index, byte-count, expiry and signature substitution fail closed.
 
 Uploads are split into at most sixteen chunks per service frame. Objects are
