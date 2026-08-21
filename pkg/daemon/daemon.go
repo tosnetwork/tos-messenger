@@ -14,6 +14,7 @@ import (
 
 	"github.com/tosnetwork/tos-messenger/pkg/agentpacketbridge"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentadmission"
+	"github.com/tosnetwork/tos-messenger/pkg/attachmentops"
 	"github.com/tosnetwork/tos-messenger/pkg/chainquote"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
@@ -67,7 +68,7 @@ type Daemon struct {
 // what makes a second daemon on the same state fail immediately rather than
 // two of them interleaving writes for a while first.
 func Open(config Config, observer Observer) (*Daemon, error) {
-	return openWithDiscoveryAndPublisher(config, observer, finalizedVerifier{}, productionDiscoveryBuilder{}, nil)
+	return openWithDiscoveryAndPublisher(config, observer, finalizedVerifier{}, productionDiscoveryBuilder{}, nil, nil)
 }
 
 // OpenWithGenerationPublisher assembles the daemon with an externally
@@ -77,19 +78,30 @@ func OpenWithGenerationPublisher(config Config, observer Observer, publisher *di
 	if publisher == nil {
 		return nil, errors.New("no public generation publisher")
 	}
-	return openWithDiscoveryAndPublisher(config, observer, finalizedVerifier{}, productionDiscoveryBuilder{}, publisher)
+	return openWithDiscoveryAndPublisher(config, observer, finalizedVerifier{}, productionDiscoveryBuilder{}, publisher, nil)
+}
+
+// OpenWithOperatorResources assembles optional public-generation and outbound
+// attachment resources after the command has pinned them to live finalized
+// authority. Private Endpoint key bytes cross neither boundary.
+func OpenWithOperatorResources(config Config, observer Observer, publisher *directory.GenerationPublisher,
+	attachment *attachmentops.Resources) (*Daemon, error) {
+	if publisher == nil && attachment == nil {
+		return nil, errors.New("no operator resources")
+	}
+	return openWithDiscoveryAndPublisher(config, observer, finalizedVerifier{}, productionDiscoveryBuilder{}, publisher, attachment)
 }
 
 func open(config Config, observer Observer, verifier delegationVerifier) (*Daemon, error) {
-	return openWithDiscoveryAndPublisher(config, observer, verifier, productionDiscoveryBuilder{}, nil)
+	return openWithDiscoveryAndPublisher(config, observer, verifier, productionDiscoveryBuilder{}, nil, nil)
 }
 
 func openWithDiscovery(config Config, observer Observer, verifier delegationVerifier, builder discoveryBuilder) (*Daemon, error) {
-	return openWithDiscoveryAndPublisher(config, observer, verifier, builder, nil)
+	return openWithDiscoveryAndPublisher(config, observer, verifier, builder, nil, nil)
 }
 
 func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier delegationVerifier,
-	builder discoveryBuilder, publisher *directory.GenerationPublisher) (*Daemon, error) {
+	builder discoveryBuilder, publisher *directory.GenerationPublisher, attachmentResources *attachmentops.Resources) (*Daemon, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -168,6 +180,14 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		Policy: config.FirewallPolicy(), OwnerKey: ownerKey,
 		Journal: journal, Dispatcher: dispatcher, LocalEndpointID: config.EndpointID,
 		DeviceIDs: append([]string(nil), config.Publication.DeviceIDs...),
+	}
+	if attachmentResources != nil {
+		emitter, emitterErr := attachmentResources.NewEmitter(config.StateDir, dispatcher)
+		if emitterErr != nil {
+			_ = journal.Close()
+			return nil, errors.New("build outbound attachment emitter: " + emitterErr.Error())
+		}
+		serverConfig.AttachmentEmitter = emitter
 	}
 	if config.AttachmentAdmission != nil {
 		openPolicy, contentPolicy, httpsConfig, policyErr := config.AttachmentAdmission.Policies()

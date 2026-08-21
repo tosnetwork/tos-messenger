@@ -97,3 +97,53 @@ func (j *Journal) ClaimOutboundComposition(idempotencyKey, intentDigest string, 
 	}
 	return chosen, false, nil
 }
+
+// OutboundComposition returns an already committed composition only when the
+// caller presents the exact original intent. It lets a restart avoid
+// re-encrypting or re-uploading a completed attachment merely to rediscover
+// the Event already bound to its idempotency key.
+func (j *Journal) OutboundComposition(idempotencyKey, intentDigest string) (Outbound, bool, error) {
+	if err := j.usable(); err != nil {
+		return Outbound{}, false, err
+	}
+	if !outboundIdempotencyPattern.MatchString(idempotencyKey) || !canon.ValidDigest(intentDigest) {
+		return Outbound{}, false, errors.New("invalid outbound composition lookup")
+	}
+	path := filepath.Join(j.root, compositionDir, idempotencyKey[len("idem_"):]+".json")
+	j.mutex.Lock()
+	raw, err := os.ReadFile(path)
+	j.mutex.Unlock()
+	if errors.Is(err, os.ErrNotExist) {
+		return Outbound{}, false, nil
+	}
+	if err != nil {
+		return Outbound{}, false, err
+	}
+	chosen, existingIntent, err := decodeOutboundComposition(raw, idempotencyKey)
+	if err != nil {
+		return Outbound{}, false, err
+	}
+	if existingIntent != intentDigest {
+		return Outbound{}, false, ErrConflict
+	}
+	return chosen, true, nil
+}
+
+func decodeOutboundComposition(raw []byte, idempotencyKey string) (Outbound, string, error) {
+	var existing outboundComposition
+	if err := json.Unmarshal(raw, &existing); err != nil || existing.Schema != OutboundCompositionSchema ||
+		existing.IdempotencyKey != idempotencyKey || !canon.ValidDigest(existing.IntentDigest) {
+		return Outbound{}, "", errors.New("invalid outbound composition record")
+	}
+	payloadBytes, err := base64.StdEncoding.Strict().DecodeString(existing.PayloadBase64)
+	if err != nil || canon.Digest(payloadBytes) != existing.PayloadDigest {
+		return Outbound{}, "", errors.New("invalid outbound composition payload")
+	}
+	chosen := Outbound{EventID: existing.EventID, SessionID: existing.SessionID,
+		RecipientEndpointID: existing.RecipientEndpointID, ConversationID: existing.ConversationID,
+		Payload: payloadBytes, CreatedAtUnix: existing.CreatedAtUnix, ExpiresAtUnix: existing.ExpiresAtUnix}
+	if err := validateOutbound(chosen); err != nil {
+		return Outbound{}, "", errors.New("invalid stored outbound composition")
+	}
+	return chosen, existing.IntentDigest, nil
+}

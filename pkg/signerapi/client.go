@@ -20,7 +20,9 @@ import (
 const (
 	RequestSchema  = "tos.messaging.endpoint-sign-request.v1"
 	ResponseSchema = "tos.messaging.endpoint-sign-response.v1"
-	MaxFrameBytes  = 32 << 10
+	// MaxFrameBytes covers the maximum 512-chunk attachment capability grant
+	// while remaining a strict local signing bound.
+	MaxFrameBytes  = 512 << 10
 	DefaultTimeout = 10 * time.Second
 )
 

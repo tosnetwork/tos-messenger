@@ -15,6 +15,12 @@ tos-messengerd -config /etc/tos-messengerd/config.json \
   -publication-operator-config /etc/tos-messengerd/publication.json -check
 tos-messengerd -config /etc/tos-messengerd/config.json \
   -publication-operator-config /etc/tos-messengerd/publication.json
+
+# Enable daemon-owned encrypted attachment emission. This document contains
+# only public/operator policy plus a narrow external signer socket, never the
+# Endpoint private key.
+tos-messengerd -config /etc/tos-messengerd/config.json \
+  -attachment-emission-operator-config /etc/tos-messengerd/attachment-emission.json
 ```
 
 ## Three separated capabilities
@@ -242,6 +248,30 @@ plaintext metadata. Its Unix carrier is local deployment plumbing; a public
 deployment must use the strict HTTPS locator/client policy and independently
 validate TLS, DNS, quotas, retention and restart evidence.
 
+For outbound OpenFox attachments, create a mode-`0600` operator document:
+
+```json
+{
+  "schema": "tos.messaging.attachment-emission-operator.v1",
+  "storage_origin": "https://attachments.example.org",
+  "storage_public_key_hex": "<64 lowercase hex>",
+  "endpoint_signer_socket": "/run/tos-endpoint-signer/sign.sock",
+  "signer_timeout_seconds": 10,
+  "retention_seconds": 86400,
+  "max_plaintext_bytes": 536870912,
+  "allowed_media_types": ["text/plain"],
+  "https_request_timeout_seconds": 30,
+  "https_connect_timeout_seconds": 5
+}
+```
+
+The storage and Endpoint keys must be distinct. Startup pins the signer to the
+live finalized Endpoint public key. OpenFox streams exact MediaStore files over
+local API v5; the daemon encrypts each 1 MiB chunk, durably resumes ingestion
+and storage upload, signs separate upload/fetch capabilities, verifies the
+final `StoredAck`, and only then queues the v3 Event. The model cannot select
+the storage origin, retention, authority keys, network identity or Event ID.
+
 ### Agent attachment content admission
 
 Do not pass bytes returned by the lower-level `attachments.Open` API to an
@@ -289,7 +319,7 @@ all three digest placeholders with the reviewed lowercase `sha256:` values:
 
 Startup re-hashes every configured executable before opening the runtime
 socket. OpenFox's `tos_messenger` settings must set
-`"enable_attachments": true`; it then uses local request v4/response v2 and
+`"enable_attachments": true`; it then uses local request v5/response v3 and
 receives only admitted `text/plain`, never the Reference or fetch key.
 Production deployment still needs a reviewed scanner selection and corpus,
 hard resource isolation where required, and independently operated evidence.

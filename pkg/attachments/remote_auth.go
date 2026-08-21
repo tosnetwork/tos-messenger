@@ -3,7 +3,9 @@ package attachments
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -103,6 +105,24 @@ func SignGrant(grant CapabilityGrant, endpointKey ed25519.PrivateKey) (Capabilit
 	if len(endpointKey) != ed25519.PrivateKeySize {
 		return CapabilityGrant{}, errors.New("invalid attachment Endpoint signing key")
 	}
+	return SignGrantWithSigner(grant, endpointKey, rand.Reader)
+}
+
+// SignGrantWithSigner keeps the delegated Endpoint private key behind a
+// crypto.Signer boundary. In production that signer is a narrow Unix client
+// to independently custodied key material; neither the daemon nor an Agent
+// runtime receives the private key bytes.
+func SignGrantWithSigner(grant CapabilityGrant, signer crypto.Signer, rng io.Reader) (CapabilityGrant, error) {
+	if signer == nil {
+		return CapabilityGrant{}, errors.New("invalid attachment Endpoint signer")
+	}
+	endpointPublic, ok := signer.Public().(ed25519.PublicKey)
+	if !ok || len(endpointPublic) != ed25519.PublicKeySize || canon.IsZero(endpointPublic) {
+		return CapabilityGrant{}, errors.New("attachment Endpoint signer is not Ed25519")
+	}
+	if rng == nil {
+		rng = rand.Reader
+	}
 	grant.Schema = CapabilityGrantSchema
 	grant.EndpointSignatureHex = ""
 	preimage, err := GrantCanonicalBytes(grant)
@@ -110,11 +130,17 @@ func SignGrant(grant CapabilityGrant, endpointKey ed25519.PrivateKey) (Capabilit
 		return CapabilityGrant{}, err
 	}
 	storage, capability, _ := validateGrant(grant)
-	endpointPublic := endpointKey.Public().(ed25519.PublicKey)
 	if bytes.Equal(storage, capability) || bytes.Equal(storage, endpointPublic) || bytes.Equal(capability, endpointPublic) {
 		return CapabilityGrant{}, errors.New("attachment Endpoint, storage, and capability keys must be distinct")
 	}
-	grant.EndpointSignatureHex = hex.EncodeToString(ed25519.Sign(endpointKey, preimage))
+	signature, err := signer.Sign(rng, preimage, crypto.Hash(0))
+	if err != nil {
+		return CapabilityGrant{}, errors.New("sign attachment capability grant: " + err.Error())
+	}
+	if len(signature) != ed25519.SignatureSize || !ed25519.Verify(endpointPublic, preimage, signature) {
+		return CapabilityGrant{}, errors.New("attachment Endpoint signer returned an invalid signature")
+	}
+	grant.EndpointSignatureHex = hex.EncodeToString(signature)
 	return grant, nil
 }
 

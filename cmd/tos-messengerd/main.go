@@ -16,7 +16,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/attachmentops"
 	"github.com/tosnetwork/tos-messenger/pkg/daemon"
+	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/publicationops"
@@ -25,16 +27,17 @@ import (
 func main() {
 	configPath := flag.String("config", "", "daemon configuration file")
 	publicationPath := flag.String("publication-operator-config", "", "operator publication resources (required to publish public prekey generations)")
+	attachmentPath := flag.String("attachment-emission-operator-config", "", "operator storage and external Endpoint signer resources for outbound attachments")
 	check := flag.Bool("check", false, "validate the configuration and exit")
 	flag.Parse()
 
-	if err := run(*configPath, *publicationPath, *check); err != nil {
+	if err := run(*configPath, *publicationPath, *attachmentPath, *check); err != nil {
 		fmt.Fprintln(os.Stderr, "tos-messengerd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(configPath, publicationPath string, checkOnly bool) error {
+func run(configPath, publicationPath, attachmentPath string, checkOnly bool) error {
 	if configPath == "" {
 		return errNoConfig
 	}
@@ -49,6 +52,13 @@ func run(configPath, publicationPath string, checkOnly bool) error {
 			return err
 		}
 	}
+	var attachmentConfig attachmentops.Config
+	if attachmentPath != "" {
+		attachmentConfig, err = attachmentops.Load(attachmentPath)
+		if err != nil {
+			return err
+		}
+	}
 	if config.Publication.Mode == daemon.PublicationNone && publicationPath != "" {
 		return fmt.Errorf("publication operator resources require publication mode prekeys")
 	}
@@ -58,23 +68,38 @@ func run(configPath, publicationPath string, checkOnly bool) error {
 		if publicationPath != "" {
 			fmt.Println("publication operator configuration is structurally valid; live delegation, DHT, HTTPS root, and signer are checked at startup")
 		}
+		if attachmentPath != "" {
+			fmt.Println("attachment emission operator configuration is structurally valid; live delegation, storage authority, and signer are checked at startup")
+		}
 		return nil
 	}
 
 	var instance *daemon.Daemon
-	if publicationPath == "" {
+	if publicationPath == "" && attachmentPath == "" {
 		instance, err = daemon.Open(config, reporter{})
 	} else {
 		delegation, verifyErr := daemon.VerifyFinalizedDelegation(config, time.Now())
 		if verifyErr != nil {
-			return fmt.Errorf("verify publication authority: %w", verifyErr)
+			return fmt.Errorf("verify operator authority: %w", verifyErr)
 		}
-		resources, assembleErr := publicationops.Assemble(publicationConfig, delegation)
-		if assembleErr != nil {
-			return fmt.Errorf("assemble publication resources: %w", assembleErr)
+		var publisher *directory.GenerationPublisher
+		if publicationPath != "" {
+			resources, assembleErr := publicationops.Assemble(publicationConfig, delegation)
+			if assembleErr != nil {
+				return fmt.Errorf("assemble publication resources: %w", assembleErr)
+			}
+			defer resources.Close()
+			publisher = resources.Publisher
 		}
-		defer resources.Close()
-		instance, err = daemon.OpenWithGenerationPublisher(config, reporter{}, resources.Publisher)
+		var attachmentResources *attachmentops.Resources
+		if attachmentPath != "" {
+			assembled, assembleErr := attachmentops.Assemble(attachmentConfig, delegation)
+			if assembleErr != nil {
+				return fmt.Errorf("assemble attachment emission resources: %w", assembleErr)
+			}
+			attachmentResources = &assembled
+		}
+		instance, err = daemon.OpenWithOperatorResources(config, reporter{}, publisher, attachmentResources)
 	}
 	if err != nil {
 		return err
