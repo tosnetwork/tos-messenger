@@ -32,13 +32,13 @@ import (
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema = "tos.messaging.local-request.v4"
+	RequestSchema = "tos.messaging.local-request.v5"
 	// ResponseSchema is the strict wire schema of a response.
-	ResponseSchema = "tos.messaging.local-response.v2"
+	ResponseSchema = "tos.messaging.local-response.v3"
 
 	// MaxFrameBytes bounds one request or response body. It has to hold an
 	// event, because a claim hands one back.
-	MaxFrameBytes = 512 << 10
+	MaxFrameBytes = 2 << 20
 	// MaxEventsPerResponse bounds one pending listing.
 	MaxEventsPerResponse = 64
 	// MaxHistoryEventsPerResponse keeps worst-case canonical Event JSON below
@@ -71,6 +71,15 @@ const (
 	// returns content only after daemon-owned fetch, AEAD verification and all
 	// configured scanners allow it.
 	OpClaimAttachment Operation = "attachments.claim"
+	// OpBeginOutboundAttachment binds exact plaintext evidence and a fixed
+	// route before daemon-owned streaming encryption begins.
+	OpBeginOutboundAttachment Operation = "attachments.outbound.begin"
+	// OpAppendOutboundAttachment submits one bounded sequential plaintext chunk;
+	// the daemon persists only its authenticated ciphertext.
+	OpAppendOutboundAttachment Operation = "attachments.outbound.chunk"
+	// OpCommitOutboundAttachment obtains Endpoint grants, uploads and verifies
+	// the lease, then queues the exact durable Event.
+	OpCommitOutboundAttachment Operation = "attachments.outbound.commit"
 
 	// OpAwaitingAdmission lists inbound events waiting for the owner. A
 	// runtime never sees these; deciding about them is what the owner is for.
@@ -159,6 +168,7 @@ var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
 		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {},
 		OpPendingAttachments: {}, OpClaimAttachment: {},
+		OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
 		OpVerifyAcceptedQuote: {},
 	},
@@ -187,6 +197,7 @@ func Permits(principal Principal, operation Operation) bool {
 var operations = map[Operation]struct{}{
 	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {},
 	OpPendingAttachments: {}, OpClaimAttachment: {},
+	OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
 	OpApprove: {}, OpDeny: {},
 	OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpPendingActions: {},
@@ -213,6 +224,7 @@ var (
 	devicePattern       = regexp.MustCompile(`^dev_[0-9a-f]{64}$`)
 	challengePattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	quotePattern        = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
+	uploadPattern       = regexp.MustCompile(`^attup_[0-9a-f]{64}$`)
 )
 
 // Request is one call over the local socket.
@@ -279,6 +291,16 @@ type Request struct {
 	PreviousSegmentDigest string `json:"previous_segment_digest,omitempty"`
 	AfterCreatedAtUnix    uint64 `json:"after_created_at_unix,omitempty"`
 	AfterEventID          string `json:"after_event_id,omitempty"`
+
+	// Outbound attachment fields carry plaintext evidence/stream bytes only.
+	// Reference, keys, grants, storage authority, retention and Event identity
+	// never cross from the runtime into the daemon.
+	Filename        string `json:"filename,omitempty"`
+	PlaintextDigest string `json:"plaintext_digest,omitempty"`
+	PlaintextBytes  uint64 `json:"plaintext_bytes,omitempty"`
+	UploadID        string `json:"upload_id,omitempty"`
+	ChunkIndex      uint32 `json:"chunk_index,omitempty"`
+	Chunk           []byte `json:"chunk_base64,omitempty"`
 }
 
 // AssetIdentity names an asset the way the chain does.
@@ -431,6 +453,9 @@ type Response struct {
 	History     []json.RawMessage   `json:"history,omitempty"`
 	Fresh       bool                `json:"fresh,omitempty"`
 	EventID     string              `json:"event_id,omitempty"`
+	UploadID    string              `json:"upload_id,omitempty"`
+	NextChunk   uint32              `json:"next_chunk,omitempty"`
+	Complete    bool                `json:"complete,omitempty"`
 
 	// Actions lists decisions waiting for the owner.
 	Actions []WaitingAction `json:"actions,omitempty"`
@@ -608,16 +633,28 @@ func ValidateRequest(request Request) error {
 	if request.Op != OpVerifyAcceptedQuote && request.ExpectedQuoteTerms != nil {
 		return errors.New("only Quote verification carries expected Quote terms")
 	}
-	if request.Op != OpCompose && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
+	if request.Op != OpCompose && request.Op != OpBeginOutboundAttachment && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
 		(request.ConversationID != "" || request.IdempotencyKey != "") {
 		return errors.New("only outbound composition carries message semantics")
 	}
 	if request.Op == OpListDeviceHistory && request.IdempotencyKey != "" {
 		return errors.New("a history listing has no idempotency key")
 	}
-	if request.Op != OpCompose && (request.RoomID != "" || request.ReplyToEventID != "" ||
+	if request.Op != OpCompose && request.Op != OpBeginOutboundAttachment && (request.RoomID != "" || request.ReplyToEventID != "" ||
 		request.MembershipEpoch != 0 || request.MediaType != "" || request.Body != "") {
 		return errors.New("only message composition carries message body semantics")
+	}
+	if request.Op == OpBeginOutboundAttachment && request.Body != "" {
+		return errors.New("outbound attachment begin does not carry an inline body")
+	}
+	if request.Op != OpBeginOutboundAttachment && (request.Filename != "" || request.PlaintextDigest != "" || request.PlaintextBytes != 0) {
+		return errors.New("only outbound attachment begin carries plaintext metadata")
+	}
+	if request.Op != OpAppendOutboundAttachment && request.Op != OpCommitOutboundAttachment && request.UploadID != "" {
+		return errors.New("only an outbound attachment transaction carries an upload identifier")
+	}
+	if request.Op != OpAppendOutboundAttachment && (request.ChunkIndex != 0 || len(request.Chunk) != 0) {
+		return errors.New("only an outbound attachment chunk carries chunk bytes")
 	}
 	if request.Op != OpExportDeviceHistory && (request.TargetDeviceID != "" || request.HistorySequence != 0 ||
 		request.PreviousSegmentDigest != "" || request.AfterCreatedAtUnix != 0 || request.AfterEventID != "") {
@@ -677,6 +714,38 @@ func ValidateRequest(request Request) error {
 		}
 		if request.MediaType == "" || request.Body == "" {
 			return errors.New("a composition needs media type and body")
+		}
+		return nil
+	case OpBeginOutboundAttachment:
+		if !conversationPattern.MatchString(request.ConversationID) || !sessionPattern.MatchString(request.SessionID) ||
+			!endpointPattern.MatchString(request.RecipientEndpointID) || !idempotencyPattern.MatchString(request.IdempotencyKey) {
+			return errors.New("an attachment begin needs canonical conversation, route and idempotency identifiers")
+		}
+		if request.RoomID == "" {
+			if request.MembershipEpoch != 0 {
+				return errors.New("a direct attachment has no membership epoch")
+			}
+		} else if !roomPattern.MatchString(request.RoomID) || request.MembershipEpoch == 0 {
+			return errors.New("a room attachment needs a canonical room and membership epoch")
+		}
+		if request.ReplyToEventID != "" && !eventPattern.MatchString(request.ReplyToEventID) {
+			return errors.New("invalid attachment reply event identifier")
+		}
+		if request.Filename == "" || request.MediaType == "" || !canon.ValidDigest(request.PlaintextDigest) || request.PlaintextBytes == 0 {
+			return errors.New("an attachment begin needs filename, media type, digest and size")
+		}
+		if request.ExpiresAtUnix != 0 {
+			return errors.New("attachment retention is daemon-owned")
+		}
+		return nil
+	case OpAppendOutboundAttachment:
+		if !uploadPattern.MatchString(request.UploadID) || len(request.Chunk) == 0 || len(request.Chunk) > 1<<20 {
+			return errors.New("an attachment chunk needs a canonical upload and bounded bytes")
+		}
+		return nil
+	case OpCommitOutboundAttachment:
+		if !uploadPattern.MatchString(request.UploadID) {
+			return errors.New("an attachment commit needs a canonical upload")
 		}
 		return nil
 	case OpApprove, OpDeny, OpAdmit:

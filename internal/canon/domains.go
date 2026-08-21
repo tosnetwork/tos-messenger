@@ -199,6 +199,9 @@ const (
 	// DomainOutboundIntent binds a runtime's semantic message and fixed route
 	// independently of the daemon-owned creation time and Event ID.
 	DomainOutboundIntent = "tos.messaging.outbound-intent.v1\x00"
+	// DomainOutboundAttachmentIntent binds exact plaintext evidence and the
+	// operator-selected route/storage policy before streaming encryption begins.
+	DomainOutboundAttachmentIntent = "tos.messaging.outbound-attachment-intent.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -258,6 +261,7 @@ var Domains = []string{
 	DomainLabMessage,
 	DomainOpenFoxMLSAAD,
 	DomainOutboundIntent,
+	DomainOutboundAttachmentIntent,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainAdmissionInvite,

@@ -15,6 +15,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/internal/localwire"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentadmission"
+	"github.com/tosnetwork/tos-messenger/pkg/attachmentops"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
@@ -57,10 +58,19 @@ type Config struct {
 	// AttachmentAdmitter is optional. When absent, encrypted attachment Events
 	// remain daemon-reserved and no runtime can obtain their secret payload.
 	AttachmentAdmitter AttachmentAdmitter
+	// AttachmentEmitter is optional and independently operator-configured. It
+	// owns outbound encryption, capability signing, upload and durable ordering.
+	AttachmentEmitter AttachmentEmitter
 }
 
 type AttachmentAdmitter interface {
 	Admit(context.Context, envelope.Event) (attachmentadmission.Result, error)
+}
+
+type AttachmentEmitter interface {
+	Begin(attachmentops.BeginRequest) (attachmentops.Progress, error)
+	Append(string, uint32, []byte) (attachmentops.Progress, error)
+	Commit(context.Context, string) (attachmentops.Progress, error)
 }
 
 // AddressedQuoteResolver treats a runtime-supplied escrow address only as a
@@ -216,6 +226,12 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.pendingAttachments(request, now)
 	case OpClaimAttachment:
 		return s.claimAttachment(ctx, request, now)
+	case OpBeginOutboundAttachment:
+		return s.beginOutboundAttachment(request)
+	case OpAppendOutboundAttachment:
+		return s.appendOutboundAttachment(request)
+	case OpCommitOutboundAttachment:
+		return s.commitOutboundAttachment(ctx, request)
 	case OpAwaitingAdmission:
 		return s.awaitingAdmission(request, now)
 	case OpAdmit:
@@ -258,6 +274,45 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.listDeviceHistory(request)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
+}
+
+func (s *Server) beginOutboundAttachment(request Request) Response {
+	if s.config.AttachmentEmitter == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("outbound attachment emission is not configured"))
+	}
+	progress, err := s.config.AttachmentEmitter.Begin(attachmentops.BeginRequest{
+		ConversationID: request.ConversationID, RoomID: request.RoomID, ReplyToEventID: request.ReplyToEventID,
+		MembershipEpoch: request.MembershipEpoch, IdempotencyKey: request.IdempotencyKey,
+		SessionID: request.SessionID, RecipientEndpointID: request.RecipientEndpointID,
+		Filename: request.Filename, MediaType: request.MediaType, PlaintextDigest: request.PlaintextDigest,
+		PlaintextBytes: request.PlaintextBytes})
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, UploadID: progress.UploadID, NextChunk: progress.NextChunk,
+		Complete: progress.Complete, EventID: progress.EventID}
+}
+
+func (s *Server) appendOutboundAttachment(request Request) Response {
+	if s.config.AttachmentEmitter == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("outbound attachment emission is not configured"))
+	}
+	progress, err := s.config.AttachmentEmitter.Append(request.UploadID, request.ChunkIndex, request.Chunk)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, UploadID: progress.UploadID, NextChunk: progress.NextChunk}
+}
+
+func (s *Server) commitOutboundAttachment(ctx context.Context, request Request) Response {
+	if s.config.AttachmentEmitter == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("outbound attachment emission is not configured"))
+	}
+	progress, err := s.config.AttachmentEmitter.Commit(ctx, request.UploadID)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, Complete: progress.Complete, EventID: progress.EventID}
 }
 
 func (s *Server) verifyAcceptedQuote(ctx context.Context, request Request) Response {

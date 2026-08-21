@@ -5,7 +5,7 @@ authenticated opaque-storage contract for private Messenger attachments;
 `pkg/attachmentapi` and `tos-attachmentd` expose its bounded Unix/HTTPS service
 boundary. `OpenForAgent` adds an explicit Linux content-admission boundary and
 `tos-attachment-text-scanner` supplies a minimal reference UTF-8 inspector.
-`pkg/attachmentadmission`, daemon config v8 and local API v4 keep the Reference,
+`pkg/attachmentadmission`, daemon config v8 and local API v5 keep the Reference,
 attachment key and fetch capability out of OpenFox while releasing admitted
 `text/plain` plus exact scanner evidence under the Event's application lease.
 This does not select a message route, paid retention profile, production
@@ -96,6 +96,37 @@ one manifest and expiry but does not provide per-member revocation. Deployments
 requiring per-recipient revocation must fan out distinct direct Events instead
 of pretending one room Event has recipient-specific bytes.
 
+## Daemon-owned outbound emission
+
+`pkg/attachmentops` closes the sender boundary without placing Endpoint or
+storage authority in OpenFox. A strict operator document pins one public HTTPS
+origin, storage Ed25519 key, external Endpoint signer socket, retention,
+plaintext ceiling, media allow-list and network timeouts. Agent, Endpoint and
+network fields come from the live finalized delegation/dispatcher instead of
+that document or model output.
+
+Local API v5 uses `attachments.outbound.begin`, `.chunk`, and `.commit`.
+`begin` commits the fixed conversation/room/session/recipient route, filename,
+canonical media type, byte count and plaintext SHA-256 to an idempotency intent.
+The daemon draws fresh AES-GCM and distinct upload/fetch capability keys. Each
+sequential plaintext chunk is immediately authenticated and encrypted with a
+1 MiB protocol chunk size; only a mode-`0600` ciphertext record and restartable
+SHA-256 state are fsynced. A crash after ciphertext fsync but before the state
+pointer advances is reconciled from that exact record, without a plaintext
+staging file.
+
+After the complete stream matches its declared digest, the external signer
+signs an upload-only grant and a separate fetch-only grant. The exact v3 Event
+is durably prepared before storage I/O but is not queued. Each `.commit` sends
+at most one ciphertext chunk with a fresh one-use request nonce and persists
+progress; interrupted public transfer therefore resumes across local API and
+daemon restarts. Only a verified final storage `StoredAck` permits the prepared
+Event to enter the delivery journal. A completed retry returns the original
+Event ID without new encryption, signing or upload. The outbox record and
+upload private key are removed after queueing; only the fetch key is carried in
+E2EE as required by v3. This is durability/order evidence, not a commercial
+retention or erasure claim.
+
 V3 accepts only the canonical URL
 
 ```text
@@ -180,7 +211,9 @@ Authenticated remote operation,
 restart replay refusal, interrupted multi-frame upload, signed local deletion
 observation, locator/SSRF policy, sealed-input sandboxing, strict verdict
 binding, daemon-owned/OpenFox application, Event v2 cross-consumption and the
-reference text inspector are implemented and tested locally.
+reference text inspector, plus daemon-owned outbound OpenFox streaming,
+dual-capability signing, restart recovery, ACK-before-queue ordering and exact
+retry are implemented and tested locally.
 Still open are an independently operated public-TLS deployment, measured
 interrupted wide-area transfer, independently audited retention behavior,
 a selected production malware scanner and representative hostile corpus, hard

@@ -191,35 +191,80 @@ func (c *GrantClient) Upload(ctx context.Context, chunks []attachments.Chunk) (a
 	if c == nil || ctx == nil || len(chunks) != len(c.grant.ChunkDigests) {
 		return attachments.StoredAck{}, errors.New("invalid complete attachment upload")
 	}
+	return c.UploadStream(ctx, len(chunks), func(start, end int) ([]attachments.Chunk, error) {
+		return chunks[start:end], nil
+	})
+}
+
+// UploadStream uploads a complete attachment in bounded batches without
+// requiring a maximum-size ciphertext set to coexist in memory. load must
+// return exactly the requested manifest range in canonical order; every batch
+// is independently body-bound and the final StoredAck still covers the whole
+// lease.
+func (c *GrantClient) UploadStream(ctx context.Context, count int, load func(start, end int) ([]attachments.Chunk, error)) (attachments.StoredAck, error) {
+	if c == nil || ctx == nil || count != len(c.grant.ChunkDigests) || load == nil {
+		return attachments.StoredAck{}, errors.New("invalid complete attachment upload stream")
+	}
 	var final attachments.StoredAck
-	for start := 0; start < len(chunks); start += MaxBatchChunks {
+	for start := 0; start < count; start += MaxBatchChunks {
 		end := start + MaxBatchChunks
-		if end > len(chunks) {
-			end = len(chunks)
+		if end > count {
+			end = count
 		}
-		batch := chunks[start:end]
-		bodyDigest, err := attachments.UploadBodyDigest(c.grant, batch)
+		batch, err := load(start, end)
+		if err != nil || len(batch) != end-start {
+			return attachments.StoredAck{}, errors.New("load bounded attachment upload batch")
+		}
+		ack, complete, err := c.UploadBatch(ctx, start, batch)
 		if err != nil {
 			return attachments.StoredAck{}, err
 		}
-		response, err := c.call(ctx, OpUpload, attachments.OperationUpload, bodyDigest, batch, nil)
-		if err != nil {
-			return attachments.StoredAck{}, err
-		}
-		if response.Complete == nil {
-			return attachments.StoredAck{}, errors.New("attachment upload response has no completion state")
-		}
-		if *response.Complete {
-			final, err = attachments.DecodeStoredAckJSON(response.Ack)
-			if err != nil || c.verifyStoredAck(final) != nil {
-				return attachments.StoredAck{}, errors.New("invalid attachment upload acknowledgement")
-			}
+		if complete {
+			final = ack
 		}
 	}
 	if final.Schema == "" {
 		return attachments.StoredAck{}, errors.New("attachment upload did not publish its complete lease")
 	}
 	return final, nil
+}
+
+// UploadBatch performs exactly one bounded contiguous manifest write. It is
+// the primitive used by a crash-safe caller that persists its next offset
+// between requests; retransmitting the same range is safe and still requires
+// a fresh single-use access nonce.
+func (c *GrantClient) UploadBatch(ctx context.Context, start int, batch []attachments.Chunk) (attachments.StoredAck, bool, error) {
+	if c == nil || ctx == nil || start < 0 || len(batch) == 0 || len(batch) > MaxBatchChunks || start+len(batch) > len(c.grant.ChunkDigests) {
+		return attachments.StoredAck{}, false, errors.New("invalid attachment upload batch")
+	}
+	for offset, chunk := range batch {
+		position := start + offset
+		if chunk.Index != uint32(position) || chunk.Digest != c.grant.ChunkDigests[position] {
+			return attachments.StoredAck{}, false, errors.New("attachment upload batch substituted a chunk")
+		}
+	}
+	bodyDigest, err := attachments.UploadBodyDigest(c.grant, batch)
+	if err != nil {
+		return attachments.StoredAck{}, false, err
+	}
+	response, err := c.call(ctx, OpUpload, attachments.OperationUpload, bodyDigest, batch, nil)
+	if err != nil {
+		return attachments.StoredAck{}, false, err
+	}
+	if response.Complete == nil {
+		return attachments.StoredAck{}, false, errors.New("attachment upload response has no completion state")
+	}
+	if !*response.Complete {
+		if len(response.Ack) != 0 {
+			return attachments.StoredAck{}, false, errors.New("partial attachment upload returned an acknowledgement")
+		}
+		return attachments.StoredAck{}, false, nil
+	}
+	ack, err := attachments.DecodeStoredAckJSON(response.Ack)
+	if err != nil || c.verifyStoredAck(ack) != nil {
+		return attachments.StoredAck{}, false, errors.New("invalid attachment upload acknowledgement")
+	}
+	return ack, true, nil
 }
 
 func (c *GrantClient) Fetch(ctx context.Context, digests []string) ([]attachments.Chunk, error) {

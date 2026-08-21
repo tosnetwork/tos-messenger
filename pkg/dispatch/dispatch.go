@@ -98,6 +98,18 @@ type ComposeRequest struct {
 	ExpiresAtUnix                          uint64
 }
 
+// AttachmentRequest is assembled only by the daemon-owned attachment
+// emitter after it has encrypted the complete plaintext and obtained exact
+// Endpoint-signed storage grants. An Agent runtime never supplies Reference,
+// capability, locator, sender, network, clock, kind, or Event ID fields.
+type AttachmentRequest struct {
+	ConversationID, RoomID, ReplyToEventID string
+	IdempotencyKey, IntentDigest           string
+	SessionID, RecipientEndpointID         string
+	ExpiresAtUnix                          uint64
+	Attachment                             payload.EncryptedAttachment
+}
+
 // HistoryRequest is one owner-authorized direct-history page. The dispatcher
 // derives the source identity, recipient endpoint, device session, network,
 // Event kind, and Event ID; none is supplied by the caller.
@@ -220,6 +232,17 @@ func (d *Dispatcher) LocalIdentity() Identity {
 	return d.config.Identity
 }
 
+// Network returns a defensive copy of the daemon-owned chain domain. It is
+// exposed for daemon subsystems that must repeat the exact Event domain in an
+// independently signed authority object; runtimes cannot set it.
+func (d *Dispatcher) Network() *nativev1.NetworkDomain {
+	if d == nil || d.config.Network == nil {
+		return nil
+	}
+	return &nativev1.NetworkDomain{NetworkId: d.config.Network.NetworkId,
+		GenesisRootHash: d.config.Network.GenesisRootHash, GenesisFileHash: d.config.Network.GenesisFileHash}
+}
+
 // Queue records an event for delivery.
 //
 // The plaintext is stored before anything is sealed, so a crash between
@@ -334,6 +357,111 @@ func (d *Dispatcher) ComposeAndQueue(request ComposeRequest) (envelope.Event, bo
 	}
 	fresh, _, err := d.config.Journal.Enqueue(chosen)
 	return event, fresh, err
+}
+
+// LookupComposition returns a previously committed Event for an exact daemon
+// intent. It is used before attachment encryption/upload so a completed retry
+// performs no new external side effect.
+func (d *Dispatcher) LookupComposition(idempotencyKey, intentDigest string) (envelope.Event, bool, error) {
+	if d == nil {
+		return envelope.Event{}, false, errors.New("no dispatcher")
+	}
+	chosen, found, err := d.config.Journal.OutboundComposition(idempotencyKey, intentDigest)
+	if err != nil || !found {
+		return envelope.Event{}, found, err
+	}
+	event, err := envelope.DecodeEventJSON(chosen.Payload)
+	if err != nil || event.EventID != chosen.EventID || event.ConversationID != chosen.ConversationID {
+		return envelope.Event{}, false, errors.New("stored outbound composition conflicts with its Event")
+	}
+	return event, true, nil
+}
+
+// LookupQueuedComposition returns a composition only after its exact delivery
+// record is durable. Attachment emission deliberately commits a composition
+// before contacting storage, so composition existence alone is not completion
+// evidence: a crash may leave a prepared Event whose ciphertext lease was
+// never acknowledged and whose delivery was never queued.
+func (d *Dispatcher) LookupQueuedComposition(idempotencyKey, intentDigest string) (envelope.Event, bool, error) {
+	event, found, err := d.LookupComposition(idempotencyKey, intentDigest)
+	if err != nil || !found {
+		return envelope.Event{}, found, err
+	}
+	delivery, queued, err := d.config.Journal.LookupDelivery(event.EventID)
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	if !queued {
+		return envelope.Event{}, false, errors.New("outbound composition is prepared but not queued")
+	}
+	payload, err := delivery.Payload()
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	encoded, err := envelope.EncodeEventJSON(event)
+	if err != nil || delivery.EventID != event.EventID || delivery.ConversationID != event.ConversationID ||
+		!bytes.Equal(payload, encoded) {
+		return envelope.Event{}, false, errors.New("queued outbound composition conflicts with its delivery")
+	}
+	return event, true, nil
+}
+
+// PrepareEncryptedAttachment durably binds the first complete, daemon-built
+// Event to its idempotency intent without queueing it. The caller must obtain
+// and verify the storage StoredAck before QueuePreparedAttachment; therefore a
+// recipient can never receive an Event whose exact ciphertext lease was not
+// acknowledged first.
+func (d *Dispatcher) PrepareEncryptedAttachment(request AttachmentRequest) (envelope.Event, bool, error) {
+	if d == nil || d.config.Network == nil {
+		return envelope.Event{}, false, errors.New("attachment composition has no network")
+	}
+	if !d.authorizedKind("artifact.encrypted") {
+		return envelope.Event{}, false, errors.New("event class is not authorized by the endpoint delegation")
+	}
+	now := d.config.Now()
+	if now.IsZero() || now.Unix() < 0 || request.ExpiresAtUnix <= uint64(now.Unix()) {
+		return envelope.Event{}, false, errors.New("invalid outbound attachment lifetime")
+	}
+	content, err := payload.Encode(request.Attachment)
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	event, err := envelope.NewEvent(envelope.Event{Network: d.config.Network,
+		ConversationID: request.ConversationID, SenderAgentID: d.config.Identity.AgentID,
+		SenderEndpointID: d.config.Identity.EndpointID, SenderDeviceID: d.config.Identity.DeviceID,
+		RoomID: request.RoomID, ReplyToEventID: request.ReplyToEventID,
+		CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: request.ExpiresAtUnix,
+		Kind: "artifact.encrypted", IdempotencyKey: strings.TrimPrefix(request.IdempotencyKey, "idem_"),
+		Content: content, AttachmentReferences: []string{request.Attachment.ManifestDigest}})
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	encoded, err := envelope.EncodeEventJSON(event)
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	chosen, fresh, err := d.config.Journal.ClaimOutboundComposition(request.IdempotencyKey, request.IntentDigest, eventlog.Outbound{
+		EventID: event.EventID, SessionID: request.SessionID, RecipientEndpointID: request.RecipientEndpointID,
+		ConversationID: request.ConversationID, Payload: encoded, CreatedAtUnix: uint64(now.Unix()),
+		ExpiresAtUnix: request.ExpiresAtUnix})
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	if !fresh {
+		event, err = envelope.DecodeEventJSON(chosen.Payload)
+		if err != nil {
+			return envelope.Event{}, false, err
+		}
+	}
+	return event, fresh, nil
+}
+
+// QueuePreparedAttachment queues the exact previously prepared Event after a
+// verified StoredAck. Queue is idempotent, including a crash after enqueue and
+// before the attachment transaction is removed.
+func (d *Dispatcher) QueuePreparedAttachment(event envelope.Event, sessionID, recipientEndpointID string, expiresAtUnix uint64) (bool, error) {
+	fresh, _, err := d.Queue(event, sessionID, recipientEndpointID, expiresAtUnix)
+	return fresh, err
 }
 
 // ComposeHistoryAndQueue builds a stable page from durable applied/delivered
