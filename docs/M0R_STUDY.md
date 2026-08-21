@@ -173,11 +173,15 @@ qualify. A failed maximum-size echo can therefore veto a path that only carries
 small control traffic.
 The collector then runs each predeclared RLDPv2 plan. Responses are
 deterministic and digest-checked, bounded to 16 MiB, and must exceed the pinned
-2,000,000-byte FEC part size. For an interrupted plan, the receiver first
-observes a complete part, suppresses both inbound and outbound RLDP custom
-messages for the predeclared window, records how many messages were actually
-suppressed, and accepts recovery only when the original `DoQuery` completes
-after the window with the exact payload. It never issues an application retry.
+2,000,000-byte FEC part size. For an interrupted plan, the in-process receiver
+arms an exact complete-part boundary and starts the predeclared window by
+dropping the first inbound symbol of the following part. RLDP cannot send that
+part until it receives the preceding part's completion acknowledgement, so the
+trigger is transfer-local decoded progress rather than a process-wide counter.
+It then suppresses both inbound and outbound RLDP custom messages, records how
+many were actually suppressed, and accepts recovery only when the original
+`DoQuery` completes after the window with the exact payload. It never issues an
+application retry.
 The two directions occupy separate bounded slots so one endpoint's induced
 outage cannot masquerade as the other's. Pairing again requires both signed
 directions; success and same-transfer recovery join by AND, latency by the
