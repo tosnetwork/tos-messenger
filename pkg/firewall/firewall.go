@@ -20,6 +20,9 @@ package firewall
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"sort"
@@ -30,6 +33,9 @@ import (
 )
 
 var idempotencyKeyPattern = regexp.MustCompile(`^idem_[0-9a-f]{64}$`)
+var capabilityIDPattern = regexp.MustCompile(`^cap_[0-9a-f]{64}$`)
+var physicalToolPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+var physicalOperationPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
 // Bounds on what one action may cite.
 const (
@@ -38,7 +44,8 @@ const (
 	// is also an unbounded allocation.
 	MaxProvenance = 32
 	// MaxSummaryBytes bounds the human-readable description of an action.
-	MaxSummaryBytes = 512
+	MaxSummaryBytes           = 512
+	MaxPhysicalArgumentsBytes = 8 << 10
 )
 
 // Effect is what an action does that outlives the runtime's own memory.
@@ -62,6 +69,10 @@ const (
 	EffectMessage Effect = "message"
 	// EffectToolCall invokes something outside this installation.
 	EffectToolCall Effect = "tool-call"
+	// EffectPhysicalIO reads a raw sensor bus or can affect a physical device.
+	// It is separate from an ordinary tool call because no configured ceiling
+	// may turn a network-derived instruction into unattended physical I/O.
+	EffectPhysicalIO Effect = "physical-io"
 	// EffectSpend moves value or commits to terms that will.
 	EffectSpend Effect = "spend"
 	// EffectKeyUse uses an identity or signing key.
@@ -76,7 +87,7 @@ const (
 // invent effects between two of these.
 var rank = map[Effect]int{
 	EffectNone: 0, EffectLocalRead: 1, EffectLocalWrite: 2, EffectMessage: 3,
-	EffectToolCall: 4, EffectSpend: 5, EffectKeyUse: 6, EffectConfiguration: 7,
+	EffectToolCall: 4, EffectSpend: 5, EffectKeyUse: 6, EffectPhysicalIO: 7, EffectConfiguration: 8,
 }
 
 // Known reports whether an effect is one this build recognises. An unknown
@@ -205,6 +216,53 @@ type Action struct {
 	// for one price could be spent on another that happened to be described
 	// the same way.
 	Terms *negotiation.Terms
+	// Physical is the exact local Capability and invocation shape for physical
+	// I/O. Arguments are represented only by their canonical JSON digest: the
+	// owner can identify the approved operation without copying raw sensor or
+	// actuator data into the policy daemon.
+	Physical *PhysicalOperation
+}
+
+// PhysicalOperation binds one raw hardware invocation to an explicitly local
+// Capability. The Capability is configured by the OpenFox owner and is not a
+// bearer token; Messenger still requires a separate one-shot owner decision.
+type PhysicalOperation struct {
+	CapabilityID    string
+	Tool            string
+	Operation       string
+	ArgumentsDigest string
+	ArgumentsJSON   string
+}
+
+func (p PhysicalOperation) Validate() error {
+	if !capabilityIDPattern.MatchString(p.CapabilityID) {
+		return errors.New("physical I/O names no canonical local Capability")
+	}
+	if !physicalToolPattern.MatchString(p.Tool) || !physicalOperationPattern.MatchString(p.Operation) {
+		return errors.New("physical I/O names no bounded tool operation")
+	}
+	if !canon.ValidDigest(p.ArgumentsDigest) {
+		return errors.New("physical I/O has no canonical argument digest")
+	}
+	if len(p.ArgumentsJSON) == 0 || len(p.ArgumentsJSON) > MaxPhysicalArgumentsBytes {
+		return errors.New("physical I/O arguments exceed their review bound")
+	}
+	var arguments map[string]any
+	if err := json.Unmarshal([]byte(p.ArgumentsJSON), &arguments); err != nil {
+		return errors.New("physical I/O arguments are not JSON")
+	}
+	canonical, err := json.Marshal(arguments)
+	if err != nil || string(canonical) != p.ArgumentsJSON {
+		return errors.New("physical I/O arguments are not canonical JSON")
+	}
+	if arguments["action"] != p.Operation {
+		return errors.New("physical I/O operation does not match its arguments")
+	}
+	digest := sha256.Sum256(canonical)
+	if p.ArgumentsDigest != "sha256:"+hex.EncodeToString(digest[:]) {
+		return errors.New("physical I/O argument digest does not match reviewable arguments")
+	}
+	return nil
 }
 
 // Validate enforces that an action can be judged.
@@ -226,6 +284,19 @@ func (a Action) Validate() error {
 	}
 	if a.Effect != EffectSpend && a.Terms != nil {
 		return errors.New("only a spend carries terms")
+	}
+	if a.Effect == EffectPhysicalIO {
+		if a.Physical == nil {
+			return errors.New("physical I/O must name its local Capability and operation")
+		}
+		if a.IdempotencyKey == "" {
+			return errors.New("physical I/O must carry a one-shot invocation key")
+		}
+		if err := a.Physical.Validate(); err != nil {
+			return err
+		}
+	} else if a.Physical != nil {
+		return errors.New("only physical I/O carries a physical operation")
 	}
 	seen := make(map[string]struct{}, len(a.DerivedFrom))
 	for _, origin := range a.DerivedFrom {
@@ -293,6 +364,15 @@ func Evaluate(policy Policy, action Action) (Decision, error) {
 		ceiling = policy.UnattendedCeiling
 	}
 	decision := Decision{Effect: action.Effect, Ceiling: ceiling, Provenance: provenance}
+
+	// Raw sensor buses and actuators are outside every unattended ceiling.
+	// A locally configured Capability makes the request coherent, but only the
+	// owner can consume the one-shot decision for this exact invocation.
+	if action.Effect == EffectPhysicalIO {
+		decision.Outcome = RequireOwnerApproval
+		decision.Reason = "physical I/O always requires a local one-shot owner decision"
+		return decision, nil
+	}
 
 	// Changing what this installation is, or what it will allow, is the
 	// owner's. The runtime asking for it is not evidence that it should be
@@ -362,6 +442,14 @@ func ActionID(action Action) (string, error) {
 			return "", err
 		}
 		canon.Text(buffer, digest)
+	}
+	if action.Physical != nil {
+		canon.Text(buffer, "physical-operation")
+		canon.Text(buffer, action.Physical.CapabilityID)
+		canon.Text(buffer, action.Physical.Tool)
+		canon.Text(buffer, action.Physical.Operation)
+		canon.Text(buffer, action.Physical.ArgumentsDigest)
+		canon.Text(buffer, action.Physical.ArgumentsJSON)
 	}
 	digest := canon.Digest(buffer.Bytes())
 	return "act_" + digest[len("sha256:"):], nil

@@ -163,6 +163,37 @@ func TestGrantedApprovalIsSpentOnce(t *testing.T) {
 	}
 }
 
+func TestPhysicalApprovalSurvivesRestartWithExactCapabilityEvidence(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	journal, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testRequest("f")
+	request.Effect = "physical-io"
+	request.IdempotencyKey = "idem_" + strings.Repeat("1", 64)
+	request.Physical = &ApprovalPhysicalOperation{CapabilityID: "cap_" + strings.Repeat("2", 64),
+		Tool: "i2c", Operation: "read",
+		ArgumentsDigest: "sha256:16384135fc236bb03583cf3024b9fb573cc1ae45f908a98d0601d2ab45f8cfbe",
+		ArgumentsJSON:   `{"action":"read"}`}
+	if _, err := journal.RequestApproval(request); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	journal, err = Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	stored, found, err := journal.LookupApproval(request.ActionID)
+	if err != nil || !found || stored.Physical == nil || *stored.Physical != *request.Physical ||
+		stored.IdempotencyKey != request.IdempotencyKey {
+		t.Fatalf("restart record: found=%v err=%v approval=%+v", found, err, stored)
+	}
+}
+
 // A runtime that retried must not be able to clear a refusal by asking again.
 func TestAskingAgainDoesNotClearARefusal(t *testing.T) {
 	journal := approvalJournal(t)
