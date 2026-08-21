@@ -155,7 +155,16 @@ func (p *Proxy) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/messages", p.listMessages)
 	mux.HandleFunc("POST /v1/members/remove", p.removeMember)
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "encryption": "openmls-0.8.1-suite-0x0001"})
+		p.mu.Lock()
+		active := contains(activeMembers(p.state), p.agentID)
+		epoch := p.state.Room.MLSEpoch
+		roomID := p.state.Room.RoomID
+		label := p.state.Room.Label
+		members := append([]string(nil), p.state.Room.Members...)
+		p.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "active_member": active,
+			"room_id": roomID, "room_label": label, "members": members,
+			"mls_epoch": epoch, "encryption": "openmls-0.8.1-suite-0x0001"})
 	})
 	return mux
 }
@@ -185,9 +194,14 @@ func (p *Proxy) createRoom(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	expectedLabel := p.state.Room.Label
 	expectedMembers := append([]string(nil), p.state.Room.Members...)
+	active := contains(activeMembers(p.state), p.agentID)
 	p.mu.Unlock()
 	if err != nil || strings.TrimSpace(request.Label) != expectedLabel || !equalStrings(members, expectedMembers) {
 		writeError(w, http.StatusBadRequest, "room does not match bootstrapped MLS state")
+		return
+	}
+	if !active {
+		writeError(w, http.StatusGone, "Agent was removed from the MLS room")
 		return
 	}
 	var room labgroup.Room
@@ -470,6 +484,10 @@ func (p *Proxy) listMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid message cursor")
 		return
 	}
+	if !contains(activeMembers(p.state), p.agentID) {
+		writeError(w, http.StatusGone, "Agent was removed from the MLS room")
+		return
+	}
 	working := cloneState(p.state)
 	path := "/v1/messages?room_id=" + url.QueryEscape(roomID) + "&after=" + strconv.FormatUint(working.RelayAfter, 10) + "&limit=256"
 	var response struct {
@@ -585,6 +603,14 @@ func (p *Proxy) listMessages(w http.ResponseWriter, r *http.Request) {
 			}
 			p.state = cloneState(working)
 			changed = false
+			if !contains(activeMembers(working), working.AgentID) {
+				// The immutable untrusted delivery roster may contain later
+				// ciphertext for this former member. Stop exactly at the durable
+				// removal boundary; later calls report the terminal membership
+				// state instead of misclassifying expected exclusion as Relay
+				// corruption.
+				break
+			}
 		}
 	}
 	if changed {

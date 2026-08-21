@@ -41,8 +41,10 @@ independent-operator, review, and second-implementation evidence remain open.
   so an untrusted Relay cannot splice two valid controls. The new MLS epoch is
   fsynced before any later Relay item is opened. Thus a removed Agent may still
   receive later ciphertext from the immutable delivery roster, but cannot
-  decrypt or send in the new epoch; the failed future decrypt cannot roll the
-  already authenticated removal back.
+  decrypt or send in the new epoch. A page containing the removal plus later
+  ciphertext stops exactly at the fsynced control boundary; subsequent room
+  creation or message polling returns `410 Gone`, while `/livez` remains
+  healthy and reports `active_member: false` plus the terminal MLS epoch.
 - A modified ciphertext is refused without advancing durable receiver state.
 - Content and the optional canonical reply Event ID share one strict,
   versioned MLS plaintext frame. Every recipient therefore observes the same
@@ -82,7 +84,9 @@ Reusing both state directories after stopping every process proves restart.
 The membership-removal integration test additionally restarts all three
 proxies, verifies the active two-member view, delivers later ciphertext to the
 removed member, and requires no-future decryption while retaining the exact
-already-fsynced removal boundary.
+already-fsynced removal boundary. The no-future check feeds the exact later
+Relay ciphertext directly to the removed OpenMLS state; expected exclusion is
+not mislabeled as a Relay failure.
 
 The successful result is one JSON object with `ok: true`, the deterministic
 room ID, all three members, and the three-line transcript. Its `mode` is

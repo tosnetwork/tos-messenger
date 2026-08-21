@@ -309,24 +309,47 @@ func TestOpenMLSProxyRemovalSurvivesRestartAndExcludesFormerMember(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status := proxyStatus(t, proxies[2], members[2], tokens[2], http.MethodGet,
-		"/v1/messages?room_id="+room.RoomID+"&after=0", nil); status != http.StatusBadGateway {
-		t.Fatalf("removed member future-ciphertext status = %d", status)
+	carolMessages := callProxy[struct {
+		Messages []Message `json:"messages"`
+	}](t, proxies[2], members[2], tokens[2], http.MethodGet, "/v1/messages?room_id="+room.RoomID+"&after=0", nil)
+	if len(carolMessages.Messages) != 1 || carolMessages.Messages[0].MessageID != opening.MessageID {
+		t.Fatalf("removal batch leaked a control or future message: %+v", carolMessages.Messages)
 	}
 	carolAfter, err := os.ReadFile(StatePath(stateDir, members[2]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(carolBefore, carolAfter) {
-		var durable AgentState
-		decoder := json.NewDecoder(bytes.NewReader(carolAfter))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&durable); err != nil || contains(durable.Room.ActiveMembers, members[2]) ||
-			durable.Room.MLSEpoch != removed.MLSEpoch || durable.RelayAfter != 2 {
-			t.Fatalf("batch failure did not preserve the exact removal boundary: state=%+v err=%v", durable.Room, err)
-		}
-	} else {
-		t.Fatal("batch failure rolled the authenticated removal back")
+	if bytes.Equal(carolBefore, carolAfter) {
+		t.Fatal("batch processing rolled the authenticated removal back")
+	}
+	var durable AgentState
+	decoder := json.NewDecoder(bytes.NewReader(carolAfter))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&durable); err != nil || contains(durable.Room.ActiveMembers, members[2]) ||
+		durable.Room.MLSEpoch != removed.MLSEpoch || durable.RelayAfter != 2 {
+		t.Fatalf("batch processing did not stop at the exact removal boundary: state=%+v err=%v", durable.Room, err)
+	}
+	if status := proxyStatus(t, proxies[2], members[2], tokens[2], http.MethodGet,
+		"/v1/messages?room_id="+room.RoomID+"&after=0", nil); status != http.StatusGone {
+		t.Fatalf("removed member subsequent poll status = %d", status)
+	}
+	if status := proxyStatus(t, proxies[2], members[2], tokens[2], http.MethodPost, "/v1/rooms",
+		map[string]any{"label": room.Label, "members": room.Members}); status != http.StatusGone {
+		t.Fatalf("removed member room replay status = %d", status)
+	}
+	health := callProxy[struct {
+		OK           bool     `json:"ok"`
+		ActiveMember bool     `json:"active_member"`
+		RoomID       string   `json:"room_id"`
+		RoomLabel    string   `json:"room_label"`
+		Members      []string `json:"members"`
+		MLSEpoch     uint64   `json:"mls_epoch"`
+		Encryption   string   `json:"encryption"`
+	}](t, proxies[2], members[2], tokens[2], http.MethodGet, "/livez", nil)
+	if !health.OK || health.ActiveMember || health.RoomID != room.RoomID || health.RoomLabel != room.Label ||
+		!equalStrings(health.Members, room.Members) || health.MLSEpoch != removed.MLSEpoch ||
+		health.Encryption != "openmls-0.8.1-suite-0x0001" {
+		t.Fatalf("removed member health = %+v", health)
 	}
 	carolRooms := callProxy[struct {
 		Rooms []labgroup.Room `json:"rooms"`
@@ -347,6 +370,18 @@ func TestOpenMLSProxyRemovalSurvivesRestartAndExcludesFormerMember(t *testing.T)
 	}](t, relay, members[2], tokens[2], "/v1/messages?room_id="+room.RoomID+"&after=2")
 	if len(relayMessages.Messages) != 1 || relayMessages.Messages[0].MessageID != postRemoval.MessageID {
 		t.Fatalf("Relay did not continue delivering ciphertext to removed member: %+v", relayMessages.Messages)
+	}
+	futureCiphertext, err := base64.StdEncoding.Strict().DecodeString(relayMessages.Messages[0].Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removedState, err := decodeOpaque(durable.Room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := driver.Open(removedState,
+		messageAAD(room.RoomID, members[0], "after-removal"), futureCiphertext); err == nil {
+		t.Fatal("removed member's exact durable state decrypted future Relay ciphertext")
 	}
 	relayRaw, err := os.ReadFile(relayPath)
 	if err != nil {
