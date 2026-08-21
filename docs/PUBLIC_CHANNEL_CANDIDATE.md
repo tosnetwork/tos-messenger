@@ -94,8 +94,8 @@ calibration against the real M0-R carrier and abuse measurements is still open.
 ## Native TOS Overlay/RLDP carrier
 
 `NativeCarrier` binds the candidate to the repository's pinned
-`tosutils-go` native stack. The 32-byte digest in `channel_<sha256>` is the `pub.overlay` key. Its
-TL-boxed hash is the Overlay short ID used on the wire and in signed DHT
+`tosutils-go` native stack. The 32-byte digest in `channel_<sha256>` is the
+`pub.overlay` key. Its TL-boxed hash is the Overlay short ID used on the wire and in signed DHT
 `overlay.node` records. Authenticated ADNL peers exchange live
 head/Event hints through signed two-step Overlay broadcast; RLDP carries the
 strict fetch request and response when history is larger or missing. Each
@@ -149,8 +149,42 @@ tos-public-channeld \
   -state /var/lib/tos-messenger/public-channel \
   -transport-key /etc/tos-messenger/channel/adnl.key \
   -listen 0.0.0.0:30303 -public-address 203.0.113.10:30303 \
-  -dht-config-url https://config.example/tos-global.config.json
+  -dht-config-url https://config.example/tos-global.config.json \
+  -sites-state /var/lib/tos-messenger/public-channel-sites \
+  -storage-cli /opt/tos/bin/storage-daemon-cli \
+  -storage-daemon 127.0.0.1:5555 \
+  -storage-client-key /var/lib/tos-storage/cli.key \
+  -storage-server-key /var/lib/tos-storage/server.pub
 ```
+
+## TOS Sites / Storage Bag mirror
+
+`SitesMirror` exports only a complete locally verified history. Its immutable
+snapshot contains canonical profile, head, finalized-delegation, Event and
+manifest files in deterministic names and order. Loading refuses missing or
+extra objects, symlinks, noncanonical JSON, Event/file-name substitution,
+delegation substitution and any set that does not reproduce the exact head.
+The caller must still supply the current finalized delegations; downloading a
+Bag never proves chain authority.
+
+`StorageCLIPublisher` invokes `storage-daemon-cli` directly without a shell,
+copies the snapshot into an uploaded TOS Storage Bag, bounds process time and
+output, and accepts only the canonical lowercase 256-bit BagID. A private
+single-writer receipt makes exact restart replay idempotent and fails closed on
+damage. Once a receipt exists, `NativeNode` sends a strict bounded `SitesHint`
+over the authenticated Overlay connection. The hint is only an availability
+locator: it has a separate replay budget, cannot consume the head budget, and
+never grants publication, history or completeness authority.
+
+The real two-node UDP integration starts with one empty ledger, synchronizes
+and commits it over RLDP, exports and passes its snapshot to an injected Bag
+publisher, propagates the returned BagID to the other node, then reopens the
+node/store/mirror and proves the publisher is not called twice. A separate
+process-adapter test proves exact no-shell Storage CLI arguments, bounded
+canonical BagID parsing and a snapshot path containing spaces. These are not a
+live independently operated storage-daemon upload. Tests also cover a second
+mirror writer, damaged receipt, extra snapshot object, noncanonical manifest,
+finalized-delegation substitution and a malformed hint.
 
 ## Durable local state
 
@@ -169,8 +203,8 @@ derived history matches them.
 
 ## Explicitly still open
 
-- TOS Sites history mirroring and measured production calibration of the
-  candidate peer/resource limits;
+- a stock Storage Bag downloader/catch-up scheduler and measured production
+  calibration of the candidate peer/resource limits;
 - independently operated convergence/failover evidence;
 - independent vector consumption/review and a second implementation.
 

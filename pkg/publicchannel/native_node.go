@@ -151,6 +151,8 @@ type NativeNodeConfig struct {
 	Gateway      nativeNodeGateway
 	Directory    NativePeerDirectory
 	DirectoryTTL time.Duration
+	Sites        *SitesMirror
+	OnSitesHint  func(peerID string, hint SitesHint) error
 	Now          func() time.Time
 	Logf         func(string, ...any)
 }
@@ -167,6 +169,8 @@ type NativeNode struct {
 	gateway      nativeNodeGateway
 	directory    NativePeerDirectory
 	directoryTTL time.Duration
+	sites        *SitesMirror
+	onSitesHint  func(string, SitesHint) error
 	now          func() time.Time
 	logf         func(string, ...any)
 	overlayKey   []byte
@@ -178,6 +182,8 @@ type NativeNode struct {
 	syncing      map[string]bool
 	history      History
 	historyFound bool
+	sitesReceipt SitesPublicationReceipt
+	sitesFound   bool
 	closed       bool
 	syncContext  context.Context
 	cancelSync   context.CancelFunc
@@ -216,7 +222,8 @@ func NewNativeNode(config NativeNodeConfig) (*NativeNode, error) {
 	n := &NativeNode{profile: cloneProfile(config.Profile), authority: cloneNativeDelegation(config.Authority),
 		delegations: cloneDelegations(config.Delegations), store: config.Store,
 		localKey: append(ed25519.PrivateKey(nil), config.LocalKey...), gateway: config.Gateway,
-		directory: config.Directory, directoryTTL: ttl, now: now, logf: config.Logf,
+		directory: config.Directory, directoryTTL: ttl, sites: config.Sites, onSitesHint: config.OnSitesHint,
+		now: now, logf: config.Logf,
 		overlayKey: overlayKey, localID: string(localID), allowed: make(map[string]ed25519.PublicKey),
 		carriers: make(map[string]*NativeCarrier), syncing: make(map[string]bool),
 		syncContext: syncContext, cancelSync: cancelSync}
@@ -309,6 +316,12 @@ func (n *NativeNode) Run(ctx context.Context, refresh time.Duration) error {
 	if refresh < 10*time.Second || refresh >= n.directoryTTL {
 		return errors.New("native public channel refresh interval outside bound")
 	}
+	n.mutex.Lock()
+	history, found := n.history, n.historyFound
+	n.mutex.Unlock()
+	if found {
+		n.scheduleMirror(history)
+	}
 	if err := n.Refresh(ctx); err != nil {
 		return err
 	}
@@ -377,6 +390,13 @@ func (n *NativeNode) attach(peer adnl.Peer) error {
 			n.log("verified public channel Event announced peer=%s event=%s", peerID, mustEventID(event))
 			return nil
 		},
+		OnSites: func(peerID string, hint SitesHint) error {
+			n.log("public channel Sites hint received peer=%s history=%s bag_id=%s", peerID, hint.HistoryDigest, hint.BagID)
+			if n.onSitesHint != nil {
+				return n.onSitesHint(peerID, hint)
+			}
+			return nil
+		},
 	})
 	if err != nil {
 		return err
@@ -394,10 +414,14 @@ func (n *NativeNode) attach(peer adnl.Peer) error {
 	}
 	n.carriers[id] = carrier
 	history, found := n.history, n.historyFound
+	receipt, sitesFound := n.sitesReceipt, n.sitesFound
 	n.mutex.Unlock()
 	n.log("public channel peer connected peer=%s", carrier.PeerID())
 	if found {
 		go n.publishHeadTo(carrier, history.Head())
+	}
+	if sitesFound {
+		go n.publishSitesTo(carrier, receipt.Hint())
 	}
 	return nil
 }
@@ -491,6 +515,7 @@ func (n *NativeNode) syncHead(peerID string, head Head) {
 	n.mutex.Unlock()
 	n.log("public channel history committed peer=%s events=%d changed=%t digest=%s", peerID, len(history.Events()), changed, history.Digest())
 	if changed {
+		n.scheduleMirror(history)
 		for _, item := range carriers {
 			go n.publishHeadTo(item, history.Head())
 		}
@@ -508,6 +533,44 @@ func (n *NativeNode) scheduleSync(peerID string, head Head) {
 	go func() {
 		defer n.wait.Done()
 		n.syncHead(peerID, head)
+	}()
+}
+
+func (n *NativeNode) scheduleMirror(history History) {
+	if n.sites == nil {
+		return
+	}
+	n.mutex.Lock()
+	if n.closed {
+		n.mutex.Unlock()
+		return
+	}
+	n.wait.Add(1)
+	n.mutex.Unlock()
+	go func() {
+		defer n.wait.Done()
+		ctx, cancel := context.WithTimeout(n.syncContext, 10*time.Minute)
+		defer cancel()
+		receipt, changed, err := n.sites.Publish(ctx, n.profile, history, n.authority, n.delegations, n.now())
+		if err != nil {
+			n.log("public channel Sites publication failed history=%s: %v", history.Digest(), err)
+			return
+		}
+		n.mutex.Lock()
+		if n.historyFound && n.history.Digest() == receipt.HistoryDigest {
+			n.sitesReceipt, n.sitesFound = receipt, true
+		}
+		carriers := make([]*NativeCarrier, 0, len(n.carriers))
+		if n.sitesFound && n.sitesReceipt.HistoryDigest == receipt.HistoryDigest {
+			for _, carrier := range n.carriers {
+				carriers = append(carriers, carrier)
+			}
+		}
+		n.mutex.Unlock()
+		n.log("public channel Sites history published history=%s bag_id=%s changed=%t", receipt.HistoryDigest, receipt.BagID, changed)
+		for _, carrier := range carriers {
+			go n.publishSitesTo(carrier, receipt.Hint())
+		}
 	}()
 }
 
@@ -542,6 +605,14 @@ func (n *NativeNode) publishHeadTo(carrier *NativeCarrier, head Head) {
 	defer cancel()
 	if err := carrier.PublishHead(ctx, head); err != nil {
 		n.log("public channel Head publish failed peer=%s: %v", carrier.PeerID(), err)
+	}
+}
+
+func (n *NativeNode) publishSitesTo(carrier *NativeCarrier, hint SitesHint) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := carrier.PublishSitesHint(ctx, hint); err != nil {
+		n.log("public channel Sites hint publish failed peer=%s: %v", carrier.PeerID(), err)
 	}
 }
 

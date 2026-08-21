@@ -22,6 +22,7 @@ import (
 const (
 	nativeAnnouncementKindEvent = "event"
 	nativeAnnouncementKindHead  = "head"
+	nativeAnnouncementKindSites = "sites"
 	MaxNativeAnnouncementBytes  = MaxEventBytes + 1024
 	nativeAnswerTimeout         = 10 * time.Second
 )
@@ -56,6 +57,7 @@ type NativeCarrierConfig struct {
 	Provider    NativeHistoryProvider
 	OnHead      func(peerID string, head Head) error
 	OnEvent     func(peerID string, event Event) error
+	OnSites     func(peerID string, hint SitesHint) error
 }
 
 // NativeCarrier binds one authenticated ADNL peer to one public-channel
@@ -77,6 +79,7 @@ type NativeCarrier struct {
 	provider      NativeHistoryProvider
 	onHead        func(string, Head) error
 	onEvent       func(string, Event) error
+	onSites       func(string, SitesHint) error
 
 	adnlRoot    *overlay.ADNLWrapper
 	adnlOverlay *overlay.ADNLOverlayWrapper
@@ -89,6 +92,7 @@ type NativeCarrier struct {
 	servedGaps  uint32
 	seenHeads   map[string]struct{}
 	seenEvents  map[string]struct{}
+	seenSites   map[string]struct{}
 }
 
 func NativeOverlayID(channelID string) ([]byte, error) {
@@ -151,9 +155,9 @@ func NewNativeCarrier(peer adnl.Peer, localKey ed25519.PrivateKey, config Native
 		remoteID: remoteID, peerID: "peer_" + hex.EncodeToString(remoteID), channelID: config.Profile.ChannelID,
 		profileDigest: profileDigest, profile: cloneProfile(config.Profile), authority: cloneNativeDelegation(config.Authority),
 		delegations: cloneDelegations(config.Delegations), now: now, guard: config.Guard,
-		provider: config.Provider, onHead: config.OnHead, onEvent: config.OnEvent,
+		provider: config.Provider, onHead: config.OnHead, onEvent: config.OnEvent, onSites: config.OnSites,
 		adnlRoot: adnlRoot, adnlOverlay: adnlOverlay, rldpRoot: rldpRoot, rldpOverlay: rldpOverlay,
-		seenHeads: make(map[string]struct{}), seenEvents: make(map[string]struct{})}
+		seenHeads: make(map[string]struct{}), seenEvents: make(map[string]struct{}), seenSites: make(map[string]struct{})}
 	adnlOverlay.SetBroadcastPrecheckHandler(carrier.precheckAnnouncement)
 	adnlOverlay.SetBroadcastHandlerWithInfo(carrier.consumeAnnouncement)
 	rldpOverlay.SetOnQuery(carrier.answerFetch)
@@ -188,6 +192,17 @@ func (c *NativeCarrier) PublishEvent(ctx context.Context, event Event) error {
 		return err
 	}
 	return c.publish(ctx, nativeAnnouncementKindEvent, raw)
+}
+
+// PublishSitesHint announces an availability locator only. The native hop and
+// BagID authorize nothing; a downloader must still verify the exact snapshot.
+func (c *NativeCarrier) PublishSitesHint(ctx context.Context, hint SitesHint) error {
+	if c == nil || validateSitesHint(hint) != nil || hint.ChannelID != c.channelID ||
+		hint.ProfileDigest != c.profileDigest {
+		return errors.New("invalid native public channel Sites hint")
+	}
+	raw, _ := EncodeSitesHintJSON(hint)
+	return c.publish(ctx, nativeAnnouncementKindSites, raw)
 }
 
 func (c *NativeCarrier) publish(ctx context.Context, kind string, raw []byte) error {
@@ -291,6 +306,22 @@ func (c *NativeCarrier) consumeAnnouncement(object tl.Serializable, info overlay
 				return err
 			}
 		}
+	case nativeAnnouncementKindSites:
+		hint, err := DecodeSitesHintJSON(announcement.Payload)
+		if err != nil || hint.ChannelID != c.channelID || hint.ProfileDigest != c.profileDigest {
+			return errors.New("invalid native public channel Sites hint")
+		}
+		raw, _ := EncodeSitesHintJSON(hint)
+		key := "sites:" + string(raw)
+		if !c.claimSites(key) {
+			return nil
+		}
+		if c.onSites != nil {
+			if err := c.onSites(c.peerID, hint); err != nil {
+				c.releaseSites(key)
+				return err
+			}
+		}
 	default:
 		return errors.New("unknown native public channel announcement kind")
 	}
@@ -390,6 +421,25 @@ func (c *NativeCarrier) releaseAnnouncement(key string, head bool) {
 	} else {
 		delete(c.seenEvents, key)
 	}
+}
+
+func (c *NativeCarrier) claimSites(key string) bool {
+	c.usageMutex.Lock()
+	defer c.usageMutex.Unlock()
+	if _, replay := c.seenSites[key]; replay {
+		return false
+	}
+	if len(c.seenSites) >= int(c.guard.limits.CandidateHeadsPerPeer) {
+		return false
+	}
+	c.seenSites[key] = struct{}{}
+	return true
+}
+
+func (c *NativeCarrier) releaseSites(key string) {
+	c.usageMutex.Lock()
+	defer c.usageMutex.Unlock()
+	delete(c.seenSites, key)
 }
 
 func (c *NativeCarrier) Close() {

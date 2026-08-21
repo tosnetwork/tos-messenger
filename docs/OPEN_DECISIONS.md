@@ -196,7 +196,7 @@ implementation of them:
   two-Descriptor fork proof now exist without centralizing device secrets;
 - Mailbox Relay sender privacy, quota tokens, and anti-spam model;
 - mobile push privacy within the contentless wake-up constraint; and
-- TOS Sites mirroring, independently operated DHT/network evidence and measured calibration around the runnable public-channel native node (durable local profile/history state plus ordering/moderation/sync semantics are candidate code, not frozen); and
+- a stock TOS Storage Bag downloader/catch-up scheduler, independently operated DHT/Storage/network evidence and measured calibration around the runnable public-channel native node (deterministic verified Bag publication and authority-free Overlay hints now exist, but are not frozen); and
 - the sample sizes and viability rates a real study will predeclare, for which
   `docs/reachability-policy.example.json` is an illustration and not a
   commitment.

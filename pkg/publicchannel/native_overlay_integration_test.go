@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -105,9 +107,16 @@ func TestNativeNodeDiscoversSyncsAndRestartsADNL(t *testing.T) {
 	defer serverStore.Close()
 	clientRoot := filepath.Join(t.TempDir(), "store")
 	clientStore := openAppliedNativeStoreAt(t, clientRoot, profile, authority, delegations, now())
+	mirrorRoot := filepath.Join(t.TempDir(), "sites")
+	sitesPublisher := &countingSitesPublisher{bagID: strings.Repeat("cd", 32)}
+	clientMirror, err := OpenSitesMirror(mirrorRoot, sitesPublisher)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	serverGateway := adnl.NewGateway(serverKey)
 	clientGateway := adnl.NewGateway(clientKey)
+	sitesHints := make(chan SitesHint, 1)
 	if err := serverGateway.StartServer(reserveNativeUDPAddress(t)); err != nil {
 		t.Fatal(err)
 	}
@@ -117,14 +126,20 @@ func TestNativeNodeDiscoversSyncsAndRestartsADNL(t *testing.T) {
 	}
 	serverNode, err := NewNativeNode(NativeNodeConfig{Profile: profile, Authority: authority,
 		Delegations: delegations, Store: serverStore, LocalKey: serverKey, Gateway: serverGateway,
-		Directory: directory, Now: now})
+		Directory: directory, Now: now, OnSitesHint: func(_ string, hint SitesHint) error {
+			select {
+			case sitesHints <- hint:
+			default:
+			}
+			return nil
+		}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer serverNode.Close()
 	clientNode, err := NewNativeNode(NativeNodeConfig{Profile: profile, Authority: authority,
 		Delegations: delegations, Store: clientStore, LocalKey: clientKey, Gateway: clientGateway,
-		Directory: directory, Now: now})
+		Directory: directory, Sites: clientMirror, Now: now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +155,19 @@ func TestNativeNodeDiscoversSyncsAndRestartsADNL(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitNativeHistory(t, ctx, clientStore, profile, authority, delegations, now(), want.Digest())
+	waitSitesPublications(t, ctx, sitesPublisher, 1)
+	select {
+	case hint := <-sitesHints:
+		if hint.HistoryDigest != want.Digest() || hint.BagID != sitesPublisher.bagID {
+			t.Fatalf("unexpected propagated Sites hint: %#v", hint)
+		}
+	case <-ctx.Done():
+		t.Fatal("Sites BagID hint was not propagated over native Overlay")
+	}
 	clientNode.Close()
+	if err := clientMirror.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := clientGateway.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +177,11 @@ func TestNativeNodeDiscoversSyncsAndRestartsADNL(t *testing.T) {
 
 	clientStore = openAppliedNativeStoreAt(t, clientRoot, profile, authority, delegations, now())
 	defer clientStore.Close()
+	clientMirror, err = OpenSitesMirror(mirrorRoot, sitesPublisher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientMirror.Close()
 	clientGateway = adnl.NewGateway(clientKey)
 	if err := clientGateway.StartServer(reserveNativeUDPAddress(t)); err != nil {
 		t.Fatal(err)
@@ -157,7 +189,7 @@ func TestNativeNodeDiscoversSyncsAndRestartsADNL(t *testing.T) {
 	defer clientGateway.Close()
 	clientNode, err = NewNativeNode(NativeNodeConfig{Profile: profile, Authority: authority,
 		Delegations: delegations, Store: clientStore, LocalKey: clientKey, Gateway: clientGateway,
-		Directory: directory, Now: now})
+		Directory: directory, Sites: clientMirror, Now: now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,11 +204,41 @@ func TestNativeNodeDiscoversSyncsAndRestartsADNL(t *testing.T) {
 	if err := serverNode.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
+	clientNode.scheduleMirror(want)
+	clientNode.Close()
+	if sitesPublisher.Count() != 1 {
+		t.Fatalf("Sites history republished after durable restart: calls=%d", sitesPublisher.Count())
+	}
 }
 
 type memoryNativeDirectory struct {
 	mutex   sync.Mutex
 	records map[string]NativeDiscoveredPeer
+}
+
+type countingSitesPublisher struct {
+	mutex sync.Mutex
+	bagID string
+	calls int
+}
+
+func (p *countingSitesPublisher) Publish(ctx context.Context, snapshot string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if info, err := os.Lstat(snapshot); err != nil || !info.IsDir() {
+		return "", errors.New("Sites publisher received no snapshot")
+	}
+	p.mutex.Lock()
+	p.calls++
+	p.mutex.Unlock()
+	return p.bagID, nil
+}
+
+func (p *countingSitesPublisher) Count() int {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	return p.calls
 }
 
 func (d *memoryNativeDirectory) Publish(_ context.Context, overlayKey []byte, key ed25519.PrivateKey,
@@ -247,6 +309,17 @@ func waitNativeHistory(t *testing.T, ctx context.Context, store *Store, profile 
 	}
 }
 
+func waitSitesPublications(t *testing.T, ctx context.Context, publisher *countingSitesPublisher, want int) {
+	t.Helper()
+	for publisher.Count() != want {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("Sites publication count=%d, want %d", publisher.Count(), want)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
 func runNativeCarrierPair(t *testing.T, profile Profile, authority identity.Delegation,
 	delegations map[string]identity.Delegation, now time.Time, serverKey, clientKey ed25519.PrivateKey,
 	want History, available map[string]Event, announced Event) History {
@@ -304,11 +377,19 @@ func runNativeCarrierPair(t *testing.T, profile Profile, authority identity.Dele
 		t.Fatal(err)
 	}
 	heads := make(chan Head, 1)
+	sites := make(chan SitesHint, 1)
 	clientCarrier, err := NewNativeCarrier(peer, clientKey, NativeCarrierConfig{Profile: profile,
 		Authority: authority, Delegations: delegations, Now: func() time.Time { return now }, Guard: clientGuard,
 		OnHead: func(_ string, head Head) error {
 			select {
 			case heads <- head:
+			default:
+			}
+			return nil
+		},
+		OnSites: func(_ string, hint SitesHint) error {
+			select {
+			case sites <- hint:
 			default:
 			}
 			return nil
@@ -342,6 +423,19 @@ func runNativeCarrierPair(t *testing.T, profile Profile, authority identity.Dele
 	case head = <-heads:
 	case <-ctx.Done():
 		t.Fatal("native Overlay head announcement was not delivered")
+	}
+	hint := SitesHint{Schema: SitesHintSchema, ChannelID: profile.ChannelID,
+		ProfileDigest: want.ProfileDigest(), HistoryDigest: want.Digest(), BagID: strings.Repeat("ef", 32)}
+	if err := serverCarrier.PublishSitesHint(ctx, hint); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-sites:
+		if got != hint {
+			t.Fatalf("native Overlay Sites hint = %#v, want %#v", got, hint)
+		}
+	case <-ctx.Done():
+		t.Fatal("native Overlay Sites hint was not delivered")
 	}
 	if err := clientCarrier.PublishEvent(ctx, announced); err != nil {
 		t.Fatal(err)

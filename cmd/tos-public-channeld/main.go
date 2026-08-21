@@ -45,6 +45,11 @@ type options struct {
 	listen        string
 	publicAddress string
 	dhtConfigURL  string
+	sitesState    string
+	storageCLI    string
+	storageAddr   string
+	storageKey    string
+	storagePub    string
 	refresh       time.Duration
 	ttl           time.Duration
 	check         bool
@@ -60,13 +65,20 @@ func main() {
 	listen := flag.String("listen", "", "ADNL UDP listen address")
 	publicAddress := flag.String("public-address", "", "advertised UDP address; required when listen IP is unspecified")
 	dhtConfig := flag.String("dht-config-url", "", "HTTPS TOS global configuration URL")
+	sitesState := flag.String("sites-state", "", "optional absolute private Sites snapshot/receipt directory")
+	storageCLI := flag.String("storage-cli", "", "absolute TOS storage-daemon-cli executable")
+	storageAddr := flag.String("storage-daemon", "", "TOS storage-daemon ADNL-lite address")
+	storageKey := flag.String("storage-client-key", "", "absolute mode-0600 storage client private key")
+	storagePub := flag.String("storage-server-key", "", "absolute storage daemon public key")
 	refresh := flag.Duration("refresh", publicchannel.DefaultNativeRefreshInterval, "DHT refresh interval")
 	ttl := flag.Duration("dht-ttl", publicchannel.DefaultNativeDirectoryTTL, "DHT address/node TTL")
 	check := flag.Bool("check", false, "validate local configuration without network or state writes")
 	flag.Parse()
 	err := run(options{profilePath: *profile, authorityPath: *authority, delegations: delegationPaths,
 		state: *state, keyPath: *key, listen: *listen, publicAddress: *publicAddress,
-		dhtConfigURL: *dhtConfig, refresh: *refresh, ttl: *ttl, check: *check})
+		dhtConfigURL: *dhtConfig, sitesState: *sitesState, storageCLI: *storageCLI,
+		storageAddr: *storageAddr, storageKey: *storageKey, storagePub: *storagePub,
+		refresh: *refresh, ttl: *ttl, check: *check})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tos-public-channeld:", err)
 		os.Exit(1)
@@ -81,9 +93,13 @@ func run(options options) error {
 	defer zero(key)
 	profileDigest, _ := profile.Digest()
 	overlayID, _ := publicchannel.NativeOverlayID(profile.ChannelID)
+	storagePublisher, err := sitesPublisher(options)
+	if err != nil {
+		return err
+	}
 	if options.check {
-		fmt.Printf("configuration_valid=true channel_id=%s profile_digest=%s overlay_id=%x transport_public_key=%x\n",
-			profile.ChannelID, profileDigest, overlayID, key.Public().(ed25519.PublicKey))
+		fmt.Printf("configuration_valid=true channel_id=%s profile_digest=%s overlay_id=%x transport_public_key=%x sites_enabled=%t\n",
+			profile.ChannelID, profileDigest, overlayID, key.Public().(ed25519.PublicKey), storagePublisher != nil)
 		return nil
 	}
 	store, err := publicchannel.OpenStore(options.state)
@@ -93,6 +109,14 @@ func run(options options) error {
 	defer store.Close()
 	if _, err := store.ApplyProfile(profile, authority, delegations, time.Now()); err != nil {
 		return fmt.Errorf("apply public channel profile: %w", err)
+	}
+	var sites *publicchannel.SitesMirror
+	if storagePublisher != nil {
+		sites, err = publicchannel.OpenSitesMirror(options.sitesState, *storagePublisher)
+		if err != nil {
+			return fmt.Errorf("open public channel Sites mirror: %w", err)
+		}
+		defer sites.Close()
 	}
 	publicGateway := adnl.NewGateway(key)
 	if advertised != nil {
@@ -122,7 +146,7 @@ func run(options options) error {
 	node, err := publicchannel.NewNativeNode(publicchannel.NativeNodeConfig{Profile: profile,
 		Authority: authority, Delegations: delegations, Store: store, LocalKey: key,
 		Gateway: publicGateway, Directory: publicchannel.DHTPeerDirectory{Client: dhtClient},
-		DirectoryTTL: options.ttl, Logf: func(format string, values ...any) {
+		DirectoryTTL: options.ttl, Sites: sites, Logf: func(format string, values ...any) {
 			fmt.Fprintf(os.Stderr, "tos-public-channeld: "+format+"\n", values...)
 		}})
 	if err != nil {
@@ -138,6 +162,43 @@ func run(options options) error {
 		return nil
 	}
 	return err
+}
+
+func sitesPublisher(options options) (*publicchannel.StorageCLIPublisher, error) {
+	values := []string{options.sitesState, options.storageCLI, options.storageAddr, options.storageKey, options.storagePub}
+	configured := 0
+	for _, value := range values {
+		if value != "" {
+			configured++
+		}
+	}
+	if configured == 0 {
+		return nil, nil
+	}
+	if configured != len(values) {
+		return nil, errors.New("Sites publication requires sites-state, storage-cli, storage-daemon, storage-client-key, and storage-server-key together")
+	}
+	for _, path := range []string{options.sitesState, options.storageCLI, options.storageKey, options.storagePub} {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return nil, errors.New("Sites publication paths must be absolute and canonical")
+		}
+	}
+	if _, _, err := net.SplitHostPort(options.storageAddr); err != nil {
+		return nil, errors.New("storage-daemon must be an IP:port address")
+	}
+	for _, path := range []string{options.storageCLI, options.storageKey, options.storagePub} {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("Sites storage command/key path must be a regular file")
+		}
+	}
+	keyInfo, _ := os.Lstat(options.storageKey)
+	keyStat, owned := keyInfoSys(keyInfo)
+	if !owned || keyStat.Uid != uint32(os.Geteuid()) || keyInfo.Mode().Perm() != 0o600 {
+		return nil, errors.New("storage-client-key must be owned by this user with mode 0600")
+	}
+	return &publicchannel.StorageCLIPublisher{Command: options.storageCLI, ServerAddress: options.storageAddr,
+		ClientPrivateKey: options.storageKey, ServerPublicKey: options.storagePub}, nil
 }
 
 func loadOptions(options options) (publicchannel.Profile, identity.Delegation,
