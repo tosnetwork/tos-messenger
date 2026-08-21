@@ -14,24 +14,27 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/daemon"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
+	"github.com/tosnetwork/tos-messenger/pkg/publicationops"
 )
 
 func main() {
 	configPath := flag.String("config", "", "daemon configuration file")
+	publicationPath := flag.String("publication-operator-config", "", "operator publication resources (required to publish public prekey generations)")
 	check := flag.Bool("check", false, "validate the configuration and exit")
 	flag.Parse()
 
-	if err := run(*configPath, *check); err != nil {
+	if err := run(*configPath, *publicationPath, *check); err != nil {
 		fmt.Fprintln(os.Stderr, "tos-messengerd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(configPath string, checkOnly bool) error {
+func run(configPath, publicationPath string, checkOnly bool) error {
 	if configPath == "" {
 		return errNoConfig
 	}
@@ -39,13 +42,40 @@ func run(configPath string, checkOnly bool) error {
 	if err != nil {
 		return err
 	}
+	var publicationConfig publicationops.Config
+	if publicationPath != "" {
+		publicationConfig, err = publicationops.Load(publicationPath)
+		if err != nil {
+			return err
+		}
+	}
+	if config.Publication.Mode == daemon.PublicationNone && publicationPath != "" {
+		return fmt.Errorf("publication operator resources require publication mode prekeys")
+	}
 	if checkOnly {
 		fmt.Printf("configuration is valid: state_dir=%s runtime_socket=%s owner_socket=%s prekey_socket=%s transport=%s\n",
 			config.StateDir, config.SocketPath, config.OwnerSocketPath, config.Publication.DeviceSocketPath, config.Transport)
+		if publicationPath != "" {
+			fmt.Println("publication operator configuration is structurally valid; live delegation, DHT, HTTPS root, and signer are checked at startup")
+		}
 		return nil
 	}
 
-	instance, err := daemon.Open(config, reporter{})
+	var instance *daemon.Daemon
+	if publicationPath == "" {
+		instance, err = daemon.Open(config, reporter{})
+	} else {
+		delegation, verifyErr := daemon.VerifyFinalizedDelegation(config, time.Now())
+		if verifyErr != nil {
+			return fmt.Errorf("verify publication authority: %w", verifyErr)
+		}
+		resources, assembleErr := publicationops.Assemble(publicationConfig, delegation)
+		if assembleErr != nil {
+			return fmt.Errorf("assemble publication resources: %w", assembleErr)
+		}
+		defer resources.Close()
+		instance, err = daemon.OpenWithGenerationPublisher(config, reporter{}, resources.Publisher)
+	}
 	if err != nil {
 		return err
 	}

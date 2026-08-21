@@ -1,0 +1,14 @@
+{
+  "schema": "tos.messaging.publication-operator.v1",
+  "https_publication_root": "/srv/www/agent.example",
+  "dht_global_config_path": "/etc/tos-messengerd/tos-global.config.json",
+  "descriptor_policy_path": "/etc/tos-messengerd/descriptor-policy.json",
+  "endpoint_signer_socket": "/run/tos-endpoint-signer/sign.sock",
+  "signer_timeout_seconds": 10,
+  "publish_interval_seconds": 300,
+  "https_endpoint": "https://agent.example/messaging",
+  "messaging_versions": [1],
+  "a2a_versions": ["1.0"],
+  "mcp_versions": ["2025-06-18"],
+  "maximum_envelope_bytes": 65536
+}

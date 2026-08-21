@@ -120,12 +120,25 @@ network use. `pkg/signerapi` supplies a strict bounded Unix client for a
 separately custodied Endpoint signer and verifies every 64-byte response under
 the live 32-byte delegated key; no private bytes enter daemon configuration.
 
-The stock command still needs operator-specific assembly of the HTTPS root,
-descriptor template/policy, DHT client, and external signer into that explicit
-publisher boundary. Centralizing every device secret or loading an Endpoint
-seed from daemon JSON is not an acceptable shortcut. Live independently
-operated publication and cross-observer fork exchange remain deployment
-evidence.
+The stock `tos-messengerd` command assembles those resources when passed
+`-publication-operator-config`. The strict
+`tos.messaging.publication-operator.v1` document names the protected static
+HTTPS root, native DHT global configuration, committed Descriptor policy,
+external signer socket, bounded timeouts/cadence, and public Descriptor
+capabilities. See `docs/publication-operator.example.json`. At startup the
+command first resolves the live delegation through the same strict-majority
+finalized-chain authority as the daemon. Identity, network, ADNL, admission
+policy, delegation digest, and signer public key are derived from that result,
+not accepted from the operator publication document. The template and policy
+are checked before a DHT connection or HTTPS mutation, and the daemon is then
+opened through `OpenWithGenerationPublisher`.
+
+Omitting the flag intentionally retains public-only device collection without
+network publication. `-check` validates both strict configuration documents
+without claiming that the live chain, DHT, HTTPS root, or signer is available.
+Centralizing every device secret or loading an Endpoint seed from daemon JSON
+remains forbidden. Live independently operated publication and cross-observer
+fork exchange remain deployment evidence.
 
 No canonical preimage or wire schema changed. The existing bundle and
 bundle-set vectors remain the applicable interoperation artifacts.

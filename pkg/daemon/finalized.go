@@ -61,6 +61,17 @@ func (finalizedVerifier) Verify(config Config, now time.Time) (identity.Delegati
 	return identity.Verify(resolver, config.Network(), policy, raw, now)
 }
 
+// VerifyFinalizedDelegation returns the same live, strict-majority verified
+// Endpoint delegation used by daemon startup. Stock-command resource assembly
+// uses it to pin an external signer client before opening the daemon; callers
+// cannot replace this authority with an unverified configuration value.
+func VerifyFinalizedDelegation(config Config, now time.Time) (identity.Delegation, error) {
+	if err := config.Validate(); err != nil {
+		return identity.Delegation{}, err
+	}
+	return finalizedVerifier{}.Verify(config, now)
+}
+
 func finalizedResolver(config Config) (*chainagent.Resolver, identity.ChainPolicy, error) {
 	adapter, err := config.ChainAdapter()
 	if err != nil {
