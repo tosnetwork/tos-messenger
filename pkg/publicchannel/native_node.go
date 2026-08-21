@@ -152,6 +152,7 @@ type NativeNodeConfig struct {
 	Directory    NativePeerDirectory
 	DirectoryTTL time.Duration
 	Sites        *SitesMirror
+	SitesCatchUp *SitesCatchUp
 	OnSitesHint  func(peerID string, hint SitesHint) error
 	Now          func() time.Time
 	Logf         func(string, ...any)
@@ -170,6 +171,7 @@ type NativeNode struct {
 	directory    NativePeerDirectory
 	directoryTTL time.Duration
 	sites        *SitesMirror
+	sitesCatchUp *SitesCatchUp
 	onSitesHint  func(string, SitesHint) error
 	now          func() time.Time
 	logf         func(string, ...any)
@@ -180,6 +182,7 @@ type NativeNode struct {
 	allowed      map[string]ed25519.PublicKey
 	carriers     map[string]*NativeCarrier
 	syncing      map[string]bool
+	catching     map[string]bool
 	history      History
 	historyFound bool
 	sitesReceipt SitesPublicationReceipt
@@ -222,10 +225,11 @@ func NewNativeNode(config NativeNodeConfig) (*NativeNode, error) {
 	n := &NativeNode{profile: cloneProfile(config.Profile), authority: cloneNativeDelegation(config.Authority),
 		delegations: cloneDelegations(config.Delegations), store: config.Store,
 		localKey: append(ed25519.PrivateKey(nil), config.LocalKey...), gateway: config.Gateway,
-		directory: config.Directory, directoryTTL: ttl, sites: config.Sites, onSitesHint: config.OnSitesHint,
-		now: now, logf: config.Logf,
+		directory: config.Directory, directoryTTL: ttl, sites: config.Sites, sitesCatchUp: config.SitesCatchUp,
+		onSitesHint: config.OnSitesHint,
+		now:         now, logf: config.Logf,
 		overlayKey: overlayKey, localID: string(localID), allowed: make(map[string]ed25519.PublicKey),
-		carriers: make(map[string]*NativeCarrier), syncing: make(map[string]bool),
+		carriers: make(map[string]*NativeCarrier), syncing: make(map[string]bool), catching: make(map[string]bool),
 		syncContext: syncContext, cancelSync: cancelSync}
 	history, found, err := n.store.LoadHistory(n.profile, n.authority, n.delegations, n.now())
 	if err != nil {
@@ -234,6 +238,19 @@ func NewNativeNode(config NativeNodeConfig) (*NativeNode, error) {
 		return nil, err
 	}
 	n.history, n.historyFound = history, found
+	if found && n.sitesCatchUp != nil {
+		hint, cached, cacheErr := n.sitesCatchUp.Cached(n.profile, history, n.authority, n.delegations, n.now())
+		if cacheErr != nil {
+			n.cancelSync()
+			n.zeroKey()
+			return nil, cacheErr
+		}
+		if cached {
+			n.sitesReceipt = SitesPublicationReceipt{Schema: SitesReceiptSchema, ChannelID: hint.ChannelID,
+				ProfileDigest: hint.ProfileDigest, HistoryDigest: hint.HistoryDigest, BagID: hint.BagID}
+			n.sitesFound = true
+		}
+	}
 	n.gateway.SetConnectionHandler(n.acceptInbound)
 	return n, nil
 }
@@ -392,6 +409,9 @@ func (n *NativeNode) attach(peer adnl.Peer) error {
 		},
 		OnSites: func(peerID string, hint SitesHint) error {
 			n.log("public channel Sites hint received peer=%s history=%s bag_id=%s", peerID, hint.HistoryDigest, hint.BagID)
+			if err := n.scheduleSitesCatchUp(peerID, hint); err != nil {
+				return err
+			}
 			if n.onSitesHint != nil {
 				return n.onSitesHint(peerID, hint)
 			}
@@ -541,7 +561,7 @@ func (n *NativeNode) scheduleMirror(history History) {
 		return
 	}
 	n.mutex.Lock()
-	if n.closed {
+	if n.closed || n.sitesFound && n.sitesReceipt.HistoryDigest == history.Digest() {
 		n.mutex.Unlock()
 		return
 	}
@@ -572,6 +592,72 @@ func (n *NativeNode) scheduleMirror(history History) {
 			go n.publishSitesTo(carrier, receipt.Hint())
 		}
 	}()
+}
+
+const maxPendingSitesCatchUps = 8
+
+func (n *NativeNode) scheduleSitesCatchUp(peerID string, hint SitesHint) error {
+	if n.sitesCatchUp == nil {
+		return nil
+	}
+	n.mutex.Lock()
+	if n.closed {
+		n.mutex.Unlock()
+		return errors.New("native public channel node is closed")
+	}
+	if n.sitesFound && n.sitesReceipt.HistoryDigest == hint.HistoryDigest {
+		n.mutex.Unlock()
+		return nil
+	}
+	if n.catching[hint.HistoryDigest] {
+		n.mutex.Unlock()
+		return nil
+	}
+	if len(n.catching) >= maxPendingSitesCatchUps {
+		n.mutex.Unlock()
+		return errors.New("native public channel Sites catch-up queue is full")
+	}
+	n.catching[hint.HistoryDigest] = true
+	n.wait.Add(1)
+	n.mutex.Unlock()
+	go func() {
+		defer n.wait.Done()
+		defer func() {
+			n.mutex.Lock()
+			delete(n.catching, hint.HistoryDigest)
+			n.mutex.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(n.syncContext, MaxSitesDownloadTimeout)
+		defer cancel()
+		history, accepted, downloaded, err := n.sitesCatchUp.Fetch(ctx, hint, n.profile,
+			n.authority, n.delegations, n.now())
+		if err != nil {
+			n.log("public channel Sites catch-up failed peer=%s history=%s: %v", peerID, hint.HistoryDigest, err)
+			return
+		}
+		committed, changed, err := n.store.CommitHistory(n.profile, history.Events(), n.authority, n.delegations, n.now())
+		if err != nil {
+			n.log("public channel Sites catch-up commit rejected peer=%s history=%s: %v", peerID, hint.HistoryDigest, err)
+			return
+		}
+		n.mutex.Lock()
+		n.history, n.historyFound = committed, true
+		n.sitesReceipt = SitesPublicationReceipt{Schema: SitesReceiptSchema, ChannelID: accepted.ChannelID,
+			ProfileDigest: accepted.ProfileDigest, HistoryDigest: accepted.HistoryDigest, BagID: accepted.BagID}
+		n.sitesFound = true
+		carriers := make([]*NativeCarrier, 0, len(n.carriers))
+		for _, carrier := range n.carriers {
+			carriers = append(carriers, carrier)
+		}
+		n.mutex.Unlock()
+		n.log("public channel Sites history committed peer=%s events=%d changed=%t downloaded=%t digest=%s",
+			peerID, len(committed.Events()), changed, downloaded, committed.Digest())
+		for _, carrier := range carriers {
+			go n.publishHeadTo(carrier, committed.Head())
+			go n.publishSitesTo(carrier, accepted)
+		}
+	}()
+	return nil
 }
 
 func (n *NativeNode) replaceAllowed(next map[string]ed25519.PublicKey) {

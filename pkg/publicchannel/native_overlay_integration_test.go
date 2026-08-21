@@ -211,6 +211,132 @@ func TestNativeNodeDiscoversSyncsAndRestartsADNL(t *testing.T) {
 	}
 }
 
+func TestNativeNodeADNLSitesCatchUpWithoutRLDPHistory(t *testing.T) {
+	if publicChannelRaceEnabled {
+		t.Skip("tosutils-go's TL serializer is incompatible with race/checkptr; make test-adnl runs this test without race")
+	}
+	profile, authority, _, publisher, publisherKey, delegations := storeFixture(t)
+	profileDigest, _ := profile.Digest()
+	event := signedPost(t, profile, profileDigest, publisher, publisherKey, 1, "", nil, channelNow, "Sites-only catch-up")
+	now := func() time.Time { return time.Unix(int64(channelNow+2), 0) }
+	want, err := VerifyHistory(profile, []Event{event}, authority, delegations, now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceParent := filepath.Join(t.TempDir(), "source")
+	if err := os.Mkdir(sourceParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source, _, err := ExportSitesSnapshot(sourceParent, profile, want, authority, delegations, now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloader := &copyingSitesDownloader{source: source}
+	catchUpRoot := filepath.Join(t.TempDir(), "catchup")
+	catchUp, err := OpenSitesCatchUp(catchUpRoot, downloader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := &memoryNativeDirectory{records: make(map[string]NativeDiscoveredPeer)}
+	serverKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x51}, ed25519.SeedSize))
+	clientKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x52}, ed25519.SeedSize))
+	serverStore := openAppliedNativeStore(t, profile, authority, delegations, now())
+	defer serverStore.Close()
+	clientRoot := filepath.Join(t.TempDir(), "client-store")
+	clientStore := openAppliedNativeStoreAt(t, clientRoot, profile, authority, delegations, now())
+	serverGateway := adnl.NewGateway(serverKey)
+	clientGateway := adnl.NewGateway(clientKey)
+	if err := serverGateway.StartServer(reserveNativeUDPAddress(t)); err != nil {
+		t.Fatal(err)
+	}
+	defer serverGateway.Close()
+	if err := clientGateway.StartServer(reserveNativeUDPAddress(t)); err != nil {
+		t.Fatal(err)
+	}
+	serverNode, err := NewNativeNode(NativeNodeConfig{Profile: profile, Authority: authority,
+		Delegations: delegations, Store: serverStore, LocalKey: serverKey, Gateway: serverGateway,
+		Directory: directory, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverNode.Close()
+	clientNode, err := NewNativeNode(NativeNodeConfig{Profile: profile, Authority: authority,
+		Delegations: delegations, Store: clientStore, LocalKey: clientKey, Gateway: clientGateway,
+		Directory: directory, SitesCatchUp: catchUp, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := serverNode.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientNode.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverNode.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var carrier *NativeCarrier
+	for carrier == nil {
+		serverNode.mutex.Lock()
+		for _, item := range serverNode.carriers {
+			carrier = item
+			break
+		}
+		serverNode.mutex.Unlock()
+		if carrier != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("native Sites test did not establish an authenticated carrier")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	hint := SitesHint{Schema: SitesHintSchema, ChannelID: profile.ChannelID,
+		ProfileDigest: profileDigest, HistoryDigest: want.Digest(), BagID: strings.Repeat("ef", 32)}
+	if err := carrier.PublishSitesHint(ctx, hint); err != nil {
+		t.Fatal(err)
+	}
+	waitNativeHistory(t, ctx, clientStore, profile, authority, delegations, now(), want.Digest())
+	if downloader.Count() != 1 {
+		t.Fatalf("Sites-only native catch-up download calls=%d", downloader.Count())
+	}
+	clientNode.Close()
+	if err := catchUp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientGateway.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	clientStore = openAppliedNativeStoreAt(t, clientRoot, profile, authority, delegations, now())
+	defer clientStore.Close()
+	catchUp, err = OpenSitesCatchUp(catchUpRoot, downloader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catchUp.Close()
+	clientGateway = adnl.NewGateway(clientKey)
+	clientNode, err = NewNativeNode(NativeNodeConfig{Profile: profile, Authority: authority,
+		Delegations: delegations, Store: clientStore, LocalKey: clientKey, Gateway: clientGateway,
+		Directory: directory, SitesCatchUp: catchUp, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientNode.Close()
+	clientNode.mutex.Lock()
+	restored := clientNode.sitesFound && clientNode.sitesReceipt.Hint() == hint
+	clientNode.mutex.Unlock()
+	if !restored || downloader.Count() != 1 {
+		t.Fatalf("Sites-only restart locator restored=%t download calls=%d", restored, downloader.Count())
+	}
+}
+
 type memoryNativeDirectory struct {
 	mutex   sync.Mutex
 	records map[string]NativeDiscoveredPeer

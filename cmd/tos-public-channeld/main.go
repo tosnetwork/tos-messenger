@@ -46,6 +46,7 @@ type options struct {
 	publicAddress string
 	dhtConfigURL  string
 	sitesState    string
+	sitesCatchUp  string
 	storageCLI    string
 	storageAddr   string
 	storageKey    string
@@ -66,6 +67,7 @@ func main() {
 	publicAddress := flag.String("public-address", "", "advertised UDP address; required when listen IP is unspecified")
 	dhtConfig := flag.String("dht-config-url", "", "HTTPS TOS global configuration URL")
 	sitesState := flag.String("sites-state", "", "optional absolute private Sites snapshot/receipt directory")
+	sitesCatchUp := flag.String("sites-catchup-state", "", "optional absolute private Sites download/receipt directory")
 	storageCLI := flag.String("storage-cli", "", "absolute TOS storage-daemon-cli executable")
 	storageAddr := flag.String("storage-daemon", "", "TOS storage-daemon ADNL-lite address")
 	storageKey := flag.String("storage-client-key", "", "absolute mode-0600 storage client private key")
@@ -76,7 +78,7 @@ func main() {
 	flag.Parse()
 	err := run(options{profilePath: *profile, authorityPath: *authority, delegations: delegationPaths,
 		state: *state, keyPath: *key, listen: *listen, publicAddress: *publicAddress,
-		dhtConfigURL: *dhtConfig, sitesState: *sitesState, storageCLI: *storageCLI,
+		dhtConfigURL: *dhtConfig, sitesState: *sitesState, sitesCatchUp: *sitesCatchUp, storageCLI: *storageCLI,
 		storageAddr: *storageAddr, storageKey: *storageKey, storagePub: *storagePub,
 		refresh: *refresh, ttl: *ttl, check: *check})
 	if err != nil {
@@ -97,9 +99,14 @@ func run(options options) error {
 	if err != nil {
 		return err
 	}
+	storageDownloader, err := sitesDownloader(options)
+	if err != nil {
+		return err
+	}
 	if options.check {
-		fmt.Printf("configuration_valid=true channel_id=%s profile_digest=%s overlay_id=%x transport_public_key=%x sites_enabled=%t\n",
-			profile.ChannelID, profileDigest, overlayID, key.Public().(ed25519.PublicKey), storagePublisher != nil)
+		fmt.Printf("configuration_valid=true channel_id=%s profile_digest=%s overlay_id=%x transport_public_key=%x sites_enabled=%t sites_publish_enabled=%t sites_catchup_enabled=%t\n",
+			profile.ChannelID, profileDigest, overlayID, key.Public().(ed25519.PublicKey),
+			storagePublisher != nil || storageDownloader != nil, storagePublisher != nil, storageDownloader != nil)
 		return nil
 	}
 	store, err := publicchannel.OpenStore(options.state)
@@ -117,6 +124,14 @@ func run(options options) error {
 			return fmt.Errorf("open public channel Sites mirror: %w", err)
 		}
 		defer sites.Close()
+	}
+	var sitesCatchUp *publicchannel.SitesCatchUp
+	if storageDownloader != nil {
+		sitesCatchUp, err = publicchannel.OpenSitesCatchUp(options.sitesCatchUp, *storageDownloader)
+		if err != nil {
+			return fmt.Errorf("open public channel Sites catch-up: %w", err)
+		}
+		defer sitesCatchUp.Close()
 	}
 	publicGateway := adnl.NewGateway(key)
 	if advertised != nil {
@@ -146,7 +161,7 @@ func run(options options) error {
 	node, err := publicchannel.NewNativeNode(publicchannel.NativeNodeConfig{Profile: profile,
 		Authority: authority, Delegations: delegations, Store: store, LocalKey: key,
 		Gateway: publicGateway, Directory: publicchannel.DHTPeerDirectory{Client: dhtClient},
-		DirectoryTTL: options.ttl, Sites: sites, Logf: func(format string, values ...any) {
+		DirectoryTTL: options.ttl, Sites: sites, SitesCatchUp: sitesCatchUp, Logf: func(format string, values ...any) {
 			fmt.Fprintf(os.Stderr, "tos-public-channeld: "+format+"\n", values...)
 		}})
 	if err != nil {
@@ -172,7 +187,10 @@ func sitesPublisher(options options) (*publicchannel.StorageCLIPublisher, error)
 			configured++
 		}
 	}
-	if configured == 0 {
+	if options.sitesState == "" {
+		if options.sitesCatchUp == "" && configured != 0 {
+			return nil, errors.New("storage CLI credentials require Sites publication or catch-up state")
+		}
 		return nil, nil
 	}
 	if configured != len(values) {
@@ -198,6 +216,46 @@ func sitesPublisher(options options) (*publicchannel.StorageCLIPublisher, error)
 		return nil, errors.New("storage-client-key must be owned by this user with mode 0600")
 	}
 	return &publicchannel.StorageCLIPublisher{Command: options.storageCLI, ServerAddress: options.storageAddr,
+		ClientPrivateKey: options.storageKey, ServerPublicKey: options.storagePub}, nil
+}
+
+func sitesDownloader(options options) (*publicchannel.StorageCLIDownloader, error) {
+	values := []string{options.sitesCatchUp, options.storageCLI, options.storageAddr, options.storageKey, options.storagePub}
+	configured := 0
+	for _, value := range values {
+		if value != "" {
+			configured++
+		}
+	}
+	if options.sitesCatchUp == "" {
+		if options.sitesState == "" && configured != 0 {
+			return nil, errors.New("storage CLI credentials require Sites publication or catch-up state")
+		}
+		return nil, nil
+	}
+	if configured != len(values) {
+		return nil, errors.New("Sites catch-up requires sites-catchup-state, storage-cli, storage-daemon, storage-client-key, and storage-server-key together")
+	}
+	for _, path := range []string{options.sitesCatchUp, options.storageCLI, options.storageKey, options.storagePub} {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return nil, errors.New("Sites catch-up paths must be absolute and canonical")
+		}
+	}
+	if _, _, err := net.SplitHostPort(options.storageAddr); err != nil {
+		return nil, errors.New("storage-daemon must be an IP:port address")
+	}
+	for _, path := range []string{options.storageCLI, options.storageKey, options.storagePub} {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("Sites storage command/key path must be a regular file")
+		}
+	}
+	keyInfo, _ := os.Lstat(options.storageKey)
+	keyStat, owned := keyInfoSys(keyInfo)
+	if !owned || keyStat.Uid != uint32(os.Geteuid()) || keyInfo.Mode().Perm() != 0o600 {
+		return nil, errors.New("storage-client-key must be owned by this user with mode 0600")
+	}
+	return &publicchannel.StorageCLIDownloader{Command: options.storageCLI, ServerAddress: options.storageAddr,
 		ClientPrivateKey: options.storageKey, ServerPublicKey: options.storagePub}, nil
 }
 

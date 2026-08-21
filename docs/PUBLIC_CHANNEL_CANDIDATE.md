@@ -151,13 +151,14 @@ tos-public-channeld \
   -listen 0.0.0.0:30303 -public-address 203.0.113.10:30303 \
   -dht-config-url https://config.example/tos-global.config.json \
   -sites-state /var/lib/tos-messenger/public-channel-sites \
+  -sites-catchup-state /var/lib/tos-messenger/public-channel-sites-catchup \
   -storage-cli /opt/tos/bin/storage-daemon-cli \
   -storage-daemon 127.0.0.1:5555 \
   -storage-client-key /var/lib/tos-storage/cli.key \
   -storage-server-key /var/lib/tos-storage/server.pub
 ```
 
-## TOS Sites / Storage Bag mirror
+## TOS Sites / Storage Bag mirror and catch-up
 
 `SitesMirror` exports only a complete locally verified history. Its immutable
 snapshot contains canonical profile, head, finalized-delegation, Event and
@@ -176,15 +177,33 @@ over the authenticated Overlay connection. The hint is only an availability
 locator: it has a separate replay budget, cannot consume the head budget, and
 never grants publication, history or completeness authority.
 
+`SitesCatchUp` is the corresponding single-writer consumer. It accepts only a
+hint bound to the locally selected channel/profile, asks `StorageCLIDownloader`
+to run the stock `add-by-hash <BagID> -d <isolated-root> --no-upload` command,
+and polls `get <BagID>` under bounded time and output. Bag, root and directory
+fields must reproduce the request exactly. The downloaded snapshot then passes
+the same strict finalized-delegation and complete-head verification before the
+durable channel store can commit it. A canonical download receipt makes exact
+restart replay download-idempotent; the crash window where the snapshot is
+complete but its receipt is absent is recovered only by fully re-verifying the
+snapshot. A different BagID claiming an already verified history cannot replace
+the durable locator.
+
 The real two-node UDP integration starts with one empty ledger, synchronizes
 and commits it over RLDP, exports and passes its snapshot to an injected Bag
 publisher, propagates the returned BagID to the other node, then reopens the
 node/store/mirror and proves the publisher is not called twice. A separate
 process-adapter test proves exact no-shell Storage CLI arguments, bounded
 canonical BagID parsing and a snapshot path containing spaces. These are not a
-live independently operated storage-daemon upload. Tests also cover a second
-mirror writer, damaged receipt, extra snapshot object, noncanonical manifest,
-finalized-delegation substitution and a malformed hint.
+live independently operated storage-daemon upload. A second real-UDP test gives
+the sender no RLDP history at all, delivers only the BagID hint over authenticated
+Overlay, downloads through an injected Storage adapter, verifies and commits the
+history, and then restores the node/store/catch-up locator without a second
+download. A separate process fixture proves the exact stock add/get command and
+status boundary; it is not a live independently operated storage-daemon
+download. Tests also cover second writers, damaged and missing receipts, an
+alternative BagID, extra snapshot objects, noncanonical manifests,
+finalized-delegation substitution and malformed hints/status fields.
 
 ## Durable local state
 
@@ -203,9 +222,9 @@ derived history matches them.
 
 ## Explicitly still open
 
-- a stock Storage Bag downloader/catch-up scheduler and measured production
-  calibration of the candidate peer/resource limits;
-- independently operated convergence/failover evidence;
+- measured production calibration of the candidate peer/resource limits;
+- live independently operated Storage publication/download and
+  convergence/failover evidence;
 - independent vector consumption/review and a second implementation.
 
 No transport choice or economic history-Relay profile is made here. The latter
