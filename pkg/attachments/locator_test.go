@@ -19,6 +19,9 @@ func TestHTTPSLocatorIsExactAndNonBearer(t *testing.T) {
 		"http://attachments.example/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
 		"https://user@attachments.example/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
 		"https://ATTACHMENTS.example/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
+		"https://attachments/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
+		"https://attächments.example/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
+		"https://-attachments.example/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
 		"https://attachments.example:443/.well-known/tos-messenger/attachments/" + strings.Repeat("ab", 32),
 		want + "?token=bearer",
 		want + "#fragment",
@@ -29,7 +32,7 @@ func TestHTTPSLocatorIsExactAndNonBearer(t *testing.T) {
 			t.Fatalf("accepted %q", candidate)
 		}
 	}
-	for _, origin := range []string{"https://attachments.example/path", "https://attachments.example:443", "https://ATTACHMENTS.example"} {
+	for _, origin := range []string{"https://attachments.example/path", "https://attachments.example:443", "https://ATTACHMENTS.example", "https://attachments"} {
 		if _, err := HTTPSLocator(origin, digest); err == nil {
 			t.Fatalf("accepted origin %q", origin)
 		}

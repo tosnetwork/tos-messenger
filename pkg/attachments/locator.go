@@ -2,6 +2,7 @@ package attachments
 
 import (
 	"errors"
+	"net/netip"
 	"net/url"
 	"strings"
 
@@ -53,6 +54,9 @@ func validateCanonicalAuthority(parsed *url.URL) error {
 	if host == "" || host != strings.ToLower(host) || strings.HasSuffix(host, ".") || strings.Contains(host, "%") {
 		return errors.New("attachment HTTPS authority is not canonical")
 	}
+	if _, err := netip.ParseAddr(host); err != nil && !validDNSName(host) {
+		return errors.New("attachment HTTPS authority is not a canonical absolute DNS name")
+	}
 	want := host
 	if strings.Contains(host, ":") {
 		want = "[" + host + "]"
@@ -61,4 +65,21 @@ func validateCanonicalAuthority(parsed *url.URL) error {
 		return errors.New("attachment HTTPS authority is not canonical")
 	}
 	return nil
+}
+
+func validDNSName(host string) bool {
+	if len(host) > 253 || !strings.Contains(host, ".") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if character != '-' && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+				return false
+			}
+		}
+	}
+	return true
 }
