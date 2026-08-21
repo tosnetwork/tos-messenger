@@ -76,6 +76,45 @@ type QuoteResolver interface {
 	ResolveAcceptedQuote(commitment string) (VerifiedAcceptedQuote, bool, error)
 }
 
+// ErrFinalizedQuoteMismatch reports a real finalized Quote that does not
+// reproduce the commitment, complete expected terms, or network the caller
+// supplied. It is distinct from temporary absence/resolver failure so a
+// negotiation can durably reject substitution while retrying an early read.
+var ErrFinalizedQuoteMismatch = errors.New("the finalized quote does not match the expected purchase")
+
+// ResolveMatchingAcceptedQuote is the daemon/runtime verification boundary for
+// one complete expected purchase. It returns chain-derived terms and evidence
+// only after every field and the full network identity match.
+func ResolveMatchingAcceptedQuote(resolver QuoteResolver, commitment string, expected Terms,
+	network *nativev1.NetworkDomain) (VerifiedAcceptedQuote, error) {
+	if resolver == nil {
+		return VerifiedAcceptedQuote{}, errors.New("a commitment must be verified against finalized state")
+	}
+	if !digestPattern.MatchString(commitment) {
+		return VerifiedAcceptedQuote{}, errors.New("invalid commitment digest")
+	}
+	if err := expected.Validate(); err != nil {
+		return VerifiedAcceptedQuote{}, err
+	}
+	if err := validateNetworkDomain(network); err != nil {
+		return VerifiedAcceptedQuote{}, err
+	}
+	quote, found, err := resolver.ResolveAcceptedQuote(commitment)
+	if err != nil {
+		return VerifiedAcceptedQuote{}, err
+	}
+	if !found {
+		return VerifiedAcceptedQuote{}, errors.New("no Accepted Quote exists under this commitment")
+	}
+	if err := quote.Validate(); err != nil {
+		return VerifiedAcceptedQuote{}, err
+	}
+	if quote.Commitment != commitment || !expected.Equal(quote.Terms) || !sameNetwork(network, quote.Network) {
+		return VerifiedAcceptedQuote{}, ErrFinalizedQuoteMismatch
+	}
+	return quote, nil
+}
+
 // Finalize records a canonical commitment, having verified it exists.
 //
 // The quote is resolved from finalized state through the caller's resolver and
@@ -117,26 +156,18 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 		return errors.New("invalid commitment digest")
 	}
 
-	quote, found, err := resolver.ResolveAcceptedQuote(commitment)
-	if err != nil {
-		return err
+	if n.agreed == nil {
+		return errors.New("canonicalization has no agreed terms")
 	}
-	if !found {
-		// Nothing was committed. The negotiation is not rejected for this: the
-		// caller may simply have asked too early.
-		return errors.New("no Accepted Quote exists under this commitment")
-	}
-	if err := quote.Validate(); err != nil {
-		return err
-	}
-	if quote.Commitment != commitment {
-		return errors.New("the resolver returned another commitment")
-	}
-	if n.agreed == nil || !n.agreed.Equal(quote.Terms) {
+	quote, err := ResolveMatchingAcceptedQuote(resolver, commitment, *n.agreed, n.network)
+	if errors.Is(err, ErrFinalizedQuoteMismatch) {
 		if err := n.settle(StateRejected, "the finalized quote does not match what was agreed"); err != nil {
 			return err
 		}
-		return errors.New("the finalized quote does not match what was agreed")
+		return ErrFinalizedQuoteMismatch
+	}
+	if err != nil {
+		return err
 	}
 	// The finalized quote must have come from the network this negotiation was
 	// bound to. A network id alone is not identity, so both genesis hashes must
@@ -151,12 +182,6 @@ func (n *Negotiation) Finalize(resolver QuoteResolver, commitment string, now ti
 	// commitment makes a cross-network replay fail cryptographically, and this
 	// check makes a resolver that answered from the wrong network fail loudly
 	// even when nothing else differs.
-	if !sameNetwork(n.network, quote.Network) {
-		if err := n.settle(StateRejected, "the finalized quote came from another network"); err != nil {
-			return err
-		}
-		return errors.New("the finalized quote came from another network")
-	}
 	// The owner's decision has to still describe this, and the terms have to
 	// still be inside the authority they were agreed under.
 	if n.needsApproval {

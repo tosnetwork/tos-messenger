@@ -95,10 +95,21 @@ attested Capability class. An exact funding retry is idempotent; redirecting
 one commitment to another account conflicts. This records what the wallet
 funded—it neither funds the escrow nor replaces the finalized chain read.
 
+Set both `escrow_code_hash` and the daemon-owned
+`escrow_checkpoint_path` to enable runtime `quotes.verify`. After funding has
+reached finality, OpenFox submits the commitment and the complete terms it
+authorized. The daemon resolves the mapped escrow through the strict chain
+adapter and returns transaction/code/checkpoint evidence only when commitment,
+provider, capability, manifest, transport, asset, price, escrow/dispute terms,
+expiry, network ID, and both bare genesis hashes all match. The operation is
+read-only: it cannot create a locator, approve spending, sign, fund, or dispatch
+a task. Omitting both fields disables the operation; configuring only one is a
+startup error.
+
 When `publication.mode` is `prekeys`, the third socket exposes only the current
 fixed public generation and admission of one already Endpoint-signed public
 bundle. It exposes no approval operation, private material, other device's
-bundle, or authority to select a roster/window. The v6 config retains the v5
+bundle, or authority to select a roster/window. The v7 config retains the v5
 roster/window contract and explicitly states
 its clean absolute path, sorted 1–16-device roster (including this
 installation's device), algorithm identifier, 60-second-to-30-day lifetime,
@@ -170,9 +181,10 @@ misspelled setting that is silently dropped is a setting an operator believes
 is in force.
 
 `docs/daemon-config.example.json` is a complete file with placeholder values.
-The typed Agent Packet adapter makes this schema `tos.messaging.daemon-config.v6`;
+Finalized Quote verification makes this schema `tos.messaging.daemon-config.v7`;
 older files are rejected instead of silently disabling discovery or public
-generation planning, or applying an inbox policy the endpoint never committed.
+generation planning, applying an inbox policy the endpoint never committed, or
+leaving the native buyer without its finalized-Quote check.
 
 `-check` validates all of these bounds, endpoint URLs, code/hash pairs and
 paths without contacting the chain. Normal startup is fail-closed: after

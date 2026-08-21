@@ -112,6 +112,10 @@ const (
 	// the finalized Quote commitment it funded to the exact escrow account the
 	// chain resolver must read. A runtime may not create this authority map.
 	OpRecordEscrowLocation Operation = "escrow-locations.record"
+	// OpVerifyAcceptedQuote resolves one commitment from finalized state and
+	// accepts it only when every caller-supplied purchase term and this
+	// installation's complete network identity match.
+	OpVerifyAcceptedQuote Operation = "quotes.verify"
 )
 
 // Principal is which side of the boundary a connection speaks for.
@@ -135,6 +139,7 @@ var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
 		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
+		OpVerifyAcceptedQuote: {},
 	},
 	PrincipalOwner: {
 		OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
@@ -165,6 +170,7 @@ var operations = map[Operation]struct{}{
 	OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {}, OpChallenge: {},
 	OpCreateAdmissionInvite: {},
 	OpRecordEscrowLocation:  {},
+	OpVerifyAcceptedQuote:   {},
 }
 
 var (
@@ -234,9 +240,10 @@ type Request struct {
 	InvitedAgentID      string `json:"invited_agent_id,omitempty"`
 	InviteExpiresAtUnix uint64 `json:"invite_expires_at_unix,omitempty"`
 
-	QuoteCommitment string `json:"quote_commitment,omitempty"`
-	EscrowAddress   string `json:"escrow_address,omitempty"`
-	CapabilityClass string `json:"capability_class,omitempty"`
+	QuoteCommitment    string         `json:"quote_commitment,omitempty"`
+	EscrowAddress      string         `json:"escrow_address,omitempty"`
+	CapabilityClass    string         `json:"capability_class,omitempty"`
+	ExpectedQuoteTerms *PurchaseTerms `json:"expected_quote_terms,omitempty"`
 }
 
 // AssetIdentity names an asset the way the chain does.
@@ -372,6 +379,18 @@ type Response struct {
 	Challenge string `json:"challenge,omitempty"`
 	// AdmissionToken is returned exactly once when an owner creates an invite.
 	AdmissionToken string `json:"admission_token,omitempty"`
+	// FinalizedQuote is present only after the daemon resolved and exactly
+	// matched a finalized Accepted Quote to the submitted terms and network.
+	FinalizedQuote *FinalizedQuoteEvidence `json:"finalized_quote,omitempty"`
+}
+
+type FinalizedQuoteEvidence struct {
+	Commitment          string `json:"quote_commitment"`
+	EscrowAccount       string `json:"escrow_account"`
+	TransactionHash     string `json:"transaction_hash"`
+	ContractCodeHash    string `json:"contract_code_hash"`
+	FinalizedCheckpoint uint64 `json:"finalized_checkpoint"`
+	FinalizedAtUnix     uint64 `json:"finalized_at_unix"`
 }
 
 // WaitingAction is one decision the owner has not made yet.
@@ -502,9 +521,14 @@ func ValidateRequest(request Request) error {
 		(request.InvitedAgentID != "" || request.InviteExpiresAtUnix != 0) {
 		return errors.New("only admission invite creation carries invite terms")
 	}
-	if request.Op != OpRecordEscrowLocation &&
-		(request.QuoteCommitment != "" || request.EscrowAddress != "" || request.CapabilityClass != "") {
+	if request.Op != OpRecordEscrowLocation && request.Op != OpVerifyAcceptedQuote && request.QuoteCommitment != "" {
+		return errors.New("only escrow recording or Quote verification carries a Quote commitment")
+	}
+	if request.Op != OpRecordEscrowLocation && (request.EscrowAddress != "" || request.CapabilityClass != "") {
 		return errors.New("only escrow-location recording carries funded escrow terms")
+	}
+	if request.Op != OpVerifyAcceptedQuote && request.ExpectedQuoteTerms != nil {
+		return errors.New("only Quote verification carries expected Quote terms")
 	}
 	if request.Op != OpCompose && (request.ConversationID != "" || request.RoomID != "" ||
 		request.ReplyToEventID != "" || request.MembershipEpoch != 0 || request.MediaType != "" ||
@@ -626,6 +650,14 @@ func ValidateRequest(request Request) error {
 			return errors.New("recording an escrow location needs canonical funded escrow terms")
 		}
 		return requireEmpty(request, "escrow-location recording", request.EventID, request.LeaseID, request.SessionID)
+	case OpVerifyAcceptedQuote:
+		if !quotePattern.MatchString(request.QuoteCommitment) || request.ExpectedQuoteTerms == nil {
+			return errors.New("Quote verification needs a commitment and complete expected terms")
+		}
+		if terms := toTerms(request.ExpectedQuoteTerms); terms == nil || terms.Validate() != nil {
+			return errors.New("Quote verification carries invalid expected terms")
+		}
+		return requireEmpty(request, "Quote verification", request.EventID, request.LeaseID, request.SessionID)
 	case OpActionStatus, OpClaimAction:
 		if !actionPattern.MatchString(request.ActionID) {
 			return errors.New("an action status needs an action")

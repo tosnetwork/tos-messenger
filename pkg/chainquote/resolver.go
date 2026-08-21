@@ -87,7 +87,17 @@ func NewFromChain(adapter *toschain.Adapter, network *nativev1.NetworkDomain,
 	if adapter == nil {
 		return nil, errors.New("a chain-backed resolver needs a chain adapter")
 	}
-	escrow, err := toschain.NewEscrowResolver(adapter, network, escrowCodeHash, checkpointPath)
+	if _, err := negotiation.NetworkFromDomain(network); err != nil {
+		return nil, errors.New("a chain-backed resolver needs the Messenger network representation")
+	}
+	// Native account readers use the SDK's digest-prefixed representation;
+	// Messenger terms canonically commit bare 32-byte hex. Keep those domains
+	// explicit rather than allowing one layer's display form into the other's
+	// signed preimage.
+	nativeNetwork := &nativev1.NetworkDomain{NetworkId: network.NetworkId,
+		GenesisRootHash: "sha256:" + network.GenesisRootHash,
+		GenesisFileHash: "sha256:" + network.GenesisFileHash}
+	escrow, err := toschain.NewEscrowResolver(adapter, nativeNetwork, escrowCodeHash, checkpointPath)
 	if err != nil {
 		return nil, err
 	}

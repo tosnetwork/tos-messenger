@@ -42,7 +42,7 @@ socket is owner-private and independently runs the protocol's finalized
 signature verifier before the shared Gate; neither side converts packet bytes
 to model text or trusts untyped channel metadata.
 
-Daemon config v6 assembles that receiver without selecting a network route. A
+Daemon config v7 retains the v6 receiver assembly without selecting a network route. A
 configured daemon leases admitted `agent.packet` Events only after an atomic
 kind check, invokes the receiver, and completes the Event application state
 only after packet/provider completion. Receiver failure remains retryable after

@@ -506,9 +506,19 @@ func TestConfigurationMustBeStated(t *testing.T) {
 		"insecure remote chain endpoint": func(c *Config) { c.ChainEndpoints[0] = "http://rpc.example.net" },
 		"unselected native registry":     func(c *Config) { c.NativeRegistryCodeHash = "tvm-cell-sha256:" + strings.Repeat("a", 64) },
 		"checkpoint outside state":       func(c *Config) { c.ChainCheckpointPath = filepath.Join(filepath.Dir(c.StateDir), "other.checkpoint") },
-		"relative delegation":            func(c *Config) { c.DelegationPath = "delegation.json" },
-		"no discovery mode":              func(c *Config) { c.Discovery.Mode = "" },
-		"unused disabled discovery":      func(c *Config) { c.Discovery.DHTGlobalConfigPath = "/tmp/global.json" },
+		"escrow hash without checkpoint": func(c *Config) { c.EscrowCodeHash = "tvm-cell-sha256:" + strings.Repeat("c", 64) },
+		"escrow checkpoint without hash": func(c *Config) { c.EscrowCheckpointPath = filepath.Join(c.StateDir, "escrow.checkpoint") },
+		"bad escrow hash": func(c *Config) {
+			c.EscrowCodeHash = "sha256:" + strings.Repeat("c", 64)
+			c.EscrowCheckpointPath = filepath.Join(c.StateDir, "escrow.checkpoint")
+		},
+		"escrow checkpoint outside state": func(c *Config) {
+			c.EscrowCodeHash = "tvm-cell-sha256:" + strings.Repeat("c", 64)
+			c.EscrowCheckpointPath = filepath.Join(filepath.Dir(c.StateDir), "escrow.checkpoint")
+		},
+		"relative delegation":       func(c *Config) { c.DelegationPath = "delegation.json" },
+		"no discovery mode":         func(c *Config) { c.Discovery.Mode = "" },
+		"unused disabled discovery": func(c *Config) { c.Discovery.DHTGlobalConfigPath = "/tmp/global.json" },
 		"relative dht config": func(c *Config) {
 			enableDiscovery(c)
 			c.Discovery.DHTGlobalConfigPath = "global.json"
@@ -722,6 +732,20 @@ func TestExampleConfigurationIsValid(t *testing.T) {
 	}
 	if config.Transport != TransportNone {
 		t.Fatalf("the example claims a transport that does not exist: %q", config.Transport)
+	}
+}
+
+func TestDaemonAssemblesOptionalFinalizedQuoteVerifier(t *testing.T) {
+	config := testConfig(t)
+	config.EscrowCodeHash = "tvm-cell-sha256:" + strings.Repeat("c", 64)
+	config.EscrowCheckpointPath = filepath.Join(config.StateDir, "escrow.checkpoint")
+	instance, err := openTest(config, nil)
+	if err != nil {
+		t.Fatalf("open with Quote verifier: %v", err)
+	}
+	defer instance.Close()
+	if instance.quoteResolver == nil {
+		t.Fatal("configured finalized Quote verifier did not reach the runtime API")
 	}
 }
 

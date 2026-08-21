@@ -1,5 +1,5 @@
 {
-  "schema": "tos.messaging.daemon-config.v6",
+  "schema": "tos.messaging.daemon-config.v7",
 
   "state_dir": "/var/lib/tos-messengerd",
   "socket_path": "/run/tos-messengerd/runtime.sock",
@@ -26,6 +26,8 @@
   "chain_quorum": 2,
   "native_registry_code_hash": "tvm-cell-sha256:c42a36d160f60ec70926f63cb06d7429306e332b2e3752b275971ad628c0c9f1",
   "chain_checkpoint_path": "/var/lib/tos-messengerd/chain.checkpoint",
+  "escrow_code_hash": "tvm-cell-sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "escrow_checkpoint_path": "/var/lib/tos-messengerd/escrow.checkpoint",
   "delegation_path": "/etc/tos-messengerd/delegation.json",
 
   "discovery": {

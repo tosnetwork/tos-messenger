@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/agentpacketbridge"
+	"github.com/tosnetwork/tos-messenger/pkg/chainquote"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
+	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
 )
@@ -40,18 +42,19 @@ type Observer interface {
 
 // Daemon is one running installation.
 type Daemon struct {
-	config       Config
-	journal      *eventlog.Journal
-	dispatch     *dispatch.Dispatcher
-	server       *localapi.Server
-	listener     net.Listener
-	owner        net.Listener
-	salt         []byte
-	observer     Observer
-	discovery    *discoveryRuntime
-	prekeys      *prekeyRuntime
-	agentPackets *agentpacketbridge.Bridge
-	now          func() time.Time
+	config        Config
+	journal       *eventlog.Journal
+	dispatch      *dispatch.Dispatcher
+	server        *localapi.Server
+	listener      net.Listener
+	owner         net.Listener
+	salt          []byte
+	observer      Observer
+	discovery     *discoveryRuntime
+	prekeys       *prekeyRuntime
+	agentPackets  *agentpacketbridge.Bridge
+	quoteResolver negotiation.QuoteResolver
+	now           func() time.Time
 
 	closeOnce sync.Once
 }
@@ -144,15 +147,36 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		_ = journal.Close()
 		return nil, err
 	}
-	server, err := localapi.NewServer(localapi.Config{
+	var quoteResolver negotiation.QuoteResolver
+	if config.EscrowCodeHash != "" {
+		adapter, adapterErr := config.ChainAdapter()
+		if adapterErr != nil {
+			_ = journal.Close()
+			return nil, errors.New("build Quote chain adapter: " + adapterErr.Error())
+		}
+		resolved, resolverErr := chainquote.NewFromChain(adapter, config.Network(), config.EscrowCodeHash,
+			config.EscrowCheckpointPath, journal)
+		if resolverErr != nil {
+			_ = journal.Close()
+			return nil, errors.New("build finalized Quote resolver: " + resolverErr.Error())
+		}
+		quoteResolver = resolved
+	}
+	serverConfig := localapi.Config{
 		Policy: config.FirewallPolicy(), OwnerKey: ownerKey,
 		Journal: journal, Dispatcher: dispatcher, LocalEndpointID: config.EndpointID,
-	})
+		QuoteResolver: quoteResolver,
+	}
+	if quoteResolver != nil {
+		serverConfig.Network = config.Network()
+	}
+	server, err := localapi.NewServer(serverConfig)
 	if err != nil {
 		_ = journal.Close()
 		return nil, err
 	}
 	instance.server = server
+	instance.quoteResolver = quoteResolver
 	if config.AgentPacketReceiverSocket != "" {
 		resolver, resolverErr := newFinalizedPacketResolver(config)
 		if resolverErr != nil {

@@ -33,7 +33,7 @@ import (
 )
 
 // ConfigSchema is the strict schema of a daemon configuration.
-const ConfigSchema = "tos.messaging.daemon-config.v6"
+const ConfigSchema = "tos.messaging.daemon-config.v7"
 
 // PublicationMode names the route-independent public material maintained by
 // this installation. It does not select an HTTPS, DHT, or message transport.
@@ -123,7 +123,13 @@ type Config struct {
 	ChainReadinessMaxAgeSeconds uint64   `json:"chain_readiness_max_age_seconds,omitempty"`
 	NativeRegistryCodeHash      string   `json:"native_registry_code_hash"`
 	ChainCheckpointPath         string   `json:"chain_checkpoint_path"`
-	DelegationPath              string   `json:"delegation_path"`
+	// EscrowCodeHash and EscrowCheckpointPath explicitly enable finalized
+	// Accepted Quote verification for the runtime API. They are separate from
+	// Registry state because the two contract types and rollback high-waters
+	// are independent authority domains.
+	EscrowCodeHash       string `json:"escrow_code_hash,omitempty"`
+	EscrowCheckpointPath string `json:"escrow_checkpoint_path,omitempty"`
+	DelegationPath       string `json:"delegation_path"`
 
 	// Discovery is stated separately from Transport: refreshing verified
 	// identity and prekeys is route-neutral and does not authorize carrying a
@@ -601,6 +607,21 @@ func (c Config) Validate() error {
 	}
 	if c.ChainCheckpointPath != filepath.Join(c.StateDir, "chain.checkpoint") {
 		return errors.New("chain_checkpoint_path must be the daemon-owned state checkpoint")
+	}
+	if c.EscrowCodeHash == "" || c.EscrowCheckpointPath == "" {
+		if c.EscrowCodeHash != "" || c.EscrowCheckpointPath != "" {
+			return errors.New("escrow code hash and checkpoint must be configured together")
+		}
+	} else {
+		const prefix = "tvm-cell-sha256:"
+		raw, err := hex.DecodeString(strings.TrimPrefix(c.EscrowCodeHash, prefix))
+		if !strings.HasPrefix(c.EscrowCodeHash, prefix) || len(raw) != 32 || err != nil || canon.IsZero(raw) {
+			return errors.New("escrow_code_hash must be a non-zero TVM cell digest")
+		}
+		if !filepath.IsAbs(c.EscrowCheckpointPath) || filepath.Clean(c.EscrowCheckpointPath) != c.EscrowCheckpointPath ||
+			c.EscrowCheckpointPath != filepath.Join(c.StateDir, "escrow.checkpoint") {
+			return errors.New("escrow_checkpoint_path must be the daemon-owned escrow checkpoint")
+		}
 	}
 	if !filepath.IsAbs(c.DelegationPath) || filepath.Clean(c.DelegationPath) != c.DelegationPath {
 		return errors.New("delegation_path must be an absolute, clean path")

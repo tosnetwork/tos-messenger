@@ -19,6 +19,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
 // DefaultRequestTimeout bounds how long one call may hold a connection.
@@ -44,6 +45,8 @@ type Config struct {
 	ChallengeLifetime time.Duration
 	Now               func() time.Time
 	Timeout           time.Duration
+	QuoteResolver     negotiation.QuoteResolver
+	Network           *nativev1.NetworkDomain
 }
 
 // Server answers calls on the owner-private socket.
@@ -77,6 +80,13 @@ func NewServer(config Config) (*Server, error) {
 	}
 	if config.Timeout < 0 {
 		return nil, errors.New("invalid local API timeout")
+	}
+	if config.QuoteResolver != nil {
+		if _, err := negotiation.NetworkFromDomain(config.Network); err != nil {
+			return nil, errors.New("a Quote resolver needs the daemon network binding")
+		}
+	} else if config.Network != nil {
+		return nil, errors.New("a local API network binding requires a Quote resolver")
 	}
 	return &Server{config: config, challenges: newChallenges(config.ChallengeLifetime)}, nil
 }
@@ -197,8 +207,27 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.createAdmissionInvite(request, now)
 	case OpRecordEscrowLocation:
 		return s.recordEscrowLocation(request)
+	case OpVerifyAcceptedQuote:
+		return s.verifyAcceptedQuote(request)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
+}
+
+func (s *Server) verifyAcceptedQuote(request Request) Response {
+	if s.config.QuoteResolver == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("finalized Quote verification is not configured"))
+	}
+	expected := toTerms(request.ExpectedQuoteTerms)
+	quote, err := negotiation.ResolveMatchingAcceptedQuote(
+		s.config.QuoteResolver, request.QuoteCommitment, *expected, s.config.Network)
+	if err != nil {
+		return refuse(fault.CodeNotAuthentic, err)
+	}
+	return Response{OK: true, FinalizedQuote: &FinalizedQuoteEvidence{
+		Commitment: quote.Commitment, EscrowAccount: quote.Reference.Account,
+		TransactionHash: quote.Reference.TransactionHash, ContractCodeHash: quote.Reference.ContractCodeHash,
+		FinalizedCheckpoint: quote.Reference.FinalizedCheckpoint, FinalizedAtUnix: quote.FinalizedAtUnix,
+	}}
 }
 
 func (s *Server) recordEscrowLocation(request Request) Response {

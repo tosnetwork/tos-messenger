@@ -75,6 +75,16 @@ type stubSender struct{ sent int }
 
 func (s *stubSender) Send(context.Context, dispatch.Message) error { s.sent++; return nil }
 
+type fixedQuoteResolver struct {
+	quote negotiation.VerifiedAcceptedQuote
+	found bool
+	err   error
+}
+
+func (r fixedQuoteResolver) ResolveAcceptedQuote(string) (negotiation.VerifiedAcceptedQuote, bool, error) {
+	return r.quote, r.found, r.err
+}
+
 type stubBindings struct{}
 
 func (stubBindings) BindingFor(delivery eventlog.Delivery) (e2ee.Binding, error) {
@@ -986,6 +996,61 @@ func TestOwnerRecordsFundedEscrowLocationCrashSafely(t *testing.T) {
 	}
 	if response := h.runtimeAttempt(t, request); response.OK {
 		t.Fatal("runtime wrote the owner/wallet escrow locator")
+	}
+}
+
+func TestRuntimeVerifiesExactFinalizedQuoteWithoutReceivingAuthority(t *testing.T) {
+	h := newHarness(t)
+	commitment := "tvm-cell-sha256:" + strings.Repeat("a", 64)
+	expected := testPurchase(200)
+	expected.Asset.NetworkID = testNetwork().NetworkId
+	expected.Asset.GenesisRootHash = testNetwork().GenesisRootHash
+	expected.Asset.GenesisFileHash = testNetwork().GenesisFileHash
+	quote := negotiation.VerifiedAcceptedQuote{
+		Commitment: commitment, Terms: *toTerms(expected), Network: testNetwork(),
+		Reference: &nativev1.ChainReference{
+			Account: "0:" + strings.Repeat("b", 64), TransactionHash: "sha256:" + strings.Repeat("c", 64),
+			ContractCodeHash: "tvm-cell-sha256:" + strings.Repeat("d", 64), FinalizedCheckpoint: 99,
+		},
+		FinalizedAtUnix: baseUnix,
+	}
+	h.server.config.QuoteResolver = fixedQuoteResolver{quote: quote, found: true}
+	h.server.config.Network = testNetwork()
+	request := Request{Op: OpVerifyAcceptedQuote, QuoteCommitment: commitment, ExpectedQuoteTerms: expected}
+	verified := h.call(t, request)
+	if !verified.OK || verified.Authorised || verified.FinalizedQuote == nil ||
+		verified.FinalizedQuote.Commitment != commitment || verified.FinalizedQuote.FinalizedCheckpoint != 99 ||
+		verified.FinalizedQuote.EscrowAccount != quote.Reference.Account {
+		t.Fatalf("finalized Quote verification: %+v", verified)
+	}
+
+	substituted := *expected
+	substituted.ProviderAgentID = "agent_" + strings.Repeat("e", 64)
+	request.ExpectedQuoteTerms = &substituted
+	if response := h.call(t, request); response.OK {
+		t.Fatal("finalized Quote with another provider matched expected terms")
+	}
+
+	foreign := *expected
+	foreign.Asset.NetworkID = "tos-foreign"
+	foreignQuote := quote
+	foreignQuote.Terms = *toTerms(&foreign)
+	foreignQuote.Network = &nativev1.NetworkDomain{NetworkId: foreign.Asset.NetworkID,
+		GenesisRootHash: foreign.Asset.GenesisRootHash, GenesisFileHash: foreign.Asset.GenesisFileHash}
+	h.server.config.QuoteResolver = fixedQuoteResolver{quote: foreignQuote, found: true}
+	request.ExpectedQuoteTerms = &foreign
+	if response := h.call(t, request); response.OK {
+		t.Fatal("a self-consistent Quote from another network matched the daemon")
+	}
+
+	h.server.config.QuoteResolver = nil
+	h.server.config.Network = nil
+	request.ExpectedQuoteTerms = expected
+	if response := h.call(t, request); response.OK || response.Code != fault.CodeClassNotDelegated {
+		t.Fatalf("unconfigured Quote verification did not fail closed: %+v", response)
+	}
+	if response := h.callAs(t, PrincipalOwner, request); response.OK {
+		t.Fatal("owner interface performed runtime Quote verification")
 	}
 }
 

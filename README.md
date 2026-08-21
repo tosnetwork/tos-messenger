@@ -187,7 +187,9 @@ Deliberately absent, with the reason:
 - A funded quote's local lookup is durable provenance, not configuration: the
   journal binds one quote commitment to its escrow address and capability class
   once, refuses redirects, and supplies that binding to the finalized Quote
-  resolver after restart. Only the future funding path may create it.
+  resolver after restart. Only the owner-authorized funding path may create it;
+  the runtime can only request an exact finalized read and receives no funding
+  or approval authority from that operation.
 - Every domain separator is registered in one list, because a reused separator
   is signature confusion rather than a merge conflict.
 
