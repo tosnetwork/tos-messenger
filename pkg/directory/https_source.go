@@ -6,15 +6,14 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/safehttps"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 )
@@ -28,9 +27,7 @@ const (
 )
 
 // IPResolver is the DNS surface used by the rebinding-resistant dialer.
-type IPResolver interface {
-	LookupNetIP(context.Context, string, string) ([]netip.Addr, error)
-}
+type IPResolver = safehttps.IPResolver
 
 // HTTPSObjectConfig controls finite network budgets. Zero values select the
 // conservative defaults; callers cannot disable the limits.
@@ -59,29 +56,13 @@ func NewHTTPSObjects(config HTTPSObjectConfig) (*HTTPSObjects, error) {
 	if err != nil {
 		return nil, fmt.Errorf("HTTPS object connect timeout: %w", err)
 	}
-	resolver := config.Resolver
-	if resolver == nil {
-		resolver = net.DefaultResolver
+	client, err := safehttps.NewClient(safehttps.Config{RequestTimeout: requestTimeout,
+		ConnectTimeout: connectTimeout, Resolver: config.Resolver, MaxIdleConns: 16,
+		MaxPerHost: 2, RedirectError: "HTTPS discovery redirects are refused"})
+	if err != nil {
+		return nil, err
 	}
-	dialer := &publicDialer{resolver: resolver, dialer: &net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}}
-	transport := &http.Transport{
-		Proxy:                 nil,
-		DialContext:           dialer.DialContext,
-		ForceAttemptHTTP2:     true,
-		DisableCompression:    true,
-		MaxIdleConns:          16,
-		MaxIdleConnsPerHost:   2,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   connectTimeout,
-		ResponseHeaderTimeout: requestTimeout,
-	}
-	return &HTTPSObjects{client: &http.Client{
-		Transport: transport,
-		Timeout:   requestTimeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return errors.New("HTTPS discovery redirects are refused")
-		},
-	}}, nil
+	return &HTTPSObjects{client: client}, nil
 }
 
 // Descriptor retrieves exactly the reference committed by the DHT locator.
@@ -173,15 +154,7 @@ func (h *HTTPSObjects) getJSON(ctx context.Context, reference string, limit int6
 }
 
 func parseHTTPSObjectURL(reference string) (*url.URL, error) {
-	parsed, err := url.Parse(reference)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
-		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return nil, errors.New("invalid HTTPS object URL")
-	}
-	if port := parsed.Port(); port != "" && port != "443" {
-		return nil, errors.New("HTTPS object URL must use port 443")
-	}
-	return parsed, nil
+	return safehttps.ParseURL(reference)
 }
 
 func boundedDuration(value, fallback, maximum time.Duration) (time.Duration, error) {
@@ -194,60 +167,8 @@ func boundedDuration(value, fallback, maximum time.Duration) (time.Duration, err
 	return value, nil
 }
 
-type publicDialer struct {
-	resolver IPResolver
-	dialer   *net.Dialer
-}
-
-func (d *publicDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, errors.New("invalid HTTPS dial address")
-	}
-	addresses, err := d.resolve(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	var last error
-	for _, address := range addresses {
-		connection, err := d.dialer.DialContext(ctx, network, net.JoinHostPort(address.String(), port))
-		if err == nil {
-			return connection, nil
-		}
-		last = err
-	}
-	return nil, last
-}
-
-func (d *publicDialer) resolve(ctx context.Context, host string) ([]netip.Addr, error) {
-	if literal, err := netip.ParseAddr(host); err == nil {
-		return validatePublicAnswers([]netip.Addr{literal})
-	}
-	answers, err := d.resolver.LookupNetIP(ctx, "ip", host)
-	if err != nil {
-		return nil, err
-	}
-	return validatePublicAnswers(answers)
-}
-
-var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
-
 func validatePublicAnswers(answers []netip.Addr) ([]netip.Addr, error) {
-	if len(answers) == 0 {
-		return nil, errors.New("HTTPS object hostname has no addresses")
-	}
-	checked := make([]netip.Addr, 0, len(answers))
-	for _, address := range answers {
-		address = address.Unmap()
-		if !address.IsValid() || !address.IsGlobalUnicast() || address.IsPrivate() ||
-			address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() ||
-			address.IsMulticast() || address.IsUnspecified() || sharedAddressSpace.Contains(address) {
-			return nil, errors.New("HTTPS object hostname resolves outside public address space")
-		}
-		checked = append(checked, address)
-	}
-	sort.Slice(checked, func(i, j int) bool { return checked[i].Compare(checked[j]) < 0 })
-	return checked, nil
+	return safehttps.ValidatePublicAnswers(answers)
 }
 
 // CloseIdleConnections releases pooled discovery connections.

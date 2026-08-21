@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,9 +20,16 @@ const (
 	storeLockName         = ".attachment-store.lock"
 	objectsDir            = "objects"
 	leasesDir             = "leases"
+	accessClaimsDir       = "access-claims"
 	leaseSchema           = "tos.messaging.attachment-lease.v1"
 	MaxStoreObjects       = 100_000
 	MaxStoreBytes   int64 = 1 << 40
+)
+
+var (
+	ErrStoreConflict = errors.New("attachment store conflict")
+	ErrStoreQuota    = errors.New("attachment store quota exceeded")
+	ErrLeaseNotFound = errors.New("attachment lease not found")
 )
 
 type StoreQuota struct {
@@ -48,6 +56,14 @@ type lease struct {
 	ManifestDigest string   `json:"manifest_digest"`
 	ChunkDigests   []string `json:"chunk_digests"`
 	ExpiresAtUnix  uint64   `json:"expires_at_unix"`
+}
+
+// StorageLease is the non-secret subset an untrusted storage operator needs.
+// It intentionally excludes the attachment key and all plaintext metadata.
+type StorageLease struct {
+	ManifestDigest string
+	ChunkDigests   []string
+	ExpiresAtUnix  uint64
 }
 
 type GCReport struct {
@@ -78,7 +94,7 @@ func OpenStore(root string, quota StoreQuota) (*Store, error) {
 	if err := requirePrivateDirectory(root); err != nil {
 		return nil, err
 	}
-	for _, name := range []string{objectsDir, leasesDir} {
+	for _, name := range []string{objectsDir, leasesDir, accessClaimsDir} {
 		path := filepath.Join(root, name)
 		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 			return nil, errors.New("create attachment store directory")
@@ -111,56 +127,110 @@ func (s *Store) Close() error {
 // Put commits all ciphertext objects before publishing their lease. A crash
 // may leave unreferenced objects for GC, never a lease whose chunks are absent.
 func (s *Store) Put(ref Reference, chunks []Chunk, now time.Time) (bool, error) {
-	if err := s.usable(); err != nil {
-		return false, err
-	}
-	if now.IsZero() || now.Unix() < 0 || uint64(now.Unix()) >= ref.Metadata.ExpiresAtUnix ||
-		ref.Metadata.ExpiresAtUnix-uint64(now.Unix()) > uint64(s.quota.MaxRetention/time.Second) {
-		return false, errors.New("attachment retention is outside store policy")
-	}
 	if err := validateStoredChunks(ref, chunks); err != nil {
 		return false, err
 	}
-	manifestDigest, _ := ManifestDigest(ref.Manifest)
-	wanted := lease{Schema: leaseSchema, ManifestDigest: manifestDigest,
-		ChunkDigests: append([]string(nil), ref.Manifest.ChunkDigests...), ExpiresAtUnix: ref.Metadata.ExpiresAtUnix}
+	manifestDigest, err := ManifestDigest(ref.Manifest)
+	if err != nil {
+		return false, err
+	}
+	return s.PutOpaque(StorageLease{ManifestDigest: manifestDigest,
+		ChunkDigests: ref.Manifest.ChunkDigests, ExpiresAtUnix: ref.Metadata.ExpiresAtUnix}, chunks, now)
+}
+
+// PutOpaque durably stores the exact ciphertext objects and publishes their
+// non-secret lease only after every object is synced. It is the storage-side
+// primitive used by an authenticated remote protocol.
+func (s *Store) PutOpaque(value StorageLease, chunks []Chunk, now time.Time) (bool, error) {
+	if err := s.usable(); err != nil {
+		return false, err
+	}
+	if err := validateStorageLease(value, chunks, now, s.quota.MaxRetention); err != nil {
+		return false, err
+	}
+	if _, err := s.PutObjects(chunks); err != nil {
+		return false, err
+	}
+	var total uint64
+	for _, chunk := range chunks {
+		total += uint64(len(chunk.Ciphertext))
+	}
+	return s.CommitOpaque(value, total, now)
+}
+
+// PutObjects durably stages a bounded set of content-addressed ciphertext
+// objects without publishing a lease. Interrupted uploads resume by sending
+// only missing objects; unreferenced objects remain inert and are removed by
+// GC. Indexes are manifest positions and need not be contiguous in one batch.
+func (s *Store) PutObjects(chunks []Chunk) (int, error) {
+	if err := s.usable(); err != nil {
+		return 0, err
+	}
+	if err := validateOpaqueChunkBatch(chunks); err != nil {
+		return 0, err
+	}
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	existing, found, err := s.readLease(manifestDigest)
+	newObjects, newBytes, err := s.newObjectCost(chunks)
+	if err != nil {
+		return 0, err
+	}
+	count, heldBytes, err := s.usage()
+	if err != nil {
+		return 0, err
+	}
+	if count+newObjects > s.quota.MaxObjects || heldBytes+newBytes > s.quota.MaxBytes {
+		return 0, ErrStoreQuota
+	}
+	for _, chunk := range chunks {
+		if err := s.putObject(chunk); err != nil {
+			return 0, err
+		}
+	}
+	return newObjects, nil
+}
+
+// CommitOpaque publishes a lease only after every named object is present,
+// hash-correct and has the exact aggregate byte count authorized by the grant.
+func (s *Store) CommitOpaque(value StorageLease, ciphertextBytes uint64, now time.Time) (bool, error) {
+	if err := s.usable(); err != nil {
+		return false, err
+	}
+	if err := validateStorageLeaseMetadata(value, now, s.quota.MaxRetention); err != nil || ciphertextBytes == 0 {
+		if err == nil {
+			err = errors.New("invalid attachment ciphertext byte count")
+		}
+		return false, err
+	}
+	wanted := lease{Schema: leaseSchema, ManifestDigest: value.ManifestDigest,
+		ChunkDigests: append([]string(nil), value.ChunkDigests...), ExpiresAtUnix: value.ExpiresAtUnix}
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	existing, found, err := s.readLease(value.ManifestDigest)
 	if err != nil {
 		return false, err
 	}
 	if found {
 		if !sameLease(existing, wanted) {
-			return false, errors.New("attachment manifest conflicts with its stored lease")
+			return false, fmt.Errorf("%w: manifest conflicts with its stored lease", ErrStoreConflict)
 		}
-		return false, s.verifyObjects(chunks)
+		return false, s.verifyLeaseObjects(value, ciphertextBytes)
 	}
 	leases, err := s.allLeases()
 	if err != nil {
 		return false, err
 	}
 	if len(leases) >= s.quota.MaxLeases {
-		return false, errors.New("attachment store lease quota exceeded")
+		return false, ErrStoreQuota
 	}
-	newObjects, newBytes, err := s.newObjectCost(chunks)
-	if err != nil {
+	if err := s.verifyLeaseObjects(value, ciphertextBytes); err != nil {
 		return false, err
 	}
-	count, heldBytes, err := s.usage()
+	encoded, err := json.Marshal(wanted)
 	if err != nil {
-		return false, err
+		return false, errors.New("encode attachment lease")
 	}
-	if count+newObjects > s.quota.MaxObjects || heldBytes+newBytes > s.quota.MaxBytes {
-		return false, errors.New("attachment store quota exceeded")
-	}
-	for _, chunk := range chunks {
-		if err := s.putObject(chunk); err != nil {
-			return false, err
-		}
-	}
-	encoded, _ := json.Marshal(wanted)
-	if err := replaceFile(s.leasePath(manifestDigest), encoded); err != nil {
+	if err := replaceFile(s.leasePath(value.ManifestDigest), encoded); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -174,36 +244,74 @@ func (s *Store) Fetch(ref Reference) ([]Chunk, error) {
 	if err := ValidateReference(ref); err != nil {
 		return nil, err
 	}
-	digest, _ := ManifestDigest(ref.Manifest)
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	stored, found, err := s.readLease(digest)
-	if err != nil || !found {
-		if err == nil {
-			err = errors.New("attachment lease not found")
-		}
+	digest, err := ManifestDigest(ref.Manifest)
+	if err != nil {
 		return nil, err
 	}
-	if stored.ExpiresAtUnix != ref.Metadata.ExpiresAtUnix {
+	chunks, expiresAt, err := s.fetchOpaque(digest, ref.Manifest.ChunkDigests, time.Time{}, false)
+	if err != nil {
+		return nil, err
+	}
+	if expiresAt != ref.Metadata.ExpiresAtUnix {
 		return nil, errors.New("attachment lease expiry mismatch")
 	}
-	if len(stored.ChunkDigests) != len(ref.Manifest.ChunkDigests) {
-		return nil, errors.New("attachment lease manifest mismatch")
+	return chunks, nil
+}
+
+// FetchOpaque returns only the requested ciphertext objects after proving that
+// they belong to one live lease. Request order is preserved and each returned
+// Index is its position in the complete manifest.
+func (s *Store) FetchOpaque(manifestDigest string, digests []string, now time.Time) ([]Chunk, uint64, error) {
+	return s.fetchOpaque(manifestDigest, digests, now, true)
+}
+
+func (s *Store) fetchOpaque(manifestDigest string, digests []string, now time.Time, enforceExpiry bool) ([]Chunk, uint64, error) {
+	if err := s.usable(); err != nil {
+		return nil, 0, err
 	}
-	for index := range stored.ChunkDigests {
-		if stored.ChunkDigests[index] != ref.Manifest.ChunkDigests[index] {
-			return nil, errors.New("attachment lease manifest mismatch")
+	if !validContentDigest(manifestDigest) || len(digests) == 0 || len(digests) > MaxChunks ||
+		enforceExpiry && (now.IsZero() || now.Unix() < 0) {
+		return nil, 0, errors.New("invalid attachment object fetch")
+	}
+	seen := make(map[string]struct{}, len(digests))
+	for _, digest := range digests {
+		if !validContentDigest(digest) {
+			return nil, 0, errors.New("invalid attachment object digest")
 		}
+		if _, duplicate := seen[digest]; duplicate {
+			return nil, 0, errors.New("duplicate attachment object digest")
+		}
+		seen[digest] = struct{}{}
 	}
-	chunks := make([]Chunk, 0, len(stored.ChunkDigests))
-	for index, chunkDigest := range stored.ChunkDigests {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	stored, found, err := s.readLease(manifestDigest)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrLeaseNotFound
+		}
+		return nil, 0, err
+	}
+	if enforceExpiry && stored.ExpiresAtUnix <= uint64(now.Unix()) {
+		return nil, 0, ErrLeaseNotFound
+	}
+	positions := make(map[string]uint32, len(stored.ChunkDigests))
+	for index, digest := range stored.ChunkDigests {
+		positions[digest] = uint32(index)
+	}
+	chunks := make([]Chunk, 0, len(digests))
+	for _, chunkDigest := range digests {
+		index, member := positions[chunkDigest]
+		if !member {
+			return nil, 0, errors.New("attachment object is outside its lease")
+		}
 		raw, err := readPrivateFile(s.objectPath(chunkDigest), int64(MaxChunkBytes+32))
 		if err != nil || canon.Digest(raw) != chunkDigest {
-			return nil, errors.New("attachment ciphertext object is missing or corrupt")
+			return nil, 0, errors.New("attachment ciphertext object is missing or corrupt")
 		}
-		chunks = append(chunks, Chunk{Index: uint32(index), Digest: chunkDigest, Ciphertext: raw})
+		chunks = append(chunks, Chunk{Index: index, Digest: chunkDigest, Ciphertext: raw})
 	}
-	return chunks, nil
+	return chunks, stored.ExpiresAtUnix, nil
 }
 
 func (s *Store) Held(ref Reference) (map[string]bool, error) {
@@ -294,7 +402,10 @@ func (s *Store) GC(now time.Time) (GCReport, error) {
 		if _, keep := referenced[digest]; keep {
 			continue
 		}
-		info, _ := os.Lstat(path)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return GCReport{}, errors.New("inspect attachment object")
+		}
 		remove = append(remove, removable{path: path, size: info.Size()})
 	}
 	// All lease and object entries are validated before the first deletion.
@@ -338,6 +449,65 @@ func validateStoredChunks(ref Reference, chunks []Chunk) error {
 	for index, chunk := range chunks {
 		if chunk.Index != uint32(index) || chunk.Digest != ref.Manifest.ChunkDigests[index] || canon.Digest(chunk.Ciphertext) != chunk.Digest || len(chunk.Ciphertext) != expectedChunkPlaintext(ref.Manifest, index)+16 {
 			return errors.New("invalid attachment ciphertext chunk")
+		}
+	}
+	return nil
+}
+
+func validateStorageLease(value StorageLease, chunks []Chunk, now time.Time, maxRetention time.Duration) error {
+	if err := validateStorageLeaseMetadata(value, now, maxRetention); err != nil {
+		return err
+	}
+	if len(chunks) != len(value.ChunkDigests) {
+		return errors.New("attachment storage lease is incomplete")
+	}
+	for index, digest := range value.ChunkDigests {
+		chunk := chunks[index]
+		if chunk.Index != uint32(index) || chunk.Digest != digest || len(chunk.Ciphertext) <= 16 ||
+			len(chunk.Ciphertext) > MaxChunkBytes+16 || canon.Digest(chunk.Ciphertext) != digest {
+			return errors.New("invalid opaque attachment ciphertext chunk")
+		}
+	}
+	return nil
+}
+
+func validateStorageLeaseMetadata(value StorageLease, now time.Time, maxRetention time.Duration) error {
+	if !validContentDigest(value.ManifestDigest) || len(value.ChunkDigests) == 0 || len(value.ChunkDigests) > MaxChunks ||
+		now.IsZero() || now.Unix() < 0 || value.ExpiresAtUnix <= uint64(now.Unix()) ||
+		value.ExpiresAtUnix-uint64(now.Unix()) > uint64(maxRetention/time.Second) {
+		return errors.New("invalid attachment storage lease")
+	}
+	seen := make(map[string]struct{}, len(value.ChunkDigests))
+	for _, digest := range value.ChunkDigests {
+		if !validContentDigest(digest) {
+			return errors.New("invalid attachment storage lease digest")
+		}
+		if _, duplicate := seen[digest]; duplicate {
+			return errors.New("duplicate attachment storage lease digest")
+		}
+		seen[digest] = struct{}{}
+	}
+	return nil
+}
+
+func validateOpaqueChunkBatch(chunks []Chunk) error {
+	if len(chunks) == 0 || len(chunks) > MaxChunks {
+		return errors.New("invalid opaque attachment chunk batch")
+	}
+	seen := make(map[string]struct{}, len(chunks))
+	var total uint64
+	for _, chunk := range chunks {
+		if chunk.Index >= uint32(MaxChunks) || !validContentDigest(chunk.Digest) || len(chunk.Ciphertext) <= 16 ||
+			len(chunk.Ciphertext) > MaxChunkBytes+16 || canon.Digest(chunk.Ciphertext) != chunk.Digest {
+			return errors.New("invalid opaque attachment ciphertext chunk")
+		}
+		if _, duplicate := seen[chunk.Digest]; duplicate {
+			return errors.New("duplicate opaque attachment ciphertext chunk")
+		}
+		seen[chunk.Digest] = struct{}{}
+		total += uint64(len(chunk.Ciphertext))
+		if total > MaxPlaintextBytes+uint64(MaxChunks*16) {
+			return errors.New("opaque attachment ciphertext exceeds its bound")
 		}
 	}
 	return nil
@@ -407,8 +577,23 @@ func (s *Store) verifyObjects(chunks []Chunk) error {
 	for _, c := range chunks {
 		raw, err := readPrivateFile(s.objectPath(c.Digest), int64(MaxChunkBytes+32))
 		if err != nil || !bytes.Equal(raw, c.Ciphertext) {
-			return errors.New("stored attachment object conflicts")
+			return fmt.Errorf("%w: stored object differs", ErrStoreConflict)
 		}
+	}
+	return nil
+}
+
+func (s *Store) verifyLeaseObjects(value StorageLease, expectedBytes uint64) error {
+	var total uint64
+	for _, digest := range value.ChunkDigests {
+		raw, err := readPrivateFile(s.objectPath(digest), int64(MaxChunkBytes+32))
+		if err != nil || canon.Digest(raw) != digest {
+			return ErrLeaseNotFound
+		}
+		total += uint64(len(raw))
+	}
+	if total != expectedBytes {
+		return fmt.Errorf("%w: ciphertext byte count differs", ErrStoreConflict)
 	}
 	return nil
 }
@@ -423,7 +608,7 @@ func (s *Store) newObjectCost(chunks []Chunk) (int, int64, error) {
 			continue
 		}
 		if err != nil || !bytes.Equal(raw, c.Ciphertext) {
-			return 0, 0, errors.New("stored attachment object conflicts")
+			return 0, 0, fmt.Errorf("%w: stored object differs", ErrStoreConflict)
 		}
 	}
 	return count, size, nil
@@ -456,7 +641,7 @@ func (s *Store) putObject(c Chunk) error {
 	if errors.Is(err, os.ErrExist) {
 		raw, e := readPrivateFile(path, int64(MaxChunkBytes+32))
 		if e != nil || !bytes.Equal(raw, c.Ciphertext) {
-			return errors.New("stored attachment object conflicts")
+			return fmt.Errorf("%w: stored object differs", ErrStoreConflict)
 		}
 		return nil
 	}

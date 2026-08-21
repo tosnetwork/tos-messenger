@@ -76,6 +76,8 @@ jobs:
           - ./pkg/envelope
           - ./pkg/probe
           - ./pkg/fault
+          - ./pkg/attachments
+          - ./pkg/attachmentapi
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

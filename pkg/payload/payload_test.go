@@ -84,7 +84,11 @@ func sample(kind string) Payload {
 		if err != nil {
 			panic(err)
 		}
-		return EncryptedAttachment{ManifestDigest: digest, ReferenceJSON: raw, Locator: "relay://attachments.example"}
+		locator, err := attachments.HTTPSLocator("https://attachments.example", digest)
+		if err != nil {
+			panic(err)
+		}
+		return EncryptedAttachment{ManifestDigest: digest, ReferenceJSON: raw, Locator: locator}
 	case "service.quote.reference":
 		return QuoteReference{ChainReference: sampleChainReference()}
 	case "service.escrow.reference":

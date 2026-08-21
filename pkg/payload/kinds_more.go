@@ -387,7 +387,7 @@ type EncryptedAttachment struct {
 }
 
 func (EncryptedAttachment) Schema() string {
-	return "tos.messaging.payload.encrypted-attachment.v1"
+	return "tos.messaging.payload.encrypted-attachment.v2"
 }
 
 func (a EncryptedAttachment) Validate() error {
@@ -405,7 +405,11 @@ func (a EncryptedAttachment) Validate() error {
 	if err != nil || digest != a.ManifestDigest {
 		return errors.New("encrypted attachment reference does not match its manifest digest")
 	}
-	return requireText("attachment locator", a.Locator, MaxShortTextBytes)
+	if len(a.Locator) == 0 || len(a.Locator) > MaxShortTextBytes {
+		return errors.New("invalid attachment locator size")
+	}
+	_, err = attachments.ParseHTTPSLocator(a.Locator, a.ManifestDigest)
+	return err
 }
 
 func (a EncryptedAttachment) encode(buffer *bytes.Buffer) {

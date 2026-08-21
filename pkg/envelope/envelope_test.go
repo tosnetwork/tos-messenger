@@ -324,7 +324,11 @@ func TestEncryptedAttachmentEventBindsOuterManifestReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := payload.Encode(payload.EncryptedAttachment{ManifestDigest: manifestDigest, ReferenceJSON: referenceJSON, Locator: "relay://attachments.example"})
+	locator, err := attachments.HTTPSLocator("https://attachments.example", manifestDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := payload.Encode(payload.EncryptedAttachment{ManifestDigest: manifestDigest, ReferenceJSON: referenceJSON, Locator: locator})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -159,6 +159,22 @@ const (
 	DomainAttachmentChunk = "tos.messaging.attachment-chunk.v1\x00"
 	// DomainAttachmentManifest identifies the ordered ciphertext chunk set.
 	DomainAttachmentManifest = "tos.messaging.attachment-manifest.v1\x00"
+	// DomainAttachmentCapabilityGrant namespaces an Endpoint-signed capability
+	// key and its exact storage identity, manifest, operation and retention scope.
+	DomainAttachmentCapabilityGrant = "tos.messaging.attachment-capability-grant.v1\x00"
+	// DomainAttachmentAccessRequest namespaces one capability-signed operation.
+	DomainAttachmentAccessRequest = "tos.messaging.attachment-access-request.v1\x00"
+	// DomainAttachmentOperationBody namespaces the exact body an access request
+	// authorizes; upload, fetch and deletion can never share a signature.
+	DomainAttachmentOperationBody = "tos.messaging.attachment-operation-body.v1\x00"
+	// DomainAttachmentAccessClaim namespaces the durable grant+nonce replay key.
+	DomainAttachmentAccessClaim = "tos.messaging.attachment-access-claim.v1\x00"
+	// DomainAttachmentStoredAck namespaces a storage operator's durable lease
+	// acknowledgement. It is not a TOS commercial Receipt.
+	DomainAttachmentStoredAck = "tos.messaging.attachment-stored-ack.v1\x00"
+	// DomainAttachmentDeleteAck namespaces a storage operator's observation that
+	// its local lease was removed. It cannot prove destruction of other copies.
+	DomainAttachmentDeleteAck = "tos.messaging.attachment-delete-ack.v1\x00"
 	// DomainAgentPacketClaim namespaces a durable sender+nonce replay claim.
 	DomainAgentPacketClaim = "tos.messaging.agent-packet-claim.v1\x00"
 	// DomainMailboxCapabilityGrant namespaces one Endpoint-signed capability
@@ -226,6 +242,12 @@ var Domains = []string{
 	DomainAttachmentMetadata,
 	DomainAttachmentChunk,
 	DomainAttachmentManifest,
+	DomainAttachmentCapabilityGrant,
+	DomainAttachmentAccessRequest,
+	DomainAttachmentOperationBody,
+	DomainAttachmentAccessClaim,
+	DomainAttachmentStoredAck,
+	DomainAttachmentDeleteAck,
 	DomainAgentPacketClaim,
 	DomainMailboxCapabilityGrant,
 	DomainMailboxAccessRequest,
