@@ -183,12 +183,10 @@ implementation of them:
   cryptographic/Relay acceptance vectors, independent review, and
   second-implementation evidence;
 - private-room transport, beyond the per-device fan-out default;
-- stock-command assembly of operator-specific HTTPS root, Descriptor policy,
-  DHT client, and external Endpoint signer configuration. The device API,
-  generation planner, deterministic HTTPS→DHT scheduler, verified signer client,
-  and explicit `daemon.OpenWithGenerationPublisher` composition now exist
-  without centralizing device secrets; live independently operated publication
-  and cross-observer fork exchange remain evidence gaps;
+- live independently operated publication and fork-evidence exchange. The
+  device API, generation planner, deterministic HTTPS→DHT scheduler, verified
+  signer client, stock operator-resource assembly, and deterministic portable
+  two-Descriptor fork proof now exist without centralizing device secrets;
 - Mailbox Relay sender privacy, quota tokens, and anti-spam model;
 - mobile push privacy within the contentless wake-up constraint; and
 - public channel ordering and moderation policy; and
