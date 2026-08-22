@@ -202,6 +202,14 @@ const (
 	// DomainOutboundAttachmentIntent binds exact plaintext evidence and the
 	// operator-selected route/storage policy before streaming encryption begins.
 	DomainOutboundAttachmentIntent = "tos.messaging.outbound-attachment-intent.v1\x00"
+	// DomainAttachmentCorpusManifest namespaces an external approver's exact
+	// private hostile-corpus selection. Approval is evidence about the selected
+	// bytes and scope, not a claim that the repository owns or redistributes them.
+	DomainAttachmentCorpusManifest = "tos.messaging.attachment-corpus-manifest.v1\x00"
+	// DomainAttachmentCorpusReport namespaces a runner's signed claim that the
+	// approved corpus produced the committed results under one pinned admission
+	// policy. It is deliberately distinct from the approver's signature.
+	DomainAttachmentCorpusReport = "tos.messaging.attachment-corpus-report.v1\x00"
 )
 
 // Domains is every separator in use. A new object appends to it, and the
@@ -262,6 +270,8 @@ var Domains = []string{
 	DomainOpenFoxMLSAAD,
 	DomainOutboundIntent,
 	DomainOutboundAttachmentIntent,
+	DomainAttachmentCorpusManifest,
+	DomainAttachmentCorpusReport,
 	DomainPayload,
 	DomainInboxPolicy,
 	DomainAdmissionInvite,

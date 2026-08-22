@@ -373,6 +373,69 @@ must refresh and re-pin one coherent snapshot, size the cgroup for the
 documented 3–4 GiB engine requirement, and pass the approved hostile corpus.
 EICAR by itself proves plumbing, not production coverage.
 
+For the private representative-corpus gate, build
+`cmd/tos-attachment-corpus` from an exact clean commit with VCS metadata. Keep
+the corpus bytes outside the repository. The external approver prepares a
+strict draft whose `approver_public_key_hex` and `signature_hex` are empty; the
+`samples` array is sorted by its single-component `name`, contains at least one
+allow and one deny control, and every file is at most the current 128 KiB
+OpenFox input ceiling:
+
+```json
+{
+  "schema": "tos.messaging.attachment-corpus-manifest.v1",
+  "corpus_id": "external-release-review-2026",
+  "revision": "r1",
+  "approved_at_unix": 1787356800,
+  "scope": "Private representative controls selected by the named external reviewer.",
+  "samples": [
+    {"name":"clean-control.txt","sha256":"<64 lowercase hex>","size_bytes":123,"category":"clean-control","media_type":"text/plain","expected_decision":"allow"},
+    {"name":"hostile-control.bin","sha256":"<64 lowercase hex>","size_bytes":456,"category":"malware-control","media_type":"text/plain","expected_decision":"deny"}
+  ],
+  "approver_public_key_hex": "",
+  "signature_hex": ""
+}
+```
+
+The approver signs it with a separately custodied mode-`0600` canonical
+Ed25519 private key. The command derives the public key from that key and never
+accepts draft-supplied authority:
+
+```bash
+tos-attachment-corpus sign \
+  -draft /review/corpus-draft.json \
+  -approver-key /review/approver.key \
+  -output /review/corpus-manifest.json
+```
+
+Copy the exact `attachment_admission` object (not the surrounding daemon
+config) into a reviewed policy file. It must name exactly one scanner with ID
+`clamav-official`; keep the immutable eight-resource snapshot above. Provision
+a different mode-`0600` runner key and run the opt-in target with all paths and
+both public keys fixed:
+
+```bash
+export TOS_ATTACHMENT_CORPUS_RUNNER=/usr/local/libexec/tos-attachment-corpus
+export TOS_ATTACHMENT_CORPUS_MANIFEST=/review/corpus-manifest.json
+export TOS_ATTACHMENT_CORPUS_SAMPLES=/review/private-samples
+export TOS_ATTACHMENT_CORPUS_POLICY=/review/attachment-admission.json
+export TOS_ATTACHMENT_CORPUS_APPROVER_KEY=<64-lowercase-hex-public-key>
+export TOS_ATTACHMENT_CORPUS_RUNNER_KEY=/review/runner.key
+export TOS_ATTACHMENT_CORPUS_RUNNER_PUBLIC_KEY=<64-lowercase-hex-public-key>
+export TOS_ATTACHMENT_CORPUS_REPORT=/review/new-corpus-report.json
+make test-attachment-corpus-live
+```
+
+The output path must not exist. Samples must be non-symlink regular files and
+not group/world writable. A deny expectation passes only for a completed
+structured scanner deny; sandbox/resource/engine failure aborts without a
+report. Verification binds every approved sample, the raw manifest and policy
+digests, the exact scanner/resource verdicts, clean runner commit/toolchain and
+both fixed public keys. Key identity makes the claims accountable but does not
+prove organizational independence or corpus representativeness; those facts
+must be established by the release review. No qualifying external report is
+currently recorded.
+
 Startup re-hashes every configured executable before opening the runtime
 socket. OpenFox's `tos_messenger` settings must set
 `"enable_attachments": true`; it then uses local request v6/response v5 and

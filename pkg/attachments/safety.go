@@ -120,6 +120,22 @@ type ScanVerdict struct {
 	Resources         []ScanResourceEvidence `json:"resources,omitempty"`
 }
 
+// ScanDeniedError proves that a pinned scanner completed normally and returned
+// an authenticated deny verdict. Callers that measure hostile-corpus coverage
+// must distinguish this from a launcher, sandbox, timeout, resource, or engine
+// failure: infrastructure failure is fail-closed admission, but it is not a
+// malware detection and must never be counted as one.
+type ScanDeniedError struct {
+	Verdict ScanVerdict
+}
+
+func (e *ScanDeniedError) Error() string {
+	if e == nil {
+		return "attachment scanner denied content"
+	}
+	return fmt.Sprintf("attachment scanner %s denied content", e.Verdict.ScannerID)
+}
+
 type AdmissionReport struct {
 	Schema          string        `json:"schema"`
 	PlaintextDigest string        `json:"plaintext_digest"`
@@ -214,7 +230,7 @@ func admitPlaintext(ctx context.Context, plaintext []byte, metadata Metadata, po
 			return AdmissionReport{}, err
 		}
 		if verdict.Decision != ScanAllow {
-			return AdmissionReport{}, fmt.Errorf("attachment scanner %s denied content", scanner.ID)
+			return AdmissionReport{}, &ScanDeniedError{Verdict: verdict}
 		}
 		report.Scans = append(report.Scans, verdict)
 	}

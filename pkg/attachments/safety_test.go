@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -111,6 +112,15 @@ func TestOpenForAgentRequiresPinnedSandboxedScanner(t *testing.T) {
 				time.Unix(1_900_000_000, 0))
 			if err == nil || result.Plaintext != nil {
 				t.Fatalf("unsafe content released: %+v err=%v", result, err)
+			}
+			var denied *ScanDeniedError
+			if name == "deny" {
+				if !errors.As(err, &denied) || denied.Verdict.Decision != ScanDeny ||
+					denied.Verdict.ScannerID != changed.Scanners[0].ID {
+					t.Fatalf("completed deny was not structurally observable: %T %+v", err, denied)
+				}
+			} else if errors.As(err, &denied) {
+				t.Fatalf("scanner infrastructure/validation failure masqueraded as detection: %s", name)
 			}
 		})
 	}

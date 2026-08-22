@@ -1,4 +1,4 @@
-.PHONY: verify fmt-check vet test-race test-openmls test-storage-live calibrate-public-channel build
+.PHONY: verify fmt-check vet test-race test-openmls test-storage-live test-attachment-corpus-live calibrate-public-channel build
 
 verify: fmt-check vet test-race test-adnl test-openmls build
 
@@ -29,6 +29,14 @@ test-openmls:
 test-storage-live:
 	@test -n "$$TOS_STORAGE_LIVE_DAEMON" -a -n "$$TOS_STORAGE_LIVE_CLI" -a -n "$$TOS_STORAGE_LIVE_KEY_TOOL" -a -n "$$TOS_STORAGE_LIVE_GLOBAL_CONFIG" || { echo "set TOS_STORAGE_LIVE_DAEMON, TOS_STORAGE_LIVE_CLI, TOS_STORAGE_LIVE_KEY_TOOL, and TOS_STORAGE_LIVE_GLOBAL_CONFIG"; exit 1; }
 	GOWORK=off go test -count=1 -run TestStorageCLILiveTwoDaemonCatchUp -v ./pkg/publicchannel
+
+# Explicit private-corpus acceptance. The approver and runner keys identify
+# accountable parties but do not themselves prove organizational independence
+# or corpus representativeness; those remain review facts outside this target.
+test-attachment-corpus-live:
+	@test -n "$$TOS_ATTACHMENT_CORPUS_RUNNER" -a -n "$$TOS_ATTACHMENT_CORPUS_MANIFEST" -a -n "$$TOS_ATTACHMENT_CORPUS_SAMPLES" -a -n "$$TOS_ATTACHMENT_CORPUS_POLICY" -a -n "$$TOS_ATTACHMENT_CORPUS_APPROVER_KEY" -a -n "$$TOS_ATTACHMENT_CORPUS_RUNNER_KEY" -a -n "$$TOS_ATTACHMENT_CORPUS_RUNNER_PUBLIC_KEY" -a -n "$$TOS_ATTACHMENT_CORPUS_REPORT" || { echo "set all TOS_ATTACHMENT_CORPUS_* acceptance inputs"; exit 1; }
+	"$$TOS_ATTACHMENT_CORPUS_RUNNER" run -manifest "$$TOS_ATTACHMENT_CORPUS_MANIFEST" -samples "$$TOS_ATTACHMENT_CORPUS_SAMPLES" -admission-policy "$$TOS_ATTACHMENT_CORPUS_POLICY" -approver-public-key "$$TOS_ATTACHMENT_CORPUS_APPROVER_KEY" -runner-key "$$TOS_ATTACHMENT_CORPUS_RUNNER_KEY" -output "$$TOS_ATTACHMENT_CORPUS_REPORT"
+	"$$TOS_ATTACHMENT_CORPUS_RUNNER" verify -manifest "$$TOS_ATTACHMENT_CORPUS_MANIFEST" -admission-policy "$$TOS_ATTACHMENT_CORPUS_POLICY" -report "$$TOS_ATTACHMENT_CORPUS_REPORT" -approver-public-key "$$TOS_ATTACHMENT_CORPUS_APPROVER_KEY" -runner-public-key "$$TOS_ATTACHMENT_CORPUS_RUNNER_PUBLIC_KEY"
 
 # Opt-in, single-core resource evidence. The protocol-maximum Storage cases
 # create and verify 65,536 immutable Event files and can take several minutes.
