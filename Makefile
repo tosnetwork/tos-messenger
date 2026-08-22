@@ -1,4 +1,4 @@
-.PHONY: verify fmt-check vet test-race test-openmls test-storage-live test-attachment-corpus-live calibrate-public-channel build
+.PHONY: verify fmt-check vet test-race test-openmls test-storage-live test-attachment-corpus-live calibrate-public-channel calibrate-public-channel-concurrent build
 
 verify: fmt-check vet test-race test-adnl test-openmls build
 
@@ -42,6 +42,12 @@ test-attachment-corpus-live:
 # create and verify 65,536 immutable Event files and can take several minutes.
 calibrate-public-channel:
 	GOMAXPROCS=1 GOWORK=off go test -run '^$$' -bench 'BenchmarkPublicChannel' -benchmem -benchtime=1x -count=1 ./pkg/publicchannel
+
+# Opt-in concurrent authenticated-peer calibration. Override the scheduler
+# width only to record a particular target; the benchmark always exercises
+# 1, 8, and the protocol maximum of 32 simultaneous peers.
+calibrate-public-channel-concurrent:
+	GOMAXPROCS="$${TOS_PUBLIC_CHANNEL_CALIBRATION_PROCS:-8}" GOWORK=off go test -run '^$$' -bench '^BenchmarkConcurrentPublicChannelPeerSync$$' -benchmem -benchtime=1x -count=1 ./pkg/publicchannel
 
 build:
 	GOWORK=off go build ./...

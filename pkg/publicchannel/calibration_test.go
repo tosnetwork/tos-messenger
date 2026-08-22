@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,6 +118,151 @@ func BenchmarkPublicChannelFetchCursor(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// This benchmark covers the production work omitted by the cursor-only
+// calibration: concurrent authenticated peers, strict wire encode/decode,
+// resource charging, fetched-Event verification and final head reproduction.
+// Each peer owns a carrier/guard just as NativeNode does.
+func BenchmarkConcurrentPublicChannelPeerSync(b *testing.B) {
+	const count = 1024
+	fixture := newPublicChannelCalibration(b, count)
+	available := make(map[string]Event, len(fixture.events))
+	for _, event := range fixture.events {
+		id, _ := event.ID()
+		available[id] = event
+	}
+	for _, peers := range []int{1, 8, MaxSyncPeers} {
+		b.Run(fmt.Sprintf("peers-%d/events-%d", peers, count), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(peers * count * 256))
+			b.ReportMetric(float64(count), "fetches/peer")
+			b.ResetTimer()
+			for iteration := 0; iteration < b.N; iteration++ {
+				errors := make(chan error, peers)
+				var wait sync.WaitGroup
+				for peer := 0; peer < peers; peer++ {
+					wait.Add(1)
+					go func(peer int) {
+						defer wait.Done()
+						errors <- runCalibratedPeerSync(fixture, available, peer)
+					}(peer)
+				}
+				wait.Wait()
+				close(errors)
+				for err := range errors {
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func runCalibratedPeerSync(fixture publicChannelCalibration, available map[string]Event, peer int) error {
+	peerID := fmt.Sprintf("peer_%064x", peer+1)
+	guard, err := NewSyncGuard(fixture.profile.ChannelID, fixture.history.ProfileDigest(), NativeNodeSyncLimits())
+	if err != nil {
+		return err
+	}
+	if err := guard.ObserveHead(peerID, fixture.history.Head()); err != nil {
+		return err
+	}
+	cursor, err := NewFetchCursor(fixture.history.Head(), nil)
+	if err != nil {
+		return err
+	}
+	for fetches := 0; ; fetches++ {
+		request, needed, nextErr := cursor.Next()
+		if nextErr != nil {
+			return nextErr
+		}
+		if !needed {
+			if fetches != len(fixture.events) {
+				return fmt.Errorf("peer %d used %d fetches for %d-event causal chain", peer, fetches, len(fixture.events))
+			}
+			break
+		}
+		if err := guard.BeginFetch(peerID); err != nil {
+			return err
+		}
+		raw, err := EncodeFetchResponseJSON(request, available)
+		if err != nil {
+			return err
+		}
+		fetched, unavailable, err := DecodeFetchResponseJSON(raw, request)
+		if err != nil {
+			return err
+		}
+		if err := guard.ChargeResponse(peerID, len(raw), len(unavailable)); err != nil {
+			return err
+		}
+		if len(unavailable) != 0 {
+			return fmt.Errorf("peer %d observed unavailable calibrated history", peer)
+		}
+		if err := VerifyFetchedEvents(fixture.profile, fetched, fixture.authority, fixture.delegations, fixture.now); err != nil {
+			return err
+		}
+		if err := cursor.Merge(fetched); err != nil {
+			return err
+		}
+	}
+	_, err = VerifySyncedHistory(fixture.history.Head(), fixture.profile, cursor.Events(), fixture.authority,
+		fixture.delegations, fixture.now)
+	return err
+}
+
+func BenchmarkPublicChannelNativeProviderIndex(b *testing.B) {
+	for _, count := range fetchCalibrationSizes() {
+		b.Run(fmt.Sprintf("events-%d", count), func(b *testing.B) {
+			fixture := newPublicChannelCalibration(b, count)
+			index, err := indexNativeHistory(fixture.history)
+			if err != nil {
+				b.Fatal(err)
+			}
+			id, _ := fixture.events[count/2].ID()
+			node := &NativeNode{history: fixture.history, historyByID: index, historyFound: true}
+			request := FetchRequest{EventIDs: []string{id}}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for iteration := 0; iteration < b.N; iteration++ {
+				available, err := node.provideHistory(request)
+				if err != nil || len(available) != 1 {
+					b.Fatalf("indexed history response: events=%d err=%v", len(available), err)
+				}
+			}
+		})
+	}
+}
+
+func TestNativeHistoryIndexReturnsIndependentEvents(t *testing.T) {
+	fixture := newPublicChannelCalibration(t, 2)
+	index, err := indexNativeHistory(fixture.history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := fixture.events[0].ID()
+	node := &NativeNode{history: fixture.history, historyByID: index, historyFound: true}
+	request := FetchRequest{EventIDs: []string{id, "pce_" + strings.Repeat("f", 64)}}
+	first, err := node.provideHistory(request)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first indexed response: events=%d err=%v", len(first), err)
+	}
+	mutated := first[id]
+	mutated.Content[0] ^= 0xff
+	first[id] = mutated
+	second, err := node.provideHistory(request)
+	if err != nil || len(second) != 1 || !strings.HasPrefix(string(second[id].Content), "000001:") {
+		t.Fatalf("caller mutated indexed Event: event=%+v err=%v", second[id], err)
+	}
+	node.historyByID[id] = len(node.history.events)
+	if _, err := node.provideHistory(request); err == nil {
+		t.Fatal("damaged native history index did not fail closed")
+	}
+	if NativeNodeSyncLimits().FetchesPerPeer != MaxHistoryEvents || MaxFetchesPerPeer != MaxHistoryEvents {
+		t.Fatal("native fetch ceiling cannot cover a maximum-size linear causal history")
 	}
 }
 

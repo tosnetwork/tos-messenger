@@ -184,6 +184,7 @@ type NativeNode struct {
 	syncing      map[string]bool
 	catching     map[string]bool
 	history      History
+	historyByID  map[string]int
 	historyFound bool
 	sitesReceipt SitesPublicationReceipt
 	sitesFound   bool
@@ -238,6 +239,14 @@ func NewNativeNode(config NativeNodeConfig) (*NativeNode, error) {
 		return nil, err
 	}
 	n.history, n.historyFound = history, found
+	if found {
+		n.historyByID, err = indexNativeHistory(history)
+		if err != nil {
+			n.cancelSync()
+			n.zeroKey()
+			return nil, err
+		}
+	}
 	if found && n.sitesCatchUp != nil {
 		hint, cached, cacheErr := n.sitesCatchUp.Cached(n.profile, history, n.authority, n.delegations, n.now())
 		if cacheErr != nil {
@@ -453,23 +462,35 @@ func NativeNodeSyncLimits() SyncLimits {
 
 func (n *NativeNode) provideHistory(request FetchRequest) (map[string]Event, error) {
 	n.mutex.Lock()
-	history, found := n.history, n.historyFound
-	n.mutex.Unlock()
-	available := make(map[string]Event)
-	if !found {
+	defer n.mutex.Unlock()
+	available := make(map[string]Event, len(request.EventIDs))
+	if !n.historyFound {
 		return available, nil
 	}
-	wanted := make(map[string]struct{}, len(request.EventIDs))
 	for _, id := range request.EventIDs {
-		wanted[id] = struct{}{}
-	}
-	for _, event := range history.Events() {
-		id, _ := event.ID()
-		if _, ok := wanted[id]; ok {
-			available[id] = event
+		if position, ok := n.historyByID[id]; ok {
+			if position < 0 || position >= len(n.history.events) {
+				return nil, errors.New("invalid native public channel history index")
+			}
+			available[id] = cloneEvent(n.history.events[position])
 		}
 	}
 	return available, nil
+}
+
+func indexNativeHistory(history History) (map[string]int, error) {
+	index := make(map[string]int, len(history.events))
+	for position, event := range history.events {
+		id, err := event.ID()
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := index[id]; duplicate {
+			return nil, errors.New("duplicate Event in verified native public channel history")
+		}
+		index[id] = position
+	}
+	return index, nil
 }
 
 func (n *NativeNode) syncHead(peerID string, head Head) {
@@ -530,8 +551,13 @@ func (n *NativeNode) syncHead(peerID string, head Head) {
 		n.log("public channel sync commit rejected peer=%s: %v", peerID, err)
 		return
 	}
+	index, err := indexNativeHistory(history)
+	if err != nil {
+		n.log("public channel sync index rejected peer=%s: %v", peerID, err)
+		return
+	}
 	n.mutex.Lock()
-	n.history, n.historyFound = history, true
+	n.history, n.historyByID, n.historyFound = history, index, true
 	carriers := make([]*NativeCarrier, 0, len(n.carriers))
 	for _, item := range n.carriers {
 		carriers = append(carriers, item)
@@ -644,8 +670,13 @@ func (n *NativeNode) scheduleSitesCatchUp(peerID string, hint SitesHint) error {
 			n.log("public channel Sites catch-up commit rejected peer=%s history=%s: %v", peerID, hint.HistoryDigest, err)
 			return
 		}
+		index, err := indexNativeHistory(committed)
+		if err != nil {
+			n.log("public channel Sites catch-up index rejected peer=%s history=%s: %v", peerID, hint.HistoryDigest, err)
+			return
+		}
 		n.mutex.Lock()
-		n.history, n.historyFound = committed, true
+		n.history, n.historyByID, n.historyFound = committed, index, true
 		n.sitesReceipt = SitesPublicationReceipt{Schema: SitesReceiptSchema, ChannelID: accepted.ChannelID,
 			ProfileDigest: accepted.ProfileDigest, HistoryDigest: accepted.HistoryDigest, BagID: accepted.BagID}
 		n.sitesFound = true
