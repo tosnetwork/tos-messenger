@@ -78,6 +78,20 @@ does not invent session bootstrap or a transport before M0-R selects one.
 Consequently it can queue through `transport: none`, but real network delivery
 still requires the post-M0-R production transport.
 
+Daemon local API v9 additionally exposes `conversations.ensure-direct`. It
+accepts the same human recipient input, runs the same finalized resolution
+chain, and atomically creates or reloads a direct-conversation record keyed by
+the local and remote AgentIDs. The record pins the daemon-generated
+conversation ID and monotonic finalized-directory checkpoint; a later verified
+Endpoint rotation may advance that evidence but cannot change either AgentID or
+the conversation ID. Alias text is not persisted in the record.
+
+This operation returns only `agent_id`, optional display-only
+`canonical_name`, daemon-generated `conversation_id`, and the exact readiness
+`transport-pending`. It exposes no EndpointID, DeviceID, SessionID, prekey,
+Relay or route field. This is a durable first-contact discovery boundary, not a
+claim that pair-session bootstrap or network transport exists.
+
 ## Production configuration
 
 Daemon config v10 may add an authenticated Native DNS client:

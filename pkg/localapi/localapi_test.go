@@ -92,6 +92,19 @@ type fixedContactResolver struct {
 	input  string
 }
 
+type fixedDirectConversationEnsurer struct {
+	result DirectConversationResult
+	err    error
+	input  string
+}
+
+func (e *fixedDirectConversationEnsurer) EnsureDirectConversation(
+	_ context.Context, input string,
+) (DirectConversationResult, error) {
+	e.input = input
+	return e.result, e.err
+}
+
 func (r *fixedContactResolver) Resolve(_ context.Context, input string) (contact.Result, error) {
 	r.input = input
 	return r.result, r.err
@@ -226,8 +239,35 @@ func TestRuntimeResolvesRecipientToCanonicalAgentID(t *testing.T) {
 	}
 }
 
+func TestRuntimeEnsuresAgentBoundDirectConversationWithoutRouteAuthority(t *testing.T) {
+	h := newHarness(t)
+	ensurer := &fixedDirectConversationEnsurer{result: DirectConversationResult{
+		AgentID: senderID, CanonicalName: "alice.tos", ConversationID: convoID,
+		Readiness: "transport-pending",
+	}}
+	h.server.config.DirectConversationEnsurer = ensurer
+	response := h.call(t, Request{Op: OpEnsureDirectConversation, Recipient: "alice.tos"})
+	if !response.OK || response.AgentID != senderID || response.CanonicalName != "alice.tos" ||
+		response.ConversationID != convoID || response.Readiness != "transport-pending" ||
+		ensurer.input != "alice.tos" {
+		t.Fatalf("ensure direct conversation: response=%+v input=%q", response, ensurer.input)
+	}
+	if owner := h.owner(t, Request{Op: OpEnsureDirectConversation, Recipient: "alice.tos"}); owner.OK {
+		t.Fatal("owner socket unexpectedly exposed runtime conversation ensure")
+	}
+	for name, request := range map[string]Request{
+		"session":  {Op: OpEnsureDirectConversation, Recipient: "alice.tos", SessionID: sessionID},
+		"endpoint": {Op: OpEnsureDirectConversation, Recipient: "alice.tos", RecipientEndpointID: peerMEP},
+		"body":     {Op: OpEnsureDirectConversation, Recipient: "alice.tos", Body: "route me"},
+	} {
+		if _, err := EncodeRequest(request); err == nil {
+			t.Fatalf("direct conversation ensure accepted model-selected %s authority", name)
+		}
+	}
+}
+
 func TestRequestDecoderKeepsRollingUpgradeCompatibility(t *testing.T) {
-	for _, schema := range []string{RequestSchemaV6, RequestSchemaV7, RequestSchema} {
+	for _, schema := range []string{RequestSchemaV6, RequestSchemaV7, RequestSchemaV8, RequestSchema} {
 		raw, err := json.Marshal(Request{Schema: schema, Op: OpPending, Limit: 1})
 		if err != nil {
 			t.Fatal(err)

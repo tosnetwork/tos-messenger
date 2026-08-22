@@ -121,6 +121,9 @@ func TestRefreshVerifiesAndCommitsTheWholeChain(t *testing.T) {
 	if admitter.calls != 1 || result.Succession.Accepted.Digest == "" {
 		t.Fatal("published set was not committed")
 	}
+	if result.FinalizedCheckpoint != 100 {
+		t.Fatalf("finalized checkpoint=%d want=100", result.FinalizedCheckpoint)
+	}
 	want := []RefreshStage{StageDelegation, StagePolicy, StageLocator, StageDescriptor, StagePrekeys}
 	if len(source.calls) != len(want) {
 		t.Fatalf("calls=%v", source.calls)

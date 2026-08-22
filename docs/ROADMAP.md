@@ -31,7 +31,8 @@ operational authority surfaces for OpenFox, not separate product surfaces.
 | M4 multi-device and private rooms | 🟡 | Device succession/fan-out and owner-authorized direct-history backfill are durable and tested; room epochs, the TOS-MLS adapter, and a pinned OpenMLS `0.8.1` process-isolated Driver for suite `0x0001` exist. Three-member founding/join/replacement/removal, encrypted bidirectional chat, no-past/no-future secrecy, exporter separation, forged-commit/AAD/replay refusal, self-update PCS, atomic ratchet/commit persistence and full restart recovery run in `make verify`. The runnable OpenFox MLS proxy now propagates controller-only removal as an old-epoch encrypted notice bound to the exact Remove Commit, persists the new epoch before later Relay items, and proves after restart that an immutable untrusted delivery roster can still hand the removed process ciphertext it cannot decrypt. Batch catch-up stops at that security boundary and reports a healthy terminal membership state instead of retrying an expected decryption failure. Canonical BasicCredential/group-id bytes and durable signed authority transfer are implemented. [`ROOM_HISTORY_POLICY.md`](ROOM_HISTORY_POLICY.md) freezes v1 as join-forward only; OpenMLS proves joiner and replacement-device no-past secrecy, while both direct-history export and import refuse room backfill. **Still missing:** independent review/second implementation and real Relay catch-up |
 
 2026-08-22 M3 recipient update: the AgentLoop message tool now has a typed
-proactive recipient intent. Daemon local API v8 reduces either an explicit
+proactive recipient intent. Daemon local API v9 (while accepting v6--v8)
+reduces either an explicit
 AgentID or `.tos` name to a finalized AgentID, OpenFox selects only an
 operator-owned direct route keyed by that AgentID, and compose re-verifies the
 AgentID-to-Endpoint binding. The alias is absent from session, conversation,
@@ -39,6 +40,13 @@ policy, replay, mandate, payment and receipt authority. This closes proactive
 addressing over an existing verified route; new-session bootstrap, selected
 live transport and independent delivery evidence remain open. See
 [`DNS_RECIPIENT_CANONICALIZATION.md`](DNS_RECIPIENT_CANONICALIZATION.md).
+
+The same v9 API now has a route-independent `conversations.ensure-direct`
+boundary. It persists one daemon-generated conversation identity per canonical
+remote AgentID together with monotonic finalized-directory evidence, survives
+restart, keeps alias text out of authority, and returns only
+`transport-pending`. It deliberately does not create pair sessions or claim
+network delivery; those remain in the blocking chain below.
 
 ## Components
 

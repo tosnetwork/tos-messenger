@@ -78,6 +78,14 @@ func (f contactResolveFunc) Resolve(ctx context.Context, input string) (contact.
 	return f(ctx, input)
 }
 
+type directConversationEnsureFunc func(context.Context, string) (localapi.DirectConversationResult, error)
+
+func (f directConversationEnsureFunc) EnsureDirectConversation(
+	ctx context.Context, input string,
+) (localapi.DirectConversationResult, error) {
+	return f(ctx, input)
+}
+
 // ResolveContact accepts a human contact input at the daemon boundary. A .tos
 // name is reduced to a quorum-finalized Agent identifier and immediately run
 // through the same delegation, DHT, Contact Descriptor, and prekey verification
@@ -100,6 +108,38 @@ func (d *Daemon) ResolveContact(ctx context.Context, input string, dns contact.D
 		Chain: d.discovery.chain, CallerID: d.config.AgentID, Now: now,
 	}
 	return resolver.Resolve(ctx, input)
+}
+
+// EnsureDirectConversation resolves human input to AgentID and atomically
+// creates or reloads the daemon's route-independent direct-conversation record.
+// This first slice records discovery only: it creates no session and claims no
+// transport readiness.
+func (d *Daemon) EnsureDirectConversation(
+	ctx context.Context, input string, dns contact.DNSAliasClient,
+) (localapi.DirectConversationResult, error) {
+	resolved, err := d.ResolveContact(ctx, input, dns)
+	if err != nil {
+		return localapi.DirectConversationResult{}, err
+	}
+	var entropy [32]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return localapi.DirectConversationResult{}, errors.New("create direct conversation identity")
+	}
+	now := time.Now()
+	if d.now != nil {
+		now = d.now()
+	}
+	record, _, err := d.journal.EnsureDirectConversation(
+		d.config.AgentID, resolved.AgentID, resolved.Directory.Descriptor.EndpointID,
+		resolved.Directory.FinalizedCheckpoint, now, entropy,
+	)
+	if err != nil {
+		return localapi.DirectConversationResult{}, err
+	}
+	return localapi.DirectConversationResult{
+		AgentID: resolved.AgentID, CanonicalName: resolved.CanonicalName,
+		ConversationID: record.ConversationID, Readiness: "transport-pending",
+	}, nil
 }
 
 // Open assembles a daemon and takes ownership of its state.
@@ -267,6 +307,11 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 	serverConfig.ContactResolver = contactResolveFunc(func(ctx context.Context, input string) (contact.Result, error) {
 		return instance.ResolveContact(ctx, input, contactDNS)
 	})
+	serverConfig.DirectConversationEnsurer = directConversationEnsureFunc(
+		func(ctx context.Context, input string) (localapi.DirectConversationResult, error) {
+			return instance.EnsureDirectConversation(ctx, input, contactDNS)
+		},
+	)
 	server, err := localapi.NewServer(serverConfig)
 	if err != nil {
 		_ = journal.Close()

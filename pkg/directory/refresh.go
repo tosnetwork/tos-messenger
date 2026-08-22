@@ -42,11 +42,12 @@ const (
 
 // RefreshResult is the verified snapshot installed by one refresh.
 type RefreshResult struct {
-	Delegation  identity.Delegation
-	Descriptor  Descriptor
-	Locator     Locator
-	Succession  e2ee.Succession
-	RefreshedAt time.Time
+	Delegation          identity.Delegation
+	Descriptor          Descriptor
+	Locator             Locator
+	Succession          e2ee.Succession
+	FinalizedCheckpoint uint64
+	RefreshedAt         time.Time
 }
 
 // RefreshError preserves the failed boundary without treating retrieval
@@ -94,7 +95,9 @@ func (r Refresher) Refresh(ctx context.Context, agentID string) (RefreshResult, 
 	if err != nil {
 		return RefreshResult{}, &RefreshError{Stage: StageDelegation, Err: err}
 	}
-	delegation, err := identity.Verify(r.Resolver, r.Network, r.Chain, delegationRaw, now)
+	delegation, finalizedCheckpoint, err := identity.VerifyWithCheckpoint(
+		r.Resolver, r.Network, r.Chain, delegationRaw, now,
+	)
 	if err != nil {
 		return RefreshResult{}, &RefreshError{Stage: StageDelegation, Err: err}
 	}
@@ -143,7 +146,7 @@ func (r Refresher) Refresh(ctx context.Context, agentID string) (RefreshResult, 
 		return RefreshResult{}, &RefreshError{Stage: StagePrekeys, Err: err}
 	}
 	return RefreshResult{Delegation: delegation, Descriptor: descriptor, Locator: locator,
-		Succession: succession, RefreshedAt: now}, nil
+		Succession: succession, FinalizedCheckpoint: finalizedCheckpoint, RefreshedAt: now}, nil
 }
 
 // RefreshAt returns a conservative refresh deadline. The caller refreshes

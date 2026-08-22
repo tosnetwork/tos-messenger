@@ -33,12 +33,13 @@ import (
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema = "tos.messaging.local-request.v8"
-	// RequestSchemaV6 and RequestSchemaV7 remain accepted for the operations
+	RequestSchema = "tos.messaging.local-request.v9"
+	// RequestSchemaV6 through RequestSchemaV8 remain accepted for the operations
 	// they can express. Per-operation strict field validation prevents an older
 	// client from smuggling newer authority while allowing rolling upgrades.
 	RequestSchemaV6 = "tos.messaging.local-request.v6"
 	RequestSchemaV7 = "tos.messaging.local-request.v7"
+	RequestSchemaV8 = "tos.messaging.local-request.v8"
 	// ResponseSchema is the strict wire schema of a response.
 	ResponseSchema = "tos.messaging.local-response.v5"
 
@@ -77,6 +78,10 @@ const (
 	// AgentID only after the normal finalized identity and directory chain has
 	// succeeded; CanonicalName is non-authoritative display metadata.
 	OpResolveContact Operation = "contacts.resolve"
+	// OpEnsureDirectConversation resolves one human recipient input and creates
+	// or reuses the daemon's AgentID-keyed discovered conversation. It exposes
+	// no route/session authority and makes no transport-delivery claim.
+	OpEnsureDirectConversation Operation = "conversations.ensure-direct"
 	// OpPendingAttachments lists only opaque metadata for encrypted attachment
 	// Events. It never exposes the E2EE-carried Reference or fetch key.
 	OpPendingAttachments Operation = "attachments.pending"
@@ -180,7 +185,7 @@ const (
 var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
 		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
-		OpResolveContact:     {},
+		OpResolveContact: {}, OpEnsureDirectConversation: {},
 		OpPendingAttachments: {}, OpClaimAttachment: {},
 		OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
@@ -210,7 +215,7 @@ func Permits(principal Principal, operation Operation) bool {
 
 var operations = map[Operation]struct{}{
 	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
-	OpResolveContact:     {},
+	OpResolveContact: {}, OpEnsureDirectConversation: {},
 	OpPendingAttachments: {}, OpClaimAttachment: {},
 	OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
@@ -254,9 +259,10 @@ type Request struct {
 	LeaseSeconds uint64     `json:"lease_seconds,omitempty"`
 	Code         fault.Code `json:"code,omitempty"`
 	Limit        int        `json:"limit,omitempty"`
-	// Recipient is a human input accepted only by contacts.resolve. It is
-	// either a canonical AgentID or a canonical .tos alias and never carries
-	// endpoint, device, session, route, or authorization data.
+	// Recipient is a human input accepted only by contacts.resolve and
+	// conversations.ensure-direct. It is either a canonical AgentID or a
+	// canonical .tos alias and never carries endpoint, device, session, route,
+	// or authorization data.
 	Recipient string `json:"recipient,omitempty"`
 
 	// Event is an encoded Messaging Event, for submission.
@@ -507,6 +513,10 @@ type Response struct {
 	// CanonicalName is optional display metadata and MUST NOT be used as a key.
 	AgentID       string `json:"agent_id,omitempty"`
 	CanonicalName string `json:"canonical_name,omitempty"`
+	// ConversationID and Readiness are returned only by the daemon-owned direct
+	// conversation ensure operation. Readiness is not delivery confirmation.
+	ConversationID string `json:"conversation_id,omitempty"`
+	Readiness      string `json:"readiness,omitempty"`
 
 	// Actions lists decisions waiting for the owner.
 	Actions []WaitingAction `json:"actions,omitempty"`
@@ -592,7 +602,8 @@ func DecodeRequest(raw []byte) (Request, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Request{}, errors.New("request has trailing JSON")
 	}
-	if request.Schema != RequestSchema && request.Schema != RequestSchemaV7 && request.Schema != RequestSchemaV6 {
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV8 &&
+		request.Schema != RequestSchemaV7 && request.Schema != RequestSchemaV6 {
 		return Request{}, errors.New("unsupported request schema")
 	}
 	if err := ValidateRequest(request); err != nil {
@@ -675,8 +686,8 @@ func ValidateRequest(request Request) error {
 		(request.InvitedAgentID != "" || request.InviteExpiresAtUnix != 0) {
 		return errors.New("only admission invite creation carries invite terms")
 	}
-	if request.Op != OpResolveContact && request.Recipient != "" {
-		return errors.New("only contact resolution carries a recipient input")
+	if request.Op != OpResolveContact && request.Op != OpEnsureDirectConversation && request.Recipient != "" {
+		return errors.New("only contact or direct-conversation resolution carries a recipient input")
 	}
 	if request.Op != OpCompose && request.RecipientAgentID != "" {
 		return errors.New("only message composition carries a recipient Agent assertion")
@@ -723,16 +734,16 @@ func ValidateRequest(request Request) error {
 		return errors.New("only device-history export carries history terms")
 	}
 	switch request.Op {
-	case OpResolveContact:
+	case OpResolveContact, OpEnsureDirectConversation:
 		if request.Recipient == "" || len(request.Recipient) > 255 {
-			return errors.New("contact resolution needs one bounded recipient input")
+			return errors.New("recipient resolution needs one bounded input")
 		}
 		if request.Limit != 0 || request.Code != "" || request.RecipientEndpointID != "" ||
 			request.ExpiresAtUnix != 0 || request.LeaseSeconds != 0 || request.Action != nil ||
 			request.ActionID != "" || request.Reason != "" || request.Mandate != nil || request.MandateID != "" {
-			return errors.New("contact resolution cannot carry route or control fields")
+			return errors.New("recipient resolution cannot carry route or control fields")
 		}
-		return requireEmpty(request, "contact resolution", request.EventID, request.LeaseID, request.SessionID)
+		return requireEmpty(request, "recipient resolution", request.EventID, request.LeaseID, request.SessionID)
 	case OpPending, OpAwaitingAdmission, OpPendingAttachments:
 		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
 			return errors.New("invalid pending limit")
