@@ -93,6 +93,12 @@ func New(config Config) (*Admitter, error) {
 		if err != nil || actual != scanner.ExecutableDigest {
 			return nil, errors.New("attachment admission scanner does not match its configured digest")
 		}
+		for _, resource := range scanner.Resources {
+			actual, err := attachments.ScannerResourceDigest(resource.Path, resource.Executable)
+			if err != nil || actual != resource.Digest {
+				return nil, errors.New("attachment admission scanner resource does not match its configured digest")
+			}
+		}
 	}
 	config.OpenPolicy.AllowedMediaTypes = cloneMediaTypes(config.OpenPolicy.AllowedMediaTypes)
 	config.ContentPolicy.AllowedMediaTypes = cloneMediaTypes(config.ContentPolicy.AllowedMediaTypes)
@@ -103,6 +109,8 @@ func New(config Config) (*Admitter, error) {
 	}
 	for index := range config.ContentPolicy.Scanners {
 		config.ContentPolicy.Scanners[index].Args = append([]string(nil), config.ContentPolicy.Scanners[index].Args...)
+		config.ContentPolicy.Scanners[index].Resources = append([]attachments.ScannerResource(nil),
+			config.ContentPolicy.Scanners[index].Resources...)
 	}
 	return &Admitter{config: config}, nil
 }

@@ -35,7 +35,7 @@ const (
 	// RequestSchema is the strict wire schema of a request.
 	RequestSchema = "tos.messaging.local-request.v6"
 	// ResponseSchema is the strict wire schema of a response.
-	ResponseSchema = "tos.messaging.local-response.v4"
+	ResponseSchema = "tos.messaging.local-response.v5"
 
 	// MaxFrameBytes bounds one request or response body. It has to hold an
 	// event, because a claim hands one back.
@@ -430,8 +430,14 @@ type PendingAttachment struct {
 }
 
 type AttachmentScan struct {
-	ScannerID     string `json:"scanner_id"`
-	ScannerDigest string `json:"scanner_digest"`
+	ScannerID     string                   `json:"scanner_id"`
+	ScannerDigest string                   `json:"scanner_digest"`
+	Resources     []AttachmentScanResource `json:"resources,omitempty"`
+}
+
+type AttachmentScanResource struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
 }
 
 // AdmittedAttachment is the only attachment shape released to the runtime.

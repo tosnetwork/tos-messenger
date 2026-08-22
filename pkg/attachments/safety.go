@@ -24,21 +24,25 @@ import (
 )
 
 const (
-	ScanVerdictSchema     = "tos.messaging.attachment-scan-verdict.v1"
-	AdmissionReportSchema = "tos.messaging.attachment-admission-report.v1"
-	MaxAdmissionScanners  = 4
-	MaxScannerBinaryBytes = 128 << 20
-	MaxScanVerdictBytes   = 16 << 10
-	DefaultScannerTimeout = 30 * time.Second
-	defaultAddressSpace   = 8 << 30
-	defaultCPUSeconds     = 30
-	defaultMaxProcesses   = 4096
-	bubblewrapPath        = "/usr/bin/bwrap"
-	prlimitPath           = "/usr/bin/prlimit"
-	systemdRunPath        = "/usr/bin/systemd-run"
+	ScanVerdictSchema       = "tos.messaging.attachment-scan-verdict.v1"
+	AdmissionReportSchema   = "tos.messaging.attachment-admission-report.v1"
+	MaxAdmissionScanners    = 4
+	MaxScannerBinaryBytes   = 128 << 20
+	MaxScannerResources     = 8
+	MaxScannerResourceBytes = 512 << 20
+	MaxScannerResourceTotal = 1 << 30
+	MaxScanVerdictBytes     = 16 << 10
+	DefaultScannerTimeout   = 30 * time.Second
+	defaultAddressSpace     = 8 << 30
+	defaultCPUSeconds       = 30
+	defaultMaxProcesses     = 4096
+	bubblewrapPath          = "/usr/bin/bwrap"
+	prlimitPath             = "/usr/bin/prlimit"
+	systemdRunPath          = "/usr/bin/systemd-run"
 )
 
 var scannerIDPattern = regexp.MustCompile(`^[a-z][a-z0-9.-]{0,63}$`)
+var scannerResourceNamePattern = regexp.MustCompile(`^[a-z][a-z0-9.-]{0,63}$`)
 var scanReasonPattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,63}$`)
 
 // ScannerSpec pins one scanner executable and its deterministic invocation.
@@ -49,6 +53,23 @@ type ScannerSpec struct {
 	Executable       string
 	ExecutableDigest string
 	Args             []string
+	Resources        []ScannerResource
+}
+
+// ScannerResource is one immutable engine, signature database, or other
+// scanner input. It is copied from a validated open inode into the private scan
+// directory and exposed read-only as /scanner-resources/<name>. This makes the
+// scanner supply chain larger than one executable explicit and verdict-bound.
+type ScannerResource struct {
+	Name       string
+	Path       string
+	Digest     string
+	Executable bool
+}
+
+type ScanResourceEvidence struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
 }
 
 // ScannerCgroupPolicy adds a separate kernel-accounted cgroup around one
@@ -87,15 +108,16 @@ const (
 // plaintext digest, size and both media types prevents a verdict for one byte
 // string or declared format from being replayed for another.
 type ScanVerdict struct {
-	Schema            string       `json:"schema"`
-	ScannerID         string       `json:"scanner_id"`
-	ScannerDigest     string       `json:"scanner_digest"`
-	PlaintextDigest   string       `json:"plaintext_digest"`
-	SizeBytes         uint64       `json:"size_bytes"`
-	DeclaredMediaType string       `json:"declared_media_type"`
-	DetectedMediaType string       `json:"detected_media_type"`
-	Decision          ScanDecision `json:"decision"`
-	ReasonCode        string       `json:"reason_code,omitempty"`
+	Schema            string                 `json:"schema"`
+	ScannerID         string                 `json:"scanner_id"`
+	ScannerDigest     string                 `json:"scanner_digest"`
+	PlaintextDigest   string                 `json:"plaintext_digest"`
+	SizeBytes         uint64                 `json:"size_bytes"`
+	DeclaredMediaType string                 `json:"declared_media_type"`
+	DetectedMediaType string                 `json:"detected_media_type"`
+	Decision          ScanDecision           `json:"decision"`
+	ReasonCode        string                 `json:"reason_code,omitempty"`
+	Resources         []ScanResourceEvidence `json:"resources,omitempty"`
 }
 
 type AdmissionReport struct {
@@ -181,8 +203,12 @@ func admitPlaintext(ctx context.Context, plaintext []byte, metadata Metadata, po
 		if err != nil {
 			return AdmissionReport{}, err
 		}
+		resources, err := copyPinnedScannerResources(directory, index, scanner)
+		if err != nil {
+			return AdmissionReport{}, err
+		}
 		verdict, err := runSandboxedScanner(ctx, input, sandboxPath, resourceLimiterPath, cgroupLauncherPath,
-			scannerPath, scanner, metadata,
+			scannerPath, resources, scanner, metadata,
 			digest, uint64(len(plaintext)), policy)
 		if err != nil {
 			return AdmissionReport{}, err
@@ -291,12 +317,24 @@ func ValidateAgentContentPolicy(policy AgentContentPolicy) error {
 				return errors.New("invalid attachment scanner argument")
 			}
 		}
+		if len(scanner.Resources) > MaxScannerResources {
+			return errors.New("attachment scanner has too many pinned resources")
+		}
+		previousResource := ""
+		for _, resource := range scanner.Resources {
+			if !scannerResourceNamePattern.MatchString(resource.Name) || resource.Name <= previousResource ||
+				!filepath.IsAbs(resource.Path) || filepath.Clean(resource.Path) != resource.Path ||
+				!canon.ValidDigest(resource.Digest) {
+				return errors.New("invalid or noncanonical attachment scanner resource")
+			}
+			previousResource = resource.Name
+		}
 	}
 	return nil
 }
 
 func runSandboxedScanner(parent context.Context, input *os.File, sandboxPath, resourceLimiterPath,
-	cgroupLauncherPath, scannerPath string, scanner ScannerSpec,
+	cgroupLauncherPath, scannerPath string, resources []stagedScannerResource, scanner ScannerSpec,
 	metadata Metadata, plaintextDigest string, plaintextBytes uint64, policy AgentContentPolicy) (ScanVerdict, error) {
 	if _, err := input.Seek(0, 0); err != nil {
 		return ScanVerdict{}, errors.New("rewind attachment scanner input")
@@ -327,10 +365,17 @@ func runSandboxedScanner(parent context.Context, input *os.File, sandboxPath, re
 		"--ro-bind-try", "/lib64", "/lib64", "--proc", "/proc", "--dev", "/dev",
 		"--tmpfs", "/tmp", "--dir", "/work", "--ro-bind-data", "0", "/work/input",
 		"--ro-bind", scannerPath, "/scanner", "--ro-bind", resourceLimiterPath, "/prlimit",
+	}
+	if len(resources) > 0 {
+		arguments = append(arguments, "--dir", "/scanner-resources")
+		for _, resource := range resources {
+			arguments = append(arguments, "--ro-bind", resource.path, "/scanner-resources/"+resource.name)
+		}
+	}
+	arguments = append(arguments,
 		"--chdir", "/work", "--hostname", "tos-attachment-scan", "--",
 		"/prlimit", fmt.Sprintf("--as=%d", addressSpace), fmt.Sprintf("--cpu=%d", cpuSeconds),
-		fmt.Sprintf("--nproc=%d", maxProcesses), "--nofile=64", "--fsize=1048576", "--core=0", "--", "/scanner",
-	}
+		fmt.Sprintf("--nproc=%d", maxProcesses), "--nofile=64", "--fsize=1048576", "--core=0", "--", "/scanner")
 	arguments = append(arguments, scanner.Args...)
 	arguments = append(arguments, "--tos-scanner-id", scanner.ID, "--tos-declared-media-type", metadata.MediaType,
 		"--tos-input", "/work/input")
@@ -360,10 +405,28 @@ func runSandboxedScanner(parent context.Context, input *os.File, sandboxPath, re
 	}
 	if verdict.ScannerID != scanner.ID || verdict.ScannerDigest != scanner.ExecutableDigest ||
 		verdict.PlaintextDigest != plaintextDigest || verdict.SizeBytes != plaintextBytes ||
-		verdict.DeclaredMediaType != metadata.MediaType || verdict.DetectedMediaType != metadata.MediaType {
+		verdict.DeclaredMediaType != metadata.MediaType || verdict.DetectedMediaType != metadata.MediaType ||
+		!resourceEvidenceMatches(verdict.Resources, scanner.Resources) {
 		return ScanVerdict{}, fmt.Errorf("attachment scanner %s verdict does not bind the admitted content", scanner.ID)
 	}
 	return verdict, nil
+}
+
+type stagedScannerResource struct {
+	name string
+	path string
+}
+
+func resourceEvidenceMatches(evidence []ScanResourceEvidence, resources []ScannerResource) bool {
+	if len(evidence) != len(resources) {
+		return false
+	}
+	for index := range evidence {
+		if evidence[index].Name != resources[index].Name || evidence[index].Digest != resources[index].Digest {
+			return false
+		}
+	}
+	return true
 }
 
 func scannerCommand(ctx context.Context, cgroupLauncherPath, sandboxPath string, sandboxArguments []string,
@@ -426,6 +489,17 @@ func decodeScanVerdict(raw []byte) (ScanVerdict, error) {
 		verdict.ReasonCode != "" && !scanReasonPattern.MatchString(verdict.ReasonCode) {
 		return ScanVerdict{}, errors.New("invalid scan verdict")
 	}
+	if len(verdict.Resources) > MaxScannerResources {
+		return ScanVerdict{}, errors.New("scan verdict has too many resources")
+	}
+	previous := ""
+	for _, resource := range verdict.Resources {
+		if !scannerResourceNamePattern.MatchString(resource.Name) || resource.Name <= previous ||
+			!canon.ValidDigest(resource.Digest) {
+			return ScanVerdict{}, errors.New("scan verdict has invalid resources")
+		}
+		previous = resource.Name
+	}
 	return verdict, nil
 }
 
@@ -442,70 +516,113 @@ func copyPinnedScanner(directory string, index int, scanner ScannerSpec) (string
 	return path, nil
 }
 
+func copyPinnedScannerResources(directory string, scannerIndex int, scanner ScannerSpec) ([]stagedScannerResource, error) {
+	staged := make([]stagedScannerResource, 0, len(scanner.Resources))
+	var total int64
+	for resourceIndex, resource := range scanner.Resources {
+		path, size, err := stagePinnedFile(directory,
+			fmt.Sprintf("scanner-%d-resource-%d", scannerIndex, resourceIndex), resource.Path, resource.Digest,
+			resource.Executable, MaxScannerResourceBytes)
+		if err != nil {
+			return nil, fmt.Errorf("stage attachment scanner %s resource %s: %w", scanner.ID, resource.Name, err)
+		}
+		total += size
+		if total > MaxScannerResourceTotal {
+			return nil, errors.New("attachment scanner resources exceed their aggregate bound")
+		}
+		staged = append(staged, stagedScannerResource{name: resource.Name, path: path})
+	}
+	return staged, nil
+}
+
 // stagePinnedExecutable copies from the already validated open file, then
 // verifies the copied bytes. Later pathname replacement cannot change the
 // private inode used for this admission attempt.
 func stagePinnedExecutable(directory, name, sourcePath, expectedDigest string) (string, error) {
-	source, err := openPinnedExecutable(sourcePath)
+	path, _, err := stagePinnedFile(directory, name, sourcePath, expectedDigest, true, MaxScannerBinaryBytes)
+	return path, err
+}
+
+func stagePinnedFile(directory, name, sourcePath, expectedDigest string, executable bool, limit int64) (string, int64, error) {
+	source, err := openPinnedFile(sourcePath, executable, limit)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer source.Close()
 	targetPath := filepath.Join(directory, name)
-	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o500)
+	mode := os.FileMode(0o400)
+	if executable {
+		mode = 0o500
+	}
+	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
-		return "", errors.New("create private attachment scanner copy")
+		return "", 0, errors.New("create private attachment scanner copy")
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(target, hash), io.LimitReader(source, MaxScannerBinaryBytes+1))
-	if copyErr != nil || written < 1 || written > MaxScannerBinaryBytes {
+	written, copyErr := io.Copy(io.MultiWriter(target, hash), io.LimitReader(source, limit+1))
+	if copyErr != nil || written < 1 || written > limit {
 		_ = target.Close()
-		return "", errors.New("copy attachment scanner executable")
+		return "", 0, errors.New("copy attachment scanner file")
 	}
 	if err := target.Sync(); err != nil {
 		_ = target.Close()
-		return "", errors.New("sync attachment scanner executable")
+		return "", 0, errors.New("sync attachment scanner file")
 	}
 	if err := target.Close(); err != nil {
-		return "", errors.New("close attachment scanner executable")
+		return "", 0, errors.New("close attachment scanner file")
 	}
 	actual := "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	if actual != expectedDigest {
-		return "", errors.New("executable digest mismatch")
+		return "", 0, errors.New("scanner file digest mismatch")
 	}
-	return targetPath, nil
+	return targetPath, written, nil
 }
 
 // ExecutableDigest computes the SHA-256 identity of a bounded regular
 // executable. It is intended for generating and checking local scanner policy.
 func ExecutableDigest(path string) (string, error) {
-	file, err := openPinnedExecutable(path)
+	return pinnedFileDigest(path, true, MaxScannerBinaryBytes)
+}
+
+// ScannerResourceDigest computes the identity of one bounded regular scanner
+// resource using the same inode and size checks used during admission.
+func ScannerResourceDigest(path string, executable bool) (string, error) {
+	return pinnedFileDigest(path, executable, MaxScannerResourceBytes)
+}
+
+func pinnedFileDigest(path string, executable bool, limit int64) (string, error) {
+	file, err := openPinnedFile(path, executable, limit)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
 	hash := sha256.New()
-	written, err := io.Copy(hash, io.LimitReader(file, MaxScannerBinaryBytes+1))
-	if err != nil || written < 1 || written > MaxScannerBinaryBytes {
-		return "", errors.New("executable is outside its digest bound")
+	written, err := io.Copy(hash, io.LimitReader(file, limit+1))
+	if err != nil || written < 1 || written > limit {
+		return "", errors.New("scanner file is outside its digest bound")
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func openPinnedExecutable(path string) (*os.File, error) {
+	return openPinnedFile(path, true, MaxScannerBinaryBytes)
+}
+
+func openPinnedFile(path string, executable bool, limit int64) (*os.File, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return nil, errors.New("executable path must be absolute and canonical")
+		return nil, errors.New("scanner file path must be absolute and canonical")
 	}
 	before, err := os.Lstat(path)
-	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0o111 == 0 || before.Mode().Perm()&0o022 != 0 {
-		return nil, errors.New("executable must be a non-writable regular file")
+	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0o022 != 0 ||
+		executable && before.Mode().Perm()&0o111 == 0 {
+		return nil, errors.New("scanner file must be a non-writable regular file with the required mode")
 	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, errors.New("open executable")
 	}
 	after, err := file.Stat()
-	if err != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() || after.Size() < 1 || after.Size() > MaxScannerBinaryBytes {
+	if err != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() || after.Size() < 1 || after.Size() > limit {
 		_ = file.Close()
 		return nil, errors.New("executable changed during validation")
 	}

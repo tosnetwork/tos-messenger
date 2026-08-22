@@ -4,7 +4,9 @@
 authenticated opaque-storage contract for private Messenger attachments;
 `pkg/attachmentapi` and `tos-attachmentd` expose its bounded Unix/HTTPS service
 boundary. `OpenForAgent` adds an explicit Linux content-admission boundary and
-`tos-attachment-text-scanner` supplies a minimal reference UTF-8 inspector.
+`tos-attachment-text-scanner` supplies a minimal reference UTF-8 inspector;
+`tos-attachment-clamav-scanner` supplies a production-candidate adapter for a
+pinned ClamScan engine and pinned official CVD/CLD snapshots.
 `pkg/attachmentadmission`, daemon config v8 and local API v6 keep the Reference,
 attachment key and fetch capability out of OpenFox while releasing admitted
 `text/plain` plus exact scanner evidence under the Event's application lease.
@@ -169,7 +171,8 @@ the otherwise unmodifiable kernel membership assigned by the optional hard
 profile; cgroupfs is not mounted into the sandbox.
 
 The only accepted stdout is one strict bounded JSON verdict. It must bind the
-scanner ID and binary digest, exact plaintext SHA-256 and size, and identical
+scanner ID and binary digest, every configured scanner-resource name and
+SHA-256, exact plaintext SHA-256 and size, and identical
 declared/detected media types. Unknown fields, trailing JSON, a timeout,
 nonzero exit, output overflow, any mismatch, or one denial in a multi-scanner
 policy releases no plaintext. Scanner stderr is bounded and not returned to
@@ -183,6 +186,27 @@ injection, URLs, markup semantics, archives, office documents, PDFs, images,
 audio, video, decompression, or parser exploits. Those types remain refused
 unless operators install another reviewed, digest-pinned scanner under the
 same all-must-allow boundary.
+
+The ClamAV candidate makes that larger supply chain explicit instead of
+pretending the adapter executable is the malware product. Each configured
+engine or database resource is a canonical named, absolute, bounded regular
+file with a SHA-256 pin. `OpenForAgent` copies it from the already validated
+open inode into the private scan directory, verifies the copied bytes, mounts
+it read-only below `/scanner-resources`, and requires the verdict to repeat the
+exact ordered name/digest set. Individual resources are capped at 512 MiB,
+eight resources and 1 GiB total. Missing, writable-by-group/world, symlinked,
+oversized, reordered, substituted or unreported resources fail closed.
+
+`tos-attachment-clamav-scanner` requires one pinned ClamScan engine plus sorted
+official `main` and `daily` CVD/CLD snapshots, with optional `bytecode`. It
+invokes only those explicit databases with `--official-db-only=yes`, alerts on
+encrypted/broken input and any exceeded engine limit, and raises the engine's
+skip-as-clean byte ceilings to the exact authenticated input size. Exit 0 is allow, exit 1 is deny, and every
+other exit is an admission error. This follows ClamAV's documented one-shot
+model and signed CVD/CLD format, but remains a candidate until a supported
+engine patch, current FreshClam snapshot and representative hostile corpus run
+through this exact sandbox in release acceptance. EICAR alone is a plumbing
+check, not representative malware coverage.
 
 The address-space ceiling bounds virtual mappings, while fixed `GOMEMLIMIT`
 and `GOMAXPROCS` values constrain the reference Go scanner. `RLIMIT_NPROC` is a
@@ -229,7 +253,7 @@ releasing plaintext; a separate host probe records exact memory, zero-swap and
 task ceilings from cgroup v2.
 Still open are an independently operated public-TLS deployment, measured
 interrupted wide-area transfer, independently audited retention behavior,
-a selected production malware scanner and representative hostile corpus,
+a release-pinned supported ClamAV deployment and representative hostile corpus,
 independent hard-isolation review/evidence, non-text product policy, and
 commercial attachment service terms. A content-addressed object may have
 been copied, so no storage API promises cryptographic erasure it cannot prove.

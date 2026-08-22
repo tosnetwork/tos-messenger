@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -110,6 +111,62 @@ func TestOpenForAgentRequiresPinnedSandboxedScanner(t *testing.T) {
 				time.Unix(1_900_000_000, 0))
 			if err == nil || result.Plaintext != nil {
 				t.Fatalf("unsafe content released: %+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestScannerResourcesAreCopiedReadOnlyAndVerdictBound(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("scanner resource sandbox is Linux-only")
+	}
+	for _, path := range []string{bubblewrapPath, prlimitPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Skipf("sandbox executable unavailable: %s", path)
+		}
+	}
+	plaintext := []byte("resource-bound content\n")
+	ref, chunks, err := Seal(bytes.NewReader(bytes.Repeat([]byte{0x79}, KeyBytes+AttachmentIDBytes+NoncePrefixBytes)),
+		plaintext, Metadata{Filename: "resource.txt", MediaType: "text/plain",
+			PlaintextDigest: canon.Digest(plaintext), ExpiresAtUnix: 1_900_003_600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := filepath.Join(t.TempDir(), "database.cvd")
+	if err := os.WriteFile(resource, []byte("signed database fixture"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := ScannerResourceDigest(resource, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := scannerTestPolicy(t, "resources")
+	policy.Scanners[0].Resources = []ScannerResource{{Name: "database.cvd", Path: resource, Digest: digest}}
+	admitted, err := OpenForAgent(context.Background(), ref, chunks, Policy{MaxPlaintextBytes: 1 << 20}, policy,
+		time.Unix(1_900_000_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(admitted.Report.Scans) != 1 || len(admitted.Report.Scans[0].Resources) != 1 ||
+		admitted.Report.Scans[0].Resources[0].Digest != digest {
+		t.Fatalf("resource evidence missing: %+v", admitted.Report)
+	}
+	for name, mutate := range map[string]func(*AgentContentPolicy){
+		"source substitution": func(changed *AgentContentPolicy) {
+			changed.Scanners[0].Resources[0].Digest = "sha256:" + strings.Repeat("8", 64)
+		},
+		"verdict substitution": func(changed *AgentContentPolicy) {
+			changed.Scanners[0].Args = scannerHelperArgs("wrong-resource")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := policy
+			changed.Scanners = append([]ScannerSpec(nil), policy.Scanners...)
+			changed.Scanners[0].Resources = append([]ScannerResource(nil), policy.Scanners[0].Resources...)
+			mutate(&changed)
+			if released, err := OpenForAgent(context.Background(), ref, chunks,
+				Policy{MaxPlaintextBytes: 1 << 20}, changed, time.Unix(1_900_000_000, 0)); err == nil || released.Plaintext != nil {
+				t.Fatalf("resource substitution released plaintext: %+v err=%v", released, err)
 			}
 		})
 	}
@@ -289,6 +346,67 @@ func TestReferenceTextScannerLive(t *testing.T) {
 	}
 }
 
+func TestClamAVOfficialResourcesLive(t *testing.T) {
+	adapter := os.Getenv("TOS_ATTACHMENT_CLAMAV_SCANNER")
+	engine := os.Getenv("TOS_CLAMSCAN_BIN")
+	daily := os.Getenv("TOS_CLAMAV_DAILY_DB")
+	mainDB := os.Getenv("TOS_CLAMAV_MAIN_DB")
+	if adapter == "" || engine == "" || daily == "" || mainDB == "" {
+		t.Skip("set the ClamAV adapter, engine, daily and main database paths for live acceptance")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("ClamAV scanner sandbox is Linux-only")
+	}
+	adapterDigest, err := ExecutableDigest(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources := []ScannerResource{{Name: "clamscan", Path: engine, Executable: true},
+		{Name: filepath.Base(daily), Path: daily}, {Name: filepath.Base(mainDB), Path: mainDB}}
+	for index := range resources {
+		resources[index].Digest, err = ScannerResourceDigest(resources[index].Path, resources[index].Executable)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sort.Slice(resources, func(i, j int) bool { return resources[i].Name < resources[j].Name })
+	bubblewrapDigest, err := ExecutableDigest(bubblewrapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prlimitDigest, err := ExecutableDigest(prlimitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := AgentContentPolicy{MaxPlaintextBytes: 1 << 20,
+		AllowedMediaTypes: map[string]struct{}{"text/plain": {}},
+		Scanners: []ScannerSpec{{ID: "clamav-official", Executable: adapter, ExecutableDigest: adapterDigest,
+			Args: []string{"--engine-resource", "clamscan", "--database-resource", filepath.Base(daily),
+				"--database-resource", filepath.Base(mainDB)}, Resources: resources}},
+		BubblewrapDigest: bubblewrapDigest, PrlimitDigest: prlimitDigest, ScannerTimeout: 2 * time.Minute,
+		AddressSpaceBytes: 8 << 30, CPUSeconds: 120, MaxProcesses: 4096}
+	open := func(body []byte) (AdmittedAttachment, error) {
+		ref, chunks, err := Seal(bytes.NewReader(bytes.Repeat([]byte{0x7a}, KeyBytes+AttachmentIDBytes+NoncePrefixBytes)),
+			body, Metadata{Filename: "sample.txt", MediaType: "text/plain", PlaintextDigest: canon.Digest(body),
+				ExpiresAtUnix: 1_900_003_600})
+		if err != nil {
+			return AdmittedAttachment{}, err
+		}
+		return OpenForAgent(context.Background(), ref, chunks, Policy{MaxPlaintextBytes: 1 << 20}, policy,
+			time.Unix(1_900_000_000, 0))
+	}
+	if admitted, err := open([]byte("known inert ClamAV acceptance text\n")); err != nil || admitted.Plaintext == nil {
+		t.Fatalf("official ClamAV resources refused inert text: %+v err=%v", admitted, err)
+	}
+	// Keep the standard test signature out of the repository and test binary as
+	// one contiguous literal so host scanners do not quarantine the test suite.
+	eicar := append([]byte("X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-"),
+		[]byte("ANTIVIRUS-TEST-FILE!$H+H*")...)
+	if admitted, err := open(eicar); err == nil || admitted.Plaintext != nil {
+		t.Fatalf("official ClamAV resources released EICAR: %+v err=%v", admitted, err)
+	}
+}
+
 func TestAgentContentPolicyFailsClosed(t *testing.T) {
 	metadata := Metadata{MediaType: "text/plain"}
 	valid := scannerTestPolicyWithoutHost(t)
@@ -303,6 +421,20 @@ func TestAgentContentPolicyFailsClosed(t *testing.T) {
 		"no scanner": func(value *AgentContentPolicy) { value.Scanners = nil },
 		"duplicate scanner": func(value *AgentContentPolicy) {
 			value.Scanners = append(value.Scanners, value.Scanners[0])
+		},
+		"unsorted scanner resources": func(value *AgentContentPolicy) {
+			value.Scanners[0].Resources = []ScannerResource{
+				{Name: "main.cvd", Path: "/db/main.cvd", Digest: "sha256:" + strings.Repeat("1", 64)},
+				{Name: "daily.cvd", Path: "/db/daily.cvd", Digest: "sha256:" + strings.Repeat("2", 64)},
+			}
+		},
+		"relative scanner resource": func(value *AgentContentPolicy) {
+			value.Scanners[0].Resources = []ScannerResource{{Name: "daily.cvd", Path: "db/daily.cvd",
+				Digest: "sha256:" + strings.Repeat("2", 64)}}
+		},
+		"invalid scanner resource digest": func(value *AgentContentPolicy) {
+			value.Scanners[0].Resources = []ScannerResource{{Name: "daily.cvd", Path: "/db/daily.cvd",
+				Digest: strings.Repeat("2", 64)}}
 		},
 		"unbounded plaintext": func(value *AgentContentPolicy) { value.MaxPlaintextBytes = 0 },
 		"unbounded timeout":   func(value *AgentContentPolicy) { value.ScannerTimeout = 3 * time.Minute },
@@ -354,6 +486,33 @@ func TestExecutableDigestRefusesUnsafePaths(t *testing.T) {
 	}
 	if _, err := ExecutableDigest("relative/scanner"); err == nil {
 		t.Fatal("relative scanner executable accepted")
+	}
+}
+
+func TestScannerResourceDigestRefusesUnsafeFiles(t *testing.T) {
+	directory := t.TempDir()
+	resource := filepath.Join(directory, "daily.cvd")
+	if err := os.WriteFile(resource, []byte("database"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if digest, err := ScannerResourceDigest(resource, false); err != nil || !canon.ValidDigest(digest) {
+		t.Fatalf("safe resource digest: %q %v", digest, err)
+	}
+	if _, err := ScannerResourceDigest(resource, true); err == nil {
+		t.Fatal("non-executable resource accepted as an engine")
+	}
+	if err := os.Chmod(resource, 0o420); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ScannerResourceDigest(resource, false); err == nil {
+		t.Fatal("group-writable resource accepted")
+	}
+	link := filepath.Join(directory, "daily-link.cvd")
+	if err := os.Symlink(resource, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ScannerResourceDigest(link, false); err == nil {
+		t.Fatal("symlinked scanner resource accepted")
 	}
 }
 
@@ -472,9 +631,20 @@ func TestSandboxScannerHelperProcess(t *testing.T) {
 	if mode == "wrong-size" {
 		sizeBytes++
 	}
+	var resources []ScanResourceEvidence
+	if mode == "resources" || mode == "wrong-resource" {
+		digest, err := ScannerResourceDigest("/scanner-resources/database.cvd", false)
+		if err != nil {
+			os.Exit(95)
+		}
+		if mode == "wrong-resource" {
+			digest = "sha256:" + strings.Repeat("4", 64)
+		}
+		resources = []ScanResourceEvidence{{Name: "database.cvd", Digest: digest}}
+	}
 	verdict := ScanVerdict{Schema: ScanVerdictSchema, ScannerID: scannerID, ScannerDigest: executableDigest,
 		PlaintextDigest: plaintextDigest, SizeBytes: sizeBytes, DeclaredMediaType: declared,
-		DetectedMediaType: detected, Decision: decision, ReasonCode: reason}
+		DetectedMediaType: detected, Decision: decision, ReasonCode: reason, Resources: resources}
 	if err := json.NewEncoder(os.Stdout).Encode(verdict); err != nil {
 		os.Exit(94)
 	}
