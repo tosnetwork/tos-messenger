@@ -211,6 +211,184 @@ func TestNativeNodeDiscoversSyncsAndRestartsADNL(t *testing.T) {
 	}
 }
 
+func TestNativeNodeSingleFlightsSameHeadAcrossADNLPeers(t *testing.T) {
+	if publicChannelRaceEnabled {
+		t.Skip("tosutils-go's TL serializer is incompatible with race/checkptr; make test-adnl runs this test without race")
+	}
+	profile, authority, _, publisher, publisherKey, delegations := storeFixture(t)
+	profileDigest, _ := profile.Digest()
+	event := signedPost(t, profile, profileDigest, publisher, publisherKey, 1, "", nil,
+		channelNow, "same Head from two native peers")
+	now := func() time.Time { return time.Unix(int64(channelNow+2), 0) }
+	want, err := VerifyHistory(profile, []Event{event}, authority, delegations, now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := &memoryNativeDirectory{records: make(map[string]NativeDiscoveredPeer)}
+	serverKeys := []ed25519.PrivateKey{
+		ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x51}, ed25519.SeedSize)),
+		ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x52}, ed25519.SeedSize)),
+	}
+	clientKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x53}, ed25519.SeedSize))
+
+	serverNodes := make([]*NativeNode, 0, len(serverKeys))
+	serverStores := make([]*Store, 0, len(serverKeys))
+	serverAddresses := make([]string, 0, len(serverKeys))
+	serverIDs := make([]string, 0, len(serverKeys))
+	for _, key := range serverKeys {
+		store := openAppliedNativeStore(t, profile, authority, delegations, now())
+		defer store.Close()
+		gateway := adnl.NewGateway(key)
+		listen := reserveNativeUDPAddress(t)
+		if err := gateway.StartServer(listen); err != nil {
+			t.Fatal(err)
+		}
+		defer gateway.Close()
+		node, err := NewNativeNode(NativeNodeConfig{Profile: profile, Authority: authority,
+			Delegations: delegations, Store: store, LocalKey: key, Gateway: gateway,
+			Directory: directory, Now: now, Logf: t.Logf})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer node.Close()
+		serverStores = append(serverStores, store)
+		serverAddresses = append(serverAddresses, listen)
+		serverIDs = append(serverIDs, string(gateway.GetID()))
+		serverNodes = append(serverNodes, node)
+	}
+	clientStore := openAppliedNativeStore(t, profile, authority, delegations, now())
+	defer clientStore.Close()
+	clientGateway := adnl.NewGateway(clientKey)
+	if err := clientGateway.StartClient(); err != nil {
+		t.Fatal(err)
+	}
+	defer clientGateway.Close()
+	clientNode, err := NewNativeNode(NativeNodeConfig{Profile: profile, Authority: authority,
+		Delegations: delegations, Store: clientStore, LocalKey: clientKey, Gateway: clientGateway,
+		Directory: directory, Now: now, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientNode.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	clientAllowed := make(map[string]ed25519.PublicKey, len(serverKeys))
+	for index, key := range serverKeys {
+		clientAllowed[serverIDs[index]] = append(ed25519.PublicKey(nil), key.Public().(ed25519.PublicKey)...)
+		serverNodes[index].replaceAllowed(map[string]ed25519.PublicKey{
+			string(clientGateway.GetID()): append(ed25519.PublicKey(nil), clientKey.Public().(ed25519.PublicKey)...),
+		})
+	}
+	clientNode.replaceAllowed(clientAllowed)
+	for index, key := range serverKeys {
+		peer, err := clientGateway.RegisterClient(serverAddresses[index], key.Public().(ed25519.PublicKey))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
+		_, err = peer.Ping(pingCtx)
+		pingCancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := clientNode.attach(peer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	serverCarriers := make([]*NativeCarrier, 0, len(serverNodes))
+	for {
+		peers, _, _, _ := clientNode.Stats()
+		serverCarriers = serverCarriers[:0]
+		for _, node := range serverNodes {
+			node.mutex.Lock()
+			carrier := node.carriers[string(clientGateway.GetID())]
+			node.mutex.Unlock()
+			if carrier != nil {
+				serverCarriers = append(serverCarriers, carrier)
+			}
+		}
+		if peers == len(serverNodes) && len(serverCarriers) == len(serverNodes) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("three-node carrier assembly incomplete: client_peers=%d server_carriers=%d", peers, len(serverCarriers))
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	for _, node := range serverNodes {
+		node.mutex.Lock()
+	}
+	var unlockOnce sync.Once
+	unlockProviders := func() {
+		unlockOnce.Do(func() {
+			for _, node := range serverNodes {
+				node.mutex.Unlock()
+			}
+		})
+	}
+	defer unlockProviders()
+	for index, node := range serverNodes {
+		history, _, err := serverStores[index].CommitHistory(profile, want.Events(), authority, delegations, now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		historyIndex, err := indexNativeHistory(history)
+		if err != nil {
+			t.Fatal(err)
+		}
+		node.history, node.historyByID, node.historyFound = history, historyIndex, true
+	}
+	if err := serverCarriers[0].PublishHead(ctx, want.Head()); err != nil {
+		t.Fatal(err)
+	}
+	for nativeServedFetches(serverCarriers[0]) != 1 {
+		select {
+		case <-ctx.Done():
+			t.Fatal("no native history fetch started")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if err := serverCarriers[1].PublishHead(ctx, want.Head()); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		clientNode.mutex.Lock()
+		active, pending := len(clientNode.syncs.activeHeads), len(clientNode.syncs.pending)
+		clientNode.mutex.Unlock()
+		if active == 1 && pending == 1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("same-Head peer was not single-flighted: active=%d pending=%d", active, pending)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := nativeServedFetches(serverCarriers[0]) + nativeServedFetches(serverCarriers[1]); got != 1 {
+		t.Fatalf("same Head started %d native history fetches while the first was blocked", got)
+	}
+	unlockProviders()
+	waitNativeHistory(t, ctx, clientStore, profile, authority, delegations, now(), want.Digest())
+	if got := nativeServedFetches(serverCarriers[0]) + nativeServedFetches(serverCarriers[1]); got != 1 {
+		t.Fatalf("native history fetches = %d, want exactly one", got)
+	}
+	clientNode.mutex.Lock()
+	active, pending := len(clientNode.syncs.activeHeads), len(clientNode.syncs.pending)
+	clientNode.mutex.Unlock()
+	if active != 0 || pending != 0 {
+		t.Fatalf("successful native synchronization retained work: active=%d pending=%d", active, pending)
+	}
+}
+
+func nativeServedFetches(carrier *NativeCarrier) uint32 {
+	carrier.usageMutex.Lock()
+	defer carrier.usageMutex.Unlock()
+	return carrier.served
+}
+
 func TestNativeNodeADNLSitesCatchUpWithoutRLDPHistory(t *testing.T) {
 	if publicChannelRaceEnabled {
 		t.Skip("tosutils-go's TL serializer is incompatible with race/checkptr; make test-adnl runs this test without race")
