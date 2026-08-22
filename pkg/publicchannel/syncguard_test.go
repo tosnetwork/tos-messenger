@@ -103,6 +103,36 @@ func TestPublicChannelSyncGuardEnforcesPerAttemptWorkLimits(t *testing.T) {
 	}
 }
 
+func TestNativeSyncFetchBudgetCoversMaximumLinearHistory(t *testing.T) {
+	profile, authority, _, publisher, publisherKey, delegations := storeFixture(t)
+	digest, _ := profile.Digest()
+	event := signedPost(t, profile, digest, publisher, publisherKey, 1, "", nil, channelNow, "linear budget")
+	history, err := VerifyHistory(profile, []Event{event}, authority, delegations, time.Unix(int64(channelNow+1), 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := NativeNodeSyncLimits()
+	if limits.FetchesPerPeer != MaxHistoryEvents {
+		t.Fatalf("native fetch ceiling = %d, want maximum linear history %d", limits.FetchesPerPeer, MaxHistoryEvents)
+	}
+	guard, err := NewSyncGuard(profile.ChannelID, digest, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := "peer_" + strings.Repeat("f", 64)
+	if err := guard.ObserveHead(peer, history.Head()); err != nil {
+		t.Fatal(err)
+	}
+	for fetch := 0; fetch < MaxHistoryEvents; fetch++ {
+		if err := guard.BeginFetch(peer); err != nil {
+			t.Fatalf("maximum linear history was truncated at fetch %d: %v", fetch, err)
+		}
+	}
+	if err := guard.BeginFetch(peer); err == nil {
+		t.Fatal("native fetch ceiling was not enforced after the maximum linear history")
+	}
+}
+
 func TestNativeCarrierInboundBudgetsAndAnnouncementReplay(t *testing.T) {
 	profile, _, _, _, _, _ := storeFixture(t)
 	digest, _ := profile.Digest()

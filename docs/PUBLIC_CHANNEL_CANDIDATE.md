@@ -96,6 +96,12 @@ and authorized publication remains governed by the finalized profile. Local
 single-core history, cursor and Storage-snapshot calibration now covers 1 to
 65,536 Events in
 [`PUBLIC_CHANNEL_CALIBRATION_2026-08-21.md`](evidence/PUBLIC_CHANNEL_CALIBRATION_2026-08-21.md).
+The concurrent calibration in
+[`PUBLIC_CHANNEL_CONCURRENT_CALIBRATION_2026-08-22.md`](evidence/PUBLIC_CHANNEL_CONCURRENT_CALIBRATION_2026-08-22.md)
+also exercises 1/8/32 simultaneous strict peer walks. It corrected a native
+1,024-fetch ceiling that could not represent a valid maximum-size linear
+history and replaced per-request whole-history scans with a verified immutable
+exact-ID index. Independent byte/time/Event ceilings remain in force.
 Representative low-cost hardware, concurrent peers, the real M0-R carrier and
 abuse measurements are still required before production defaults are frozen.
 

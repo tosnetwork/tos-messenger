@@ -12,9 +12,13 @@ import (
 const (
 	MaxSyncPeers             = 32
 	MaxCandidateHeadsPerPeer = 8
-	MaxFetchesPerPeer        = 1024
-	MaxSyncPeerBytes         = 1 << 30
-	MaxSyncTotalBytes        = 4 << 30
+	// A valid maximum-size history may be one causal chain, exposing only one
+	// new parent ID per response. Keep the request ceiling aligned with the
+	// Event ceiling; byte, unavailable-result and attempt-lifetime limits still
+	// independently bound peer work.
+	MaxFetchesPerPeer = MaxHistoryEvents
+	MaxSyncPeerBytes  = 1 << 30
+	MaxSyncTotalBytes = 4 << 30
 )
 
 var syncPeerPattern = regexp.MustCompile(`^peer_[0-9a-f]{64}$`)
