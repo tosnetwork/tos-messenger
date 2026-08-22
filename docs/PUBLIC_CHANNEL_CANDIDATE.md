@@ -108,6 +108,12 @@ starting duplicate fetch/verification walks. Failure hands the Head to the
 next still-connected peer; success drops every redundant claimant, exact
 replay is free, stale completion cannot replace the active fallback, and node
 shutdown clears queued work.
+The non-race ADNL gate now also assembles two independently keyed history
+providers and one empty `NativeNode` over three real local UDP Gateways. It
+holds the first RLDP request, delivers the same Head from the second carrier,
+and requires one active/one pending candidate, exactly one served fetch, one
+durable commit and an empty scheduler afterward. Twenty consecutive runs pass
+without adding a production test hook.
 Representative low-cost hardware, concurrent peers, the real M0-R carrier and
 abuse measurements are still required before production defaults are frozen.
 

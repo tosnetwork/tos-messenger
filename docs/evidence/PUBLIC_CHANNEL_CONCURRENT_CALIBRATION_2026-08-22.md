@@ -69,3 +69,22 @@ including a History-digest reuse with substituted tips, so a malicious false
 Head cannot suppress the canonical one. Stale completion, disconnected peers,
 queue overflow, caller mutation and node shutdown fail closed under focused and
 race tests.
+
+## Native three-node single-flight proof
+
+`TestNativeNodeSingleFlightsSameHeadAcrossADNLPeers` closes the gap between the
+scheduler model and the live carrier. Two independently keyed providers and
+one empty client establish authenticated carriers over three real local UDP
+Gateways. After carrier assembly, both providers receive the same verified
+one-Event history. The first provider's real RLDP request is held before its
+history lookup while the second provider broadcasts the identical canonical
+Head. At that boundary the client has exactly one active synchronization and
+one waiting claimant, and the two server carriers report exactly one served
+fetch in total. Releasing the provider yields one verified durable commit,
+clears active and pending work, and never contacts the redundant provider.
+
+The exact test passed 20 consecutive runs, the complete `pkg/publicchannel`
+suite, its race build, and `make test-adnl`. The test uses existing private
+package counters and locks; it adds no production hook or public API. It proves
+same-host scheduling across real ADNL/Overlay/RLDP carriers, not public-network
+latency, independent operation, or failover after a real network fault.
