@@ -37,7 +37,11 @@ func TestEncryptedAttachmentIsReservedAndOnlyAdmittedContentCrossesRuntimeAPI(t 
 		Report: attachments.AdmissionReport{Schema: attachments.AdmissionReportSchema,
 			PlaintextDigest: canon.Digest(plaintext), SizeBytes: uint64(len(plaintext)), MediaType: "text/plain",
 			Scans: []attachments.ScanVerdict{{ScannerID: "reference-text",
-				ScannerDigest: "sha256:" + strings.Repeat("e", 64), Decision: attachments.ScanAllow}}},
+				ScannerDigest: "sha256:" + strings.Repeat("e", 64), Decision: attachments.ScanAllow,
+				Resources: []attachments.ScanResourceEvidence{
+					{Name: "clamscan", Digest: "sha256:" + strings.Repeat("1", 64)},
+					{Name: "daily.cvd", Digest: "sha256:" + strings.Repeat("2", 64)},
+				}}}},
 	}}
 	server, err := NewServer(Config{Journal: h.journal, Dispatcher: h.dispatcher, Policy: firewall.Default(),
 		OwnerKey: testOwnerPublic(), LocalEndpointID: peerMEP, Now: func() time.Time { return h.clock },
@@ -60,7 +64,10 @@ func TestEncryptedAttachmentIsReservedAndOnlyAdmittedContentCrossesRuntimeAPI(t 
 	}
 	claimed := h.call(t, Request{Op: OpClaimAttachment, EventID: event.EventID, LeaseID: leaseID, LeaseSeconds: 60})
 	if !claimed.OK || claimed.Attachment == nil || claimed.Attachment.Body != string(plaintext) ||
-		claimed.Attachment.PlaintextDigest != canon.Digest(plaintext) || len(claimed.Attachment.Scans) != 1 {
+		claimed.Attachment.PlaintextDigest != canon.Digest(plaintext) || len(claimed.Attachment.Scans) != 1 ||
+		len(claimed.Attachment.Scans[0].Resources) != 2 ||
+		claimed.Attachment.Scans[0].Resources[0].Name != "clamscan" ||
+		claimed.Attachment.Scans[0].Resources[1].Digest != "sha256:"+strings.Repeat("2", 64) {
 		t.Fatalf("wrong admitted attachment: %+v", claimed)
 	}
 	if seen := <-admitter.seen; seen.EventID != event.EventID {

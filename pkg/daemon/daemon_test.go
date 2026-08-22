@@ -686,7 +686,8 @@ func TestAttachmentAdmissionMapsExplicitCgroupPolicy(t *testing.T) {
 	config := AttachmentAdmissionConfig{
 		MaxPlaintextBytes: 1024, AllowedMediaTypes: []string{"text/plain"},
 		Scanners: []AttachmentScannerConfig{{ID: "reviewed", Executable: "/scanner",
-			ExecutableDigest: digest}},
+			ExecutableDigest: digest, Resources: []AttachmentScannerResourceConfig{{Name: "daily.cvd",
+				Path: "/var/lib/clamav/daily.cvd", Digest: digest}}}},
 		BubblewrapDigest: digest, PrlimitDigest: digest,
 		Cgroup: &AttachmentScannerCgroupConfig{SystemdRunDigest: digest,
 			MemoryMaxBytes: 256 << 20, TasksMax: 32},
@@ -696,7 +697,9 @@ func TestAttachmentAdmissionMapsExplicitCgroupPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if content.Cgroup == nil || content.Cgroup.SystemdRunDigest != digest ||
-		content.Cgroup.MemoryMaxBytes != 256<<20 || content.Cgroup.TasksMax != 32 {
+		content.Cgroup.MemoryMaxBytes != 256<<20 || content.Cgroup.TasksMax != 32 ||
+		len(content.Scanners) != 1 || len(content.Scanners[0].Resources) != 1 ||
+		content.Scanners[0].Resources[0].Name != "daily.cvd" {
 		t.Fatalf("wrong cgroup mapping: %+v", content.Cgroup)
 	}
 	config.Cgroup.MemoryMaxBytes = 32 << 20

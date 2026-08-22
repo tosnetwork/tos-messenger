@@ -193,10 +193,18 @@ type Config struct {
 }
 
 type AttachmentScannerConfig struct {
-	ID               string   `json:"id"`
-	Executable       string   `json:"executable"`
-	ExecutableDigest string   `json:"executable_digest"`
-	Args             []string `json:"args,omitempty"`
+	ID               string                            `json:"id"`
+	Executable       string                            `json:"executable"`
+	ExecutableDigest string                            `json:"executable_digest"`
+	Args             []string                          `json:"args,omitempty"`
+	Resources        []AttachmentScannerResourceConfig `json:"resources,omitempty"`
+}
+
+type AttachmentScannerResourceConfig struct {
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Digest     string `json:"digest"`
+	Executable bool   `json:"executable,omitempty"`
 }
 
 type AttachmentScannerCgroupConfig struct {
@@ -243,8 +251,14 @@ func (a AttachmentAdmissionConfig) Policies() (attachments.Policy, attachments.A
 	}
 	scanners := make([]attachments.ScannerSpec, len(a.Scanners))
 	for index, scanner := range a.Scanners {
+		resources := make([]attachments.ScannerResource, len(scanner.Resources))
+		for resourceIndex, resource := range scanner.Resources {
+			resources[resourceIndex] = attachments.ScannerResource{Name: resource.Name, Path: resource.Path,
+				Digest: resource.Digest, Executable: resource.Executable}
+		}
 		scanners[index] = attachments.ScannerSpec{ID: scanner.ID, Executable: scanner.Executable,
-			ExecutableDigest: scanner.ExecutableDigest, Args: append([]string(nil), scanner.Args...)}
+			ExecutableDigest: scanner.ExecutableDigest, Args: append([]string(nil), scanner.Args...),
+			Resources: resources}
 	}
 	var cgroup *attachments.ScannerCgroupPolicy
 	if a.Cgroup != nil {

@@ -471,7 +471,12 @@ func (s *Server) claimAttachment(ctx context.Context, request Request, now time.
 	}
 	scans := make([]AttachmentScan, 0, len(admitted.Report.Scans))
 	for _, scan := range admitted.Report.Scans {
-		scans = append(scans, AttachmentScan{ScannerID: scan.ScannerID, ScannerDigest: scan.ScannerDigest})
+		resources := make([]AttachmentScanResource, len(scan.Resources))
+		for index, resource := range scan.Resources {
+			resources[index] = AttachmentScanResource{Name: resource.Name, Digest: resource.Digest}
+		}
+		scans = append(scans, AttachmentScan{ScannerID: scan.ScannerID, ScannerDigest: scan.ScannerDigest,
+			Resources: resources})
 	}
 	return Response{OK: true, Attachment: &AdmittedAttachment{EventID: event.EventID,
 		SenderAgentID: event.SenderAgentID, SenderEndpointID: event.SenderEndpointID,

@@ -298,7 +298,7 @@ and launcher files must be regular, executable, non-writable and not symlinks.
 `tos-attachment-text-scanner` is a parser-free reference inspector, not a
 production malware product. It refuses every non-text type. To enable the
 daemon-owned OpenFox path, add the following to daemon config v8 after replacing
-all three digest placeholders with the reviewed lowercase `sha256:` values:
+all digest placeholders with the reviewed lowercase `sha256:` values:
 
 ```json
 "attachment_admission": {
@@ -322,11 +322,46 @@ all three digest placeholders with the reviewed lowercase `sha256:` values:
 }
 ```
 
+For production-candidate malware scanning, build
+`cmd/tos-attachment-clamav-scanner` as a second scanner. Do not point it at a
+mutable database directory. Pin one reviewed ClamScan engine and the exact
+FreshClam-produced official `main`/`daily` CVD or CLD files as named resources;
+optional `bytecode` must be pinned the same way. `ScannerResourceDigest` uses
+the same regular-file, inode, size and SHA-256 checks as admission. A minimal
+shape is:
+
+```json
+{
+  "id": "clamav-official",
+  "executable": "/usr/local/libexec/tos-attachment-clamav-scanner",
+  "executable_digest": "sha256:<adapter>",
+  "args": [
+    "--engine-resource", "clamscan",
+    "--database-resource", "daily.cld",
+    "--database-resource", "main.cvd"
+  ],
+  "resources": [
+    {"name": "clamscan", "path": "/usr/bin/clamscan", "digest": "sha256:<engine>", "executable": true},
+    {"name": "daily.cld", "path": "/var/lib/clamav/daily.cld", "digest": "sha256:<daily>"},
+    {"name": "main.cvd", "path": "/var/lib/clamav/main.cvd", "digest": "sha256:<main>"}
+  ]
+}
+```
+
+Both `args` and `resources` are canonical and sorted. Admission copies each
+resource from its validated open inode, verifies the private copy, mounts it
+read-only, and requires its name/digest in the verdict. ClamScan runs with
+official databases only; clean is exit 0, detection is exit 1, and every other
+outcome fails closed. A release deployment must still select a currently
+supported ClamAV patch, refresh and re-pin its official databases, size the
+cgroup for the documented 3–4 GiB engine requirement, and pass the approved
+hostile corpus. EICAR by itself proves plumbing, not production coverage.
+
 Startup re-hashes every configured executable before opening the runtime
 socket. OpenFox's `tos_messenger` settings must set
-`"enable_attachments": true`; it then uses local request v6/response v4 and
+`"enable_attachments": true`; it then uses local request v6/response v5 and
 receives only admitted `text/plain`, never the Reference or fetch key.
-Production deployment still needs a reviewed scanner selection and corpus,
+Production deployment still needs a release-pinned scanner selection and representative corpus,
 must enable the explicit cgroup block when hard RSS/swap/task isolation is
 required, and still needs independently operated evidence.
 
