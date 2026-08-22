@@ -30,11 +30,17 @@ func TestManagerCachesUntilDeadlineAndInvalidates(t *testing.T) {
 	observer := &recordingObserver{}
 	manager := &Manager{Refresher: refresher, Lead: 5 * time.Minute, Observer: observer}
 
-	if _, err := manager.Ensure(context.Background(), agentID); err != nil {
+	first, err := manager.Ensure(context.Background(), agentID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Ensure(context.Background(), agentID); err != nil {
+	first.Bundles[0].Material[0] ^= 0xff
+	second, err := manager.Ensure(context.Background(), agentID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if first.Bundles[0].Material[0] == second.Bundles[0].Material[0] {
+		t.Fatal("caller mutation changed the cached verified prekey set")
 	}
 	if got := len(source.calls); got != 5 {
 		t.Fatalf("fresh cache caused retrieval: calls=%d", got)

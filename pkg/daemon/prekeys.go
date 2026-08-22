@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"crypto"
 	"errors"
 	"net"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
+	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
@@ -20,6 +22,94 @@ type prekeyRuntime struct {
 	listener  net.Listener
 	planner   *prekeyPlanner
 	publisher *directory.GenerationPublisher
+	devices   *eventlog.DevicePrekeyLedger
+	suite     e2ee.Suite
+	signer    crypto.Signer
+	deviceID  string
+}
+
+// configureLocalDevice enables this daemon's configured Device to contribute
+// through the externally custodied Endpoint signer. Private X25519 material is
+// written only to the daemon's private device ledger; the publication path
+// receives the signed public bundle and nothing else.
+func (r *prekeyRuntime) configureLocalDevice(deviceID string, signer crypto.Signer) error {
+	if r == nil || r.planner == nil || r.devices == nil || signer == nil {
+		return errors.New("local device prekeys are not configured")
+	}
+	r.deviceID = deviceID
+	r.signer = signer
+	if err := r.ensureLocalDevice(); err != nil {
+		r.deviceID = ""
+		r.signer = nil
+		return err
+	}
+	return nil
+}
+
+func (r *prekeyRuntime) ensureLocalDevice() error {
+	if r == nil || r.planner == nil || r.devices == nil || r.suite == nil || r.signer == nil || r.deviceID == "" {
+		return errors.New("local device prekeys are not configured")
+	}
+	now := r.planner.now().Truncate(time.Second)
+	collection, found, err := r.planner.contributions.CurrentPrekeyCollection(r.planner.delegation, now)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("no current prekey generation")
+	}
+	planned := false
+	for _, deviceID := range collection.Plan.DeviceIDs {
+		if deviceID == r.deviceID {
+			planned = true
+			break
+		}
+	}
+	if !planned {
+		return errors.New("configured device is absent from the prekey generation")
+	}
+	prekey, _, err := r.devices.EnsureDevicePrekey(
+		r.planner.delegation, r.signer, r.suite, r.deviceID,
+		eventlog.DevicePrekeyPlan{
+			IssuedAt:        time.Unix(int64(collection.Plan.IssuedAtUnix), 0),
+			ExpiresAt:       time.Unix(int64(collection.Plan.ExpiresAtUnix), 0),
+			ReplenishBefore: r.planner.config.ReplenishBefore(),
+		}, now,
+	)
+	if err != nil {
+		return err
+	}
+	collection, _, err = r.planner.contributions.AddPrekeyContribution(r.planner.delegation, prekey.Bundle, now)
+	if err != nil || !collection.Complete {
+		return err
+	}
+	_, _, err = r.planner.contributions.FinalizePrekeyCollection(r.planner.delegation, r.planner.publications, now)
+	return err
+}
+
+func (r *prekeyRuntime) maintainLocalDevice() error {
+	if err := r.planner.Ensure(); err != nil {
+		return err
+	}
+	if r.signer == nil {
+		return nil
+	}
+	return r.ensureLocalDevice()
+}
+
+func (r *prekeyRuntime) runPlanner(ctx context.Context, failed func(error)) {
+	ticker := time.NewTicker(r.planner.config.CheckInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.maintainLocalDevice(); err != nil && failed != nil {
+				failed(err)
+			}
+		}
+	}
 }
 
 func (r *prekeyRuntime) publishCurrent(ctx context.Context) error {
@@ -83,6 +173,10 @@ func newPrekeyRuntime(config Config, delegation identity.Delegation, journal *ev
 	if err != nil {
 		return nil, err
 	}
+	devices, err := journal.OpenDevicePrekeys()
+	if err != nil {
+		return nil, err
+	}
 	planner := &prekeyPlanner{
 		config: config.Publication, delegation: delegation, contributions: contributions,
 		publications: publications, now: now,
@@ -94,7 +188,10 @@ func newPrekeyRuntime(config Config, delegation identity.Delegation, journal *ev
 	if err := planner.Ensure(); err != nil {
 		return nil, errors.New("plan public prekey generation: " + err.Error())
 	}
-	return &prekeyRuntime{server: server, planner: planner}, nil
+	return &prekeyRuntime{
+		server: server, planner: planner, devices: devices,
+		suite: e2ee.NewDefaultSuite(), deviceID: config.DeviceID,
+	}, nil
 }
 
 // Ensure repairs a complete-but-unfinalized generation and rotates only when

@@ -124,6 +124,13 @@ func TestRefreshVerifiesAndCommitsTheWholeChain(t *testing.T) {
 	if result.FinalizedCheckpoint != 100 {
 		t.Fatalf("finalized checkpoint=%d want=100", result.FinalizedCheckpoint)
 	}
+	if len(result.Bundles) != 1 || result.Bundles[0].DeviceID != source.bundles[0].DeviceID {
+		t.Fatalf("verified bundles were not retained: %+v", result.Bundles)
+	}
+	result.Bundles[0].Material[0] ^= 0xff
+	if result.Bundles[0].Material[0] == source.bundles[0].Material[0] {
+		t.Fatal("refresh result aliases source-owned prekey bytes")
+	}
 	want := []RefreshStage{StageDelegation, StagePolicy, StageLocator, StageDescriptor, StagePrekeys}
 	if len(source.calls) != len(want) {
 		t.Fatalf("calls=%v", source.calls)

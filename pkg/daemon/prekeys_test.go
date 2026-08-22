@@ -129,6 +129,53 @@ func TestPrekeyPlannerFinalizesThenRotatesWithoutPrivateMaterial(t *testing.T) {
 	}
 }
 
+func TestPrekeyRuntimeOwnsConfiguredDeviceBootstrapMaterial(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	config := testConfig(t)
+	delegation, key := publicationFixture(t, &config, now)
+	journal, err := eventlog.Open(config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	clock := now
+	runtime, err := newPrekeyRuntime(config, delegation, journal, func() time.Time { return clock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.configureLocalDevice(config.DeviceID, key); err != nil {
+		t.Fatalf("configure local device: %v", err)
+	}
+	collection, found, err := runtime.planner.contributions.CurrentPrekeyCollection(delegation, clock)
+	if err != nil || !found || !collection.Complete || collection.FinalizedSetDigest == "" ||
+		len(collection.Contributions) != 1 {
+		t.Fatalf("local contribution was not finalized: found=%v collection=%+v err=%v", found, collection, err)
+	}
+	digest, err := e2ee.BundleDigest(collection.Contributions[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	private, err := runtime.devices.DevicePrekeyPrivate(
+		delegation.EndpointID, config.DeviceID, digest, clock,
+	)
+	if err != nil || len(private) == 0 {
+		t.Fatalf("private answering material is unavailable: bytes=%d err=%v", len(private), err)
+	}
+	for index := range private {
+		private[index] = 0
+	}
+
+	clock = time.Unix(int64(collection.Plan.ExpiresAtUnix)-30, 0)
+	if err := runtime.maintainLocalDevice(); err != nil {
+		t.Fatalf("rotate local device: %v", err)
+	}
+	rotated, found, err := runtime.planner.contributions.CurrentPrekeyCollection(delegation, clock)
+	if err != nil || !found || !rotated.Complete || rotated.FinalizedSetDigest == "" ||
+		rotated.Plan.IssuedAtUnix <= collection.Plan.IssuedAtUnix {
+		t.Fatalf("rotated local contribution is incomplete: found=%v collection=%+v err=%v", found, rotated, err)
+	}
+}
+
 func TestPrekeyPlannerPreservesLivePartialAndReplacesItOnlyAfterExpiry(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	config := testConfig(t)

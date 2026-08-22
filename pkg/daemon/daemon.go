@@ -384,6 +384,11 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 			return nil, errors.New("configure public generation publisher: " + err.Error())
 		}
 		prekeys.publisher = &owned
+		if err := prekeys.configureLocalDevice(config.DeviceID, owned.Signer); err != nil {
+			_ = discovery.Close()
+			_ = journal.Close()
+			return nil, errors.New("configure local device prekeys: " + err.Error())
+		}
 	}
 	instance.prekeys = prekeys
 
@@ -497,7 +502,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}()
 		go func() {
 			defer group.Done()
-			d.prekeys.planner.Run(ctx, func(err error) { d.report("plan prekeys", err) })
+			d.prekeys.runPlanner(ctx, func(err error) { d.report("plan prekeys", err) })
 		}()
 		if d.prekeys.publisher != nil {
 			group.Add(1)

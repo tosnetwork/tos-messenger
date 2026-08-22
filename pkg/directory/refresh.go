@@ -42,9 +42,13 @@ const (
 
 // RefreshResult is the verified snapshot installed by one refresh.
 type RefreshResult struct {
-	Delegation          identity.Delegation
-	Descriptor          Descriptor
-	Locator             Locator
+	Delegation identity.Delegation
+	Descriptor Descriptor
+	Locator    Locator
+	// Bundles are the exact public device prekeys that passed delegation,
+	// descriptor-commitment and durable succession verification. Session
+	// bootstrap must consume these bytes instead of fetching an unbound copy.
+	Bundles             []e2ee.Bundle
 	Succession          e2ee.Succession
 	FinalizedCheckpoint uint64
 	RefreshedAt         time.Time
@@ -145,8 +149,32 @@ func (r Refresher) Refresh(ctx context.Context, agentID string) (RefreshResult, 
 	if err != nil {
 		return RefreshResult{}, &RefreshError{Stage: StagePrekeys, Err: err}
 	}
-	return RefreshResult{Delegation: delegation, Descriptor: descriptor, Locator: locator,
+	return RefreshResult{Delegation: delegation, Descriptor: descriptor, Locator: locator, Bundles: cloneBundles(bundles),
 		Succession: succession, FinalizedCheckpoint: finalizedCheckpoint, RefreshedAt: now}, nil
+}
+
+func cloneBundles(values []e2ee.Bundle) []e2ee.Bundle {
+	cloned := make([]e2ee.Bundle, len(values))
+	for index, value := range values {
+		cloned[index] = value
+		if value.Network != nil {
+			cloned[index].Network = &nativev1.NetworkDomain{
+				NetworkId: value.Network.NetworkId, GenesisRootHash: value.Network.GenesisRootHash,
+				GenesisFileHash: value.Network.GenesisFileHash,
+			}
+		}
+		cloned[index].Material = append([]byte(nil), value.Material...)
+		cloned[index].EndpointSignature = append([]byte(nil), value.EndpointSignature...)
+	}
+	return cloned
+}
+
+func cloneRefreshResult(value RefreshResult) RefreshResult {
+	value.Bundles = cloneBundles(value.Bundles)
+	value.Succession.Accepted.DeviceIDs = append([]string(nil), value.Succession.Accepted.DeviceIDs...)
+	value.Succession.Accepted.BundleDigests = append([]string(nil), value.Succession.Accepted.BundleDigests...)
+	value.Succession.Removed = append([]string(nil), value.Succession.Removed...)
+	return value
 }
 
 // RefreshAt returns a conservative refresh deadline. The caller refreshes

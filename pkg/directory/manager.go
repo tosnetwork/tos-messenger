@@ -44,11 +44,11 @@ func (m *Manager) Ensure(ctx context.Context, agentID string) (RefreshResult, er
 	entry, found := m.entries[agentID]
 	m.mutex.RUnlock()
 	if found && now.Before(entry.refreshAt) {
-		return entry.result, nil
+		return cloneRefreshResult(entry.result), nil
 	}
 	result, err := m.Refresher.Refresh(ctx, agentID)
 	if m.Observer != nil {
-		m.Observer.RefreshCompleted(agentID, result, err)
+		m.Observer.RefreshCompleted(agentID, cloneRefreshResult(result), err)
 	}
 	if err != nil {
 		return RefreshResult{}, err
@@ -61,9 +61,9 @@ func (m *Manager) Ensure(ctx context.Context, agentID string) (RefreshResult, er
 	if m.entries == nil {
 		m.entries = make(map[string]managedEntry)
 	}
-	m.entries[agentID] = managedEntry{result: result, refreshAt: refreshAt}
+	m.entries[agentID] = managedEntry{result: cloneRefreshResult(result), refreshAt: refreshAt}
 	m.mutex.Unlock()
-	return result, nil
+	return cloneRefreshResult(result), nil
 }
 
 // Invalidate forces finalized authority and every signed cache object to be
