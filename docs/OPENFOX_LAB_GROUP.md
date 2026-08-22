@@ -93,3 +93,7 @@ room ID, all three members, and the three-line transcript. Its `mode` is
 `local-unix-openmls-ciphertext-relay`, making both encryption and the
 non-production boundary machine-visible. Direct legacy Hub connections remain
 available only as the explicitly marked `local-unix-plaintext-lab` fixture.
+
+The latest-main seven-process AgentLoop restart run and exact artifact/Event
+identities are recorded in
+[`evidence/OPENFOX_GROUP_LATEST_MAIN_2026-08-22.md`](evidence/OPENFOX_GROUP_LATEST_MAIN_2026-08-22.md).
