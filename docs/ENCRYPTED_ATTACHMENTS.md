@@ -7,7 +7,7 @@ boundary. `OpenForAgent` adds an explicit Linux content-admission boundary and
 `tos-attachment-text-scanner` supplies a minimal reference UTF-8 inspector;
 `tos-attachment-clamav-scanner` supplies a production-candidate adapter for a
 pinned ClamScan engine and pinned official CVD/CLD snapshots.
-`pkg/attachmentadmission`, daemon config v8 and local API v6 keep the Reference,
+`pkg/attachmentadmission`, daemon config v9 and local API v6 keep the Reference,
 attachment key and fetch capability out of OpenFox while releasing admitted
 `text/plain` plus exact scanner evidence under the Event's application lease.
 This does not select a message route, paid retention profile, production

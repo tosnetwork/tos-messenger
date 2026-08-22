@@ -113,6 +113,19 @@ type packetReceiver struct {
 	fail  bool
 }
 
+type testProtocolReceiver struct {
+	events []envelope.Event
+	fail   bool
+}
+
+func (r *testProtocolReceiver) Receive(_ context.Context, event envelope.Event) error {
+	r.events = append(r.events, event)
+	if r.fail {
+		return errors.New("protocol consumer unavailable")
+	}
+	return nil
+}
+
 func (r *packetReceiver) Receive(context.Context, agentpacket.Packet) error {
 	r.calls++
 	if r.fail {
@@ -606,6 +619,24 @@ func TestConfigurationMustBeStated(t *testing.T) {
 			c.AgentPacketReceiverSocket = filepath.Join(filepath.Dir(c.SocketPath), "provider.sock")
 			c.AgentPacketReceiverTimeoutSeconds = 301
 		},
+		"protocol timeout without socket": func(c *Config) { c.ProtocolReceiverTimeoutSeconds = 30 },
+		"relative A2A receiver":           func(c *Config) { c.A2AReceiverSocket = "run/a2a.sock" },
+		"protocol receiver in state": func(c *Config) {
+			c.MCPReceiverSocket = filepath.Join(c.StateDir, "mcp.sock")
+		},
+		"protocol receiver shares runtime": func(c *Config) { c.A2AReceiverSocket = c.SocketPath },
+		"protocol receivers share socket": func(c *Config) {
+			c.A2AReceiverSocket = filepath.Join(filepath.Dir(c.SocketPath), "protocol.sock")
+			c.MCPReceiverSocket = c.A2AReceiverSocket
+		},
+		"protocol receiver shares packet socket": func(c *Config) {
+			c.AgentPacketReceiverSocket = filepath.Join(filepath.Dir(c.SocketPath), "protocol.sock")
+			c.A2AReceiverSocket = c.AgentPacketReceiverSocket
+		},
+		"protocol receiver timeout too long": func(c *Config) {
+			c.MCPReceiverSocket = filepath.Join(filepath.Dir(c.SocketPath), "mcp.sock")
+			c.ProtocolReceiverTimeoutSeconds = 301
+		},
 		"fast sweep":      func(c *Config) { c.SweepIntervalSeconds = 0; c.SweepIntervalSeconds = 0 },
 		"short retention": func(c *Config) { c.RetentionSeconds = 60 },
 	}
@@ -909,6 +940,84 @@ func TestAgentPacketWorkerRetriesProviderAndCompletesDurably(t *testing.T) {
 	restarted.sweepAgentPackets(context.Background())
 	if afterRestart.calls != 0 {
 		t.Fatal("completed Agent Packet reached the provider again after restart")
+	}
+}
+
+func TestProtocolWorkerSeparatesProfilesRetriesAndCompletesDurably(t *testing.T) {
+	config := testConfig(t)
+	clock := time.Unix(1_900_000_000, 0)
+	journal, err := eventlog.Open(config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2a := &testProtocolReceiver{fail: true}
+	mcp := &testProtocolReceiver{}
+	accept := func(kind string, body payload.Payload, created uint64) envelope.Event {
+		t.Helper()
+		content, encodeErr := payload.Encode(body)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		event, eventErr := envelope.NewEvent(envelope.Event{
+			Network: config.Network(), ConversationID: "conv_" + strings.Repeat("8", 64),
+			SenderAgentID: "agent_" + strings.Repeat("1", 64), SenderEndpointID: "mep_" + strings.Repeat("6", 64),
+			SenderDeviceID: "dev_" + strings.Repeat("7", 64), CreatedAtUnix: created, Kind: kind, Content: content,
+		})
+		if eventErr != nil {
+			t.Fatal(eventErr)
+		}
+		wire, wireErr := envelope.EncodeEventJSON(event)
+		if wireErr != nil {
+			t.Fatal(wireErr)
+		}
+		if _, _, acceptErr := journal.Accept(eventlog.Entry{
+			EventID: event.EventID, SenderEndpointID: event.SenderEndpointID, ConversationID: event.ConversationID,
+			Payload: wire, Admission: eventlog.AdmissionAdmitted, ReceivedAtUnix: uint64(clock.Unix()),
+		}); acceptErr != nil {
+			t.Fatal(acceptErr)
+		}
+		return event
+	}
+	a2aEvent := accept("a2a.message", payload.A2AMessage{Foreign: payload.Foreign{
+		Protocol: "a2a", Version: "1", Body: []byte(`{"message":"work"}`),
+	}}, uint64(clock.Unix()))
+	mcpEvent := accept("mcp.call", payload.MCPCall{Foreign: payload.Foreign{
+		Protocol: "mcp", Version: "1", Body: []byte(`{"method":"read"}`),
+	}}, uint64(clock.Unix()+1))
+	reported := &recorder{}
+	daemon := &Daemon{config: config, journal: journal, a2aReceiver: a2a, mcpReceiver: mcp,
+		observer: reported, now: func() time.Time { return clock }}
+	daemon.sweepProtocolEvents(context.Background())
+	if len(a2a.events) != 1 || a2a.events[0].EventID != a2aEvent.EventID || len(mcp.events) != 1 || mcp.events[0].EventID != mcpEvent.EventID {
+		t.Fatalf("protocol receivers crossed or missed events: a2a=%v mcp=%v", a2a.events, mcp.events)
+	}
+	if len(reported.failures) != 1 {
+		t.Fatalf("A2A receiver failure was not reported: %v", reported.failures)
+	}
+	a2a.fail = false
+	clock = clock.Add(config.ProtocolReceiverTimeout() + 6*time.Second)
+	daemon.sweepProtocolEvents(context.Background())
+	if len(a2a.events) != 2 || len(mcp.events) != 1 {
+		t.Fatalf("retry or at-most-once completion failed: a2a=%d mcp=%d", len(a2a.events), len(mcp.events))
+	}
+	if pending, listErr := journal.ListPending(clock, 0); listErr != nil || len(pending) != 0 {
+		t.Fatalf("completed protocol events remained pending: %+v err=%v", pending, listErr)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := eventlog.Open(config.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restartedA2A := &testProtocolReceiver{}
+	restartedMCP := &testProtocolReceiver{}
+	restarted := &Daemon{config: config, journal: reopened, a2aReceiver: restartedA2A,
+		mcpReceiver: restartedMCP, now: func() time.Time { return clock }}
+	restarted.sweepProtocolEvents(context.Background())
+	if len(restartedA2A.events) != 0 || len(restartedMCP.events) != 0 {
+		t.Fatal("completed protocol event reached a consumer after restart")
 	}
 }
 

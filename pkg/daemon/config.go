@@ -35,7 +35,7 @@ import (
 )
 
 // ConfigSchema is the strict schema of a daemon configuration.
-const ConfigSchema = "tos.messaging.daemon-config.v8"
+const ConfigSchema = "tos.messaging.daemon-config.v9"
 
 // PublicationMode names the route-independent public material maintained by
 // this installation. It does not select an HTTPS, DHT, or message transport.
@@ -181,6 +181,13 @@ type Config struct {
 	// they are never exposed through the general runtime inbox.
 	AgentPacketReceiverSocket         string `json:"agent_packet_receiver_socket,omitempty"`
 	AgentPacketReceiverTimeoutSeconds uint64 `json:"agent_packet_receiver_timeout_seconds,omitempty"`
+
+	// A2AReceiverSocket and MCPReceiverSocket are separate fail-closed local
+	// consumption boundaries. Foreign protocol events never fall through to
+	// the general model inbox, including when these receivers are absent.
+	A2AReceiverSocket              string `json:"a2a_receiver_socket,omitempty"`
+	MCPReceiverSocket              string `json:"mcp_receiver_socket,omitempty"`
+	ProtocolReceiverTimeoutSeconds uint64 `json:"protocol_receiver_timeout_seconds,omitempty"`
 
 	// AttachmentAdmission enables daemon-owned fetch, AEAD opening and pinned
 	// scanning. When absent, artifact.encrypted stays reserved and no secret
@@ -670,6 +677,13 @@ func (c Config) AgentPacketReceiverTimeout() time.Duration {
 	return time.Duration(c.AgentPacketReceiverTimeoutSeconds) * time.Second
 }
 
+func (c Config) ProtocolReceiverTimeout() time.Duration {
+	if c.ProtocolReceiverTimeoutSeconds == 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.ProtocolReceiverTimeoutSeconds) * time.Second
+}
+
 // Validate enforces what must be true before anything starts.
 func (c Config) Validate() error {
 	if c.Schema != ConfigSchema {
@@ -772,6 +786,34 @@ func (c Config) Validate() error {
 		}
 		if timeout := c.AgentPacketReceiverTimeout(); timeout < time.Second || timeout > 5*time.Minute {
 			return errors.New("Agent Packet receiver timeout is outside 1s..5m")
+		}
+	}
+	protocolSockets := []string{c.A2AReceiverSocket, c.MCPReceiverSocket}
+	if c.A2AReceiverSocket == "" && c.MCPReceiverSocket == "" {
+		if c.ProtocolReceiverTimeoutSeconds != 0 {
+			return errors.New("protocol receiver timeout requires a receiver socket")
+		}
+	} else {
+		for _, socket := range protocolSockets {
+			if socket == "" {
+				continue
+			}
+			if !filepath.IsAbs(socket) || filepath.Clean(socket) != socket {
+				return errors.New("protocol receiver socket must be an absolute, clean path")
+			}
+			if socket == c.SocketPath || socket == c.OwnerSocketPath || socket == c.AgentPacketReceiverSocket ||
+				(c.Publication.DeviceSocketPath != "" && socket == c.Publication.DeviceSocketPath) {
+				return errors.New("protocol receiver socket must be independent")
+			}
+			if pathWithin(socket, c.StateDir) {
+				return errors.New("protocol receiver socket must not live inside state_dir")
+			}
+		}
+		if c.A2AReceiverSocket != "" && c.A2AReceiverSocket == c.MCPReceiverSocket {
+			return errors.New("A2A and MCP receiver sockets must be different")
+		}
+		if timeout := c.ProtocolReceiverTimeout(); timeout < time.Second || timeout > 5*time.Minute {
+			return errors.New("protocol receiver timeout is outside 1s..5m")
 		}
 	}
 	if c.AttachmentAdmission != nil {

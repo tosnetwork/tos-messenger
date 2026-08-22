@@ -400,7 +400,8 @@ func (s *Server) pending(request Request, now time.Time) Response {
 
 func (s *Server) claim(request Request, now time.Time) Response {
 	record, err := s.config.Journal.ClaimForApplicationExceptKinds(request.EventID, request.LeaseID, now,
-		time.Duration(request.LeaseSeconds)*time.Second, []string{"agent.packet", "device.history.segment", "artifact.encrypted"})
+		time.Duration(request.LeaseSeconds)*time.Second,
+		[]string{"agent.packet", "device.history.segment", "artifact.encrypted", "a2a.message", "mcp.call", "mcp.result"})
 	if err != nil {
 		return refuse(claimCode(err), err)
 	}
@@ -412,7 +413,8 @@ func (s *Server) claim(request Request, now time.Time) Response {
 }
 
 func daemonApplicationKind(kind string) bool {
-	return kind == "agent.packet" || kind == "device.history.segment" || kind == "artifact.encrypted"
+	return kind == "agent.packet" || kind == "device.history.segment" || kind == "artifact.encrypted" ||
+		kind == "a2a.message" || kind == "mcp.call" || kind == "mcp.result"
 }
 
 func (s *Server) pendingAttachments(request Request, now time.Time) Response {

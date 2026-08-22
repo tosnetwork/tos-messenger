@@ -1,5 +1,5 @@
 {
-  "schema": "tos.messaging.daemon-config.v8",
+  "schema": "tos.messaging.daemon-config.v9",
 
   "state_dir": "/var/lib/tos-messengerd",
   "socket_path": "/run/tos-messengerd/runtime.sock",
@@ -74,6 +74,10 @@
 
   "agent_packet_receiver_socket": "/run/openfox/tos-service-provider.sock",
   "agent_packet_receiver_timeout_seconds": 30,
+
+  "a2a_receiver_socket": "/run/openfox/a2a-events.sock",
+  "mcp_receiver_socket": "/run/openfox/mcp-events.sock",
+  "protocol_receiver_timeout_seconds": 30,
 
   "sweep_interval_seconds": 5,
   "maintenance_interval_seconds": 3600

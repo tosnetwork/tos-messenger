@@ -194,14 +194,19 @@ nobody made:
   admitted `agent.packet` Events are re-verified against finalized Agent state,
   durably nonce-claimed, and sent to the independently verifying OpenFox
   provider. They are excluded from the general runtime inbox, so packet bytes
-  cannot become model instructions by taking the ordinary message path.
+  cannot become model instructions by taking the ordinary message path; and
+- optional, independent owner-private **A2A and MCP receiver sockets**. Their
+  protocol Events are always excluded from general runtime listing and claim,
+  even when no receiver exists. Configured receivers get the complete
+  canonical Event over fixed bounded endpoints with durable retry/completion;
+  see [`FOREIGN_PROTOCOL_BRIDGE.md`](FOREIGN_PROTOCOL_BRIDGE.md).
 
 An unknown key in the configuration is refused rather than ignored. A
 misspelled setting that is silently dropped is a setting an operator believes
 is in force.
 
 `docs/daemon-config.example.json` is a complete file with placeholder values.
-Finalized Quote verification is retained in schema `tos.messaging.daemon-config.v8`;
+Finalized Quote verification is retained in schema `tos.messaging.daemon-config.v9`;
 older files are rejected instead of silently disabling discovery or public
 generation planning, applying an inbox policy the endpoint never committed, or
 leaving the native buyer without its finalized-Quote check.
@@ -297,7 +302,7 @@ and launcher files must be regular, executable, non-writable and not symlinks.
 
 `tos-attachment-text-scanner` is a parser-free reference inspector, not a
 production malware product. It refuses every non-text type. To enable the
-daemon-owned OpenFox path, add the following to daemon config v8 after replacing
+daemon-owned OpenFox path, add the following to daemon config v9 after replacing
 all digest placeholders with the reviewed lowercase `sha256:` values:
 
 ```json

@@ -395,6 +395,30 @@ func TestRuntimeCannotListOrClaimDaemonOwnedTypedAdapters(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.receive(t, historyEvent)
+	reserved := []envelope.Event{packetEvent, historyEvent}
+	for index, foreign := range []struct {
+		kind string
+		body payload.Payload
+	}{
+		{"a2a.message", payload.A2AMessage{Foreign: payload.Foreign{Protocol: "a2a", Version: "1", Body: []byte("a2a")}}},
+		{"mcp.call", payload.MCPCall{Foreign: payload.Foreign{Protocol: "mcp", Version: "1", Body: []byte("call")}}},
+		{"mcp.result", payload.MCPResult{Foreign: payload.Foreign{Protocol: "mcp", Version: "1", Body: []byte("result")}}},
+	} {
+		content, encodeErr := payload.Encode(foreign.body)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		event, eventErr := envelope.NewEvent(envelope.Event{
+			Network: testNetwork(), ConversationID: convoID,
+			SenderAgentID: senderID, SenderEndpointID: senderMEP, SenderDeviceID: senderDev,
+			CreatedAtUnix: baseUnix + uint64(index) + 2, Kind: foreign.kind, Content: content,
+		})
+		if eventErr != nil {
+			t.Fatal(eventErr)
+		}
+		h.receive(t, event)
+		reserved = append(reserved, event)
+	}
 	textEvent := h.event(t, "still visible")
 	h.receive(t, textEvent)
 
@@ -402,15 +426,12 @@ func TestRuntimeCannotListOrClaimDaemonOwnedTypedAdapters(t *testing.T) {
 	if !listing.OK || len(listing.Events) != 1 || listing.Events[0].EventID != textEvent.EventID {
 		t.Fatalf("typed packet hid or entered the runtime listing: %+v", listing)
 	}
-	claimed := h.call(t, Request{Op: OpClaim, EventID: packetEvent.EventID,
-		LeaseID: leaseID, LeaseSeconds: 60})
-	if claimed.OK || claimed.Code != fault.CodeClassNotDelegated {
-		t.Fatalf("runtime claimed daemon-owned Agent Packet: %+v", claimed)
-	}
-	claimed = h.call(t, Request{Op: OpClaim, EventID: historyEvent.EventID,
-		LeaseID: "lease_" + strings.Repeat("7", 64), LeaseSeconds: 60})
-	if claimed.OK || claimed.Code != fault.CodeClassNotDelegated {
-		t.Fatalf("runtime claimed daemon-owned history segment: %+v", claimed)
+	for index, event := range reserved {
+		claimed := h.call(t, Request{Op: OpClaim, EventID: event.EventID,
+			LeaseID: "lease_" + strings.Repeat(string(rune('5'+index)), 64), LeaseSeconds: 60})
+		if claimed.OK || claimed.Code != fault.CodeClassNotDelegated {
+			t.Fatalf("runtime claimed daemon-owned %s: %+v", event.Kind, claimed)
+		}
 	}
 }
 
