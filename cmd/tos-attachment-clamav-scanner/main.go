@@ -20,7 +20,10 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/attachments"
 )
 
-const scannerResourceRoot = "/scanner-resources"
+const (
+	scannerResourceRoot    = "/scanner-resources"
+	scanExpansionAllowance = 1 << 20
+)
 
 type stringList []string
 
@@ -49,11 +52,15 @@ func run(arguments []string, output io.Writer, resourceRoot, requiredInput, adap
 	declared := flags.String("tos-declared-media-type", "", "declared attachment media type")
 	input := flags.String("tos-input", "", "sandboxed read-only input path")
 	engineName := flags.String("engine-resource", "", "pinned ClamScan resource name")
+	certificateName := flags.String("certificate-resource", "", "pinned CVD root certificate resource name")
 	var databases stringList
+	var signatures stringList
 	flags.Var(&databases, "database-resource", "pinned official CVD/CLD resource name")
+	flags.Var(&signatures, "signature-resource", "pinned external CVD signature resource name")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || *scannerID == "" || *declared == "" ||
 		*input != requiredInput || !validResourceName(*engineName) || !validDatabaseSet(databases) ||
-		resourceNamePresent(databases, *engineName) {
+		!validSignatureSet(signatures, databases) || !validCertificate(*certificateName, true) ||
+		!uniqueResourceNames(*engineName, []string{*certificateName}, databases, signatures) {
 		return errors.New("invalid ClamAV scanner invocation")
 	}
 	if !filepath.IsAbs(resourceRoot) || filepath.Clean(resourceRoot) != resourceRoot {
@@ -72,6 +79,10 @@ func run(arguments []string, output io.Writer, resourceRoot, requiredInput, adap
 	}
 
 	resources := append([]string{*engineName}, databases...)
+	resources = append(resources, signatures...)
+	if *certificateName != "" {
+		resources = append(resources, *certificateName)
+	}
 	evidence := make([]attachments.ScanResourceEvidence, 0, len(resources))
 	for _, name := range resources {
 		path := filepath.Join(resourceRoot, name)
@@ -84,9 +95,13 @@ func run(arguments []string, output io.Writer, resourceRoot, requiredInput, adap
 	sort.Slice(evidence, func(i, j int) bool { return evidence[i].Name < evidence[j].Name })
 
 	engine := filepath.Join(resourceRoot, *engineName)
-	engineArguments := []string{"--no-summary", "--quiet", "--official-db-only=yes",
-		"--alert-encrypted=yes", "--alert-broken=yes", "--alert-exceeds-max=yes", fmt.Sprintf("--max-filesize=%d", size),
-		fmt.Sprintf("--max-scansize=%d", size)}
+	engineArguments := []string{"--no-summary", "--quiet", "--official-db-only=yes", "--fips-limits",
+		"--alert-encrypted=yes", "--alert-broken=yes", "--alert-exceeds-max=yes",
+		fmt.Sprintf("--max-filesize=%d", size),
+		fmt.Sprintf("--max-scansize=%d", size+scanExpansionAllowance)}
+	if *certificateName != "" {
+		engineArguments = append(engineArguments, "--cvdcertsdir="+resourceRoot)
+	}
 	for _, name := range databases {
 		engineArguments = append(engineArguments, "--database="+filepath.Join(resourceRoot, name))
 	}
@@ -117,9 +132,25 @@ func run(arguments []string, output io.Writer, resourceRoot, requiredInput, adap
 	return encoder.Encode(verdict)
 }
 
-func resourceNamePresent(resources []string, name string) bool {
-	index := sort.SearchStrings(resources, name)
-	return index < len(resources) && resources[index] == name
+func validCertificate(name string, required bool) bool {
+	if !required {
+		return name == ""
+	}
+	return validResourceName(name) && strings.HasSuffix(name, ".crt")
+}
+
+func uniqueResourceNames(engine string, groups ...[]string) bool {
+	names := []string{engine}
+	for _, group := range groups {
+		names = append(names, group...)
+	}
+	sort.Strings(names)
+	for index := 1; index < len(names); index++ {
+		if names[index] == names[index-1] {
+			return false
+		}
+	}
+	return true
 }
 
 func validDatabaseSet(databases []string) bool {
@@ -146,6 +177,54 @@ func validDatabaseSet(databases []string) bool {
 		previous = name
 	}
 	return hasMain && hasDaily
+}
+
+func validSignatureSet(signatures, databases []string) bool {
+	if len(signatures) != len(databases) || !sort.StringsAreSorted(signatures) {
+		return false
+	}
+	databaseBases := make(map[string]struct{}, len(databases))
+	for _, name := range databases {
+		databaseBases[databaseBase(name)] = struct{}{}
+	}
+	previous := ""
+	for _, name := range signatures {
+		base, ok := signatureBase(name)
+		if !ok || name == previous {
+			return false
+		}
+		if _, exists := databaseBases[base]; !exists {
+			return false
+		}
+		delete(databaseBases, base)
+		previous = name
+	}
+	return len(databaseBases) == 0
+}
+
+func databaseBase(name string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(name, ".cvd"), ".cld")
+}
+
+func signatureBase(name string) (string, bool) {
+	if !validResourceName(name) || !strings.HasSuffix(name, ".cvd.sign") {
+		return "", false
+	}
+	stem := strings.TrimSuffix(name, ".cvd.sign")
+	separator := strings.LastIndexByte(stem, '-')
+	if separator < 1 || separator == len(stem)-1 {
+		return "", false
+	}
+	base, version := stem[:separator], stem[separator+1:]
+	if base != "main" && base != "daily" && base != "bytecode" {
+		return "", false
+	}
+	for _, character := range version {
+		if character < '0' || character > '9' {
+			return "", false
+		}
+	}
+	return base, true
 }
 
 func validResourceName(value string) bool {

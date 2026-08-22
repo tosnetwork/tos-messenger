@@ -197,16 +197,27 @@ exact ordered name/digest set. Individual resources are capped at 512 MiB,
 eight resources and 1 GiB total. Missing, writable-by-group/world, symlinked,
 oversized, reordered, substituted or unreported resources fail closed.
 
-`tos-attachment-clamav-scanner` requires one pinned ClamScan engine plus sorted
-official `main` and `daily` CVD/CLD snapshots, with optional `bytecode`. It
-invokes only those explicit databases with `--official-db-only=yes`, alerts on
-encrypted/broken input and any exceeded engine limit, and raises the engine's
-skip-as-clean byte ceilings to the exact authenticated input size. Exit 0 is allow, exit 1 is deny, and every
-other exit is an admission error. This follows ClamAV's documented one-shot
-model and signed CVD/CLD format, but remains a candidate until a supported
-engine patch, current FreshClam snapshot and representative hostile corpus run
-through this exact sandbox in release acceptance. EICAR alone is a plumbing
-check, not representative malware coverage.
+`tos-attachment-clamav-scanner` requires one pinned ClamScan engine, sorted
+official `main` and `daily` CVD/CLD snapshots (plus `bytecode` when enabled), a
+matching versioned external `.cvd.sign` for every database, and the pinned CVD
+root certificate. It invokes only those explicit databases with
+`--official-db-only=yes`, requires external-signature verification with
+`--fips-limits`, and points `--cvdcertsdir` only at the private pinned resource
+directory. Encrypted/broken input and every exceeded engine limit are alerts.
+`--max-filesize` is the exact authenticated input size; `--max-scansize` adds a
+fixed 1 MiB allowance for ClamAV's internal scan accounting while remaining
+bounded. Exit 0 is allow, exit 1 is deny, and every other exit is an admission
+error.
+
+Release acceptance on 2026-08-22 exercised this exact outer sandbox with
+ClamAV 1.5.3, `daily` version 28099 dated 2026-08-21, `main` version 63 and
+`bytecode` version 339. Three consecutive runs admitted inert text, denied a
+runtime-constructed EICAR input, and failed closed after independently
+corrupting either the daily external signature or the pinned root certificate.
+Those exact immutable files and their digests, rather than the mutable
+FreshClam directory, form the accepted snapshot. EICAR and signature-failure
+checks prove plumbing and supply-chain enforcement, not representative malware
+coverage; the approved hostile corpus remains open.
 
 The address-space ceiling bounds virtual mappings, while fixed `GOMEMLIMIT`
 and `GOMAXPROCS` values constrain the reference Go scanner. `RLIMIT_NPROC` is a
@@ -253,7 +264,7 @@ releasing plaintext; a separate host probe records exact memory, zero-swap and
 task ceilings from cgroup v2.
 Still open are an independently operated public-TLS deployment, measured
 interrupted wide-area transfer, independently audited retention behavior,
-a release-pinned supported ClamAV deployment and representative hostile corpus,
+a representative approved hostile corpus for the pinned ClamAV release,
 independent hard-isolation review/evidence, non-text product policy, and
 commercial attachment service terms. A content-addressed object may have
 been copied, so no storage API promises cryptographic erasure it cannot prove.

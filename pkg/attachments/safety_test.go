@@ -351,8 +351,14 @@ func TestClamAVOfficialResourcesLive(t *testing.T) {
 	engine := os.Getenv("TOS_CLAMSCAN_BIN")
 	daily := os.Getenv("TOS_CLAMAV_DAILY_DB")
 	mainDB := os.Getenv("TOS_CLAMAV_MAIN_DB")
-	if adapter == "" || engine == "" || daily == "" || mainDB == "" {
-		t.Skip("set the ClamAV adapter, engine, daily and main database paths for live acceptance")
+	bytecode := os.Getenv("TOS_CLAMAV_BYTECODE_DB")
+	dailySignature := os.Getenv("TOS_CLAMAV_DAILY_DB_SIGNATURE")
+	mainSignature := os.Getenv("TOS_CLAMAV_MAIN_DB_SIGNATURE")
+	bytecodeSignature := os.Getenv("TOS_CLAMAV_BYTECODE_DB_SIGNATURE")
+	certificate := os.Getenv("TOS_CLAMAV_CVD_CERTIFICATE")
+	if adapter == "" || engine == "" || daily == "" || mainDB == "" || bytecode == "" ||
+		dailySignature == "" || mainSignature == "" || bytecodeSignature == "" || certificate == "" {
+		t.Skip("set the ClamAV adapter, engine, databases, signatures and CVD certificate paths for live acceptance")
 	}
 	if runtime.GOOS != "linux" {
 		t.Skip("ClamAV scanner sandbox is Linux-only")
@@ -362,7 +368,10 @@ func TestClamAVOfficialResourcesLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	resources := []ScannerResource{{Name: "clamscan", Path: engine, Executable: true},
-		{Name: filepath.Base(daily), Path: daily}, {Name: filepath.Base(mainDB), Path: mainDB}}
+		{Name: filepath.Base(bytecode), Path: bytecode}, {Name: filepath.Base(daily), Path: daily},
+		{Name: filepath.Base(mainDB), Path: mainDB}, {Name: filepath.Base(bytecodeSignature), Path: bytecodeSignature},
+		{Name: filepath.Base(dailySignature), Path: dailySignature},
+		{Name: filepath.Base(mainSignature), Path: mainSignature}, {Name: filepath.Base(certificate), Path: certificate}}
 	for index := range resources {
 		resources[index].Digest, err = ScannerResourceDigest(resources[index].Path, resources[index].Executable)
 		if err != nil {
@@ -381,11 +390,14 @@ func TestClamAVOfficialResourcesLive(t *testing.T) {
 	policy := AgentContentPolicy{MaxPlaintextBytes: 1 << 20,
 		AllowedMediaTypes: map[string]struct{}{"text/plain": {}},
 		Scanners: []ScannerSpec{{ID: "clamav-official", Executable: adapter, ExecutableDigest: adapterDigest,
-			Args: []string{"--engine-resource", "clamscan", "--database-resource", filepath.Base(daily),
-				"--database-resource", filepath.Base(mainDB)}, Resources: resources}},
+			Args: []string{"--engine-resource", "clamscan", "--certificate-resource", filepath.Base(certificate),
+				"--database-resource", filepath.Base(bytecode),
+				"--database-resource", filepath.Base(daily), "--database-resource", filepath.Base(mainDB),
+				"--signature-resource", filepath.Base(bytecodeSignature), "--signature-resource", filepath.Base(dailySignature),
+				"--signature-resource", filepath.Base(mainSignature)}, Resources: resources}},
 		BubblewrapDigest: bubblewrapDigest, PrlimitDigest: prlimitDigest, ScannerTimeout: 2 * time.Minute,
 		AddressSpaceBytes: 8 << 30, CPUSeconds: 120, MaxProcesses: 4096}
-	open := func(body []byte) (AdmittedAttachment, error) {
+	openWithPolicy := func(policy AgentContentPolicy, body []byte) (AdmittedAttachment, error) {
 		ref, chunks, err := Seal(bytes.NewReader(bytes.Repeat([]byte{0x7a}, KeyBytes+AttachmentIDBytes+NoncePrefixBytes)),
 			body, Metadata{Filename: "sample.txt", MediaType: "text/plain", PlaintextDigest: canon.Digest(body),
 				ExpiresAtUnix: 1_900_003_600})
@@ -395,7 +407,9 @@ func TestClamAVOfficialResourcesLive(t *testing.T) {
 		return OpenForAgent(context.Background(), ref, chunks, Policy{MaxPlaintextBytes: 1 << 20}, policy,
 			time.Unix(1_900_000_000, 0))
 	}
-	if admitted, err := open([]byte("known inert ClamAV acceptance text\n")); err != nil || admitted.Plaintext == nil {
+	open := func(body []byte) (AdmittedAttachment, error) { return openWithPolicy(policy, body) }
+	clean := []byte("known inert ClamAV acceptance text\n")
+	if admitted, err := open(clean); err != nil || admitted.Plaintext == nil {
 		t.Fatalf("official ClamAV resources refused inert text: %+v err=%v", admitted, err)
 	}
 	// Keep the standard test signature out of the repository and test binary as
@@ -404,6 +418,35 @@ func TestClamAVOfficialResourcesLive(t *testing.T) {
 		[]byte("ANTIVIRUS-TEST-FILE!$H+H*")...)
 	if admitted, err := open(eicar); err == nil || admitted.Plaintext != nil {
 		t.Fatalf("official ClamAV resources released EICAR: %+v err=%v", admitted, err)
+	}
+	for _, targetName := range []string{filepath.Base(dailySignature), filepath.Base(certificate)} {
+		t.Run("reject-corrupt-"+targetName, func(t *testing.T) {
+			corrupt := policy
+			corrupt.Scanners = append([]ScannerSpec(nil), policy.Scanners...)
+			corrupt.Scanners[0].Resources = append([]ScannerResource(nil), resources...)
+			for index, resource := range corrupt.Scanners[0].Resources {
+				if resource.Name != targetName {
+					continue
+				}
+				body, err := os.ReadFile(resource.Path)
+				if err != nil || len(body) == 0 {
+					t.Fatalf("read resource selected for corruption: %v", err)
+				}
+				body[0] ^= 0xff
+				path := filepath.Join(t.TempDir(), resource.Name)
+				if err := os.WriteFile(path, body, 0o400); err != nil {
+					t.Fatal(err)
+				}
+				corrupt.Scanners[0].Resources[index].Path = path
+				corrupt.Scanners[0].Resources[index].Digest, err = ScannerResourceDigest(path, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if admitted, err := openWithPolicy(corrupt, clean); err == nil || admitted.Plaintext != nil {
+				t.Fatalf("corrupt signed ClamAV resource released plaintext: %+v err=%v", admitted, err)
+			}
+		})
 	}
 }
 
