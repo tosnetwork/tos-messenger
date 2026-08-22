@@ -238,7 +238,11 @@ evidence. `verify` independently checks both fixed public keys, both artifact
 digests, every approved sample/result and the report signature. This records
 who approved which bytes and who ran them; it cannot prove that the parties are
 organizationally independent or that the selected corpus is representative.
-No qualifying externally approved private-corpus report has yet been returned.
+The same-host plumbing run recorded in
+[`ATTACHMENT_CORPUS_PLUMBING_2026-08-22.md`](evidence/ATTACHMENT_CORPUS_PLUMBING_2026-08-22.md)
+passed clean/EICAR, missing-resource and runner-key-substitution cases. Its
+scope explicitly disclaims external approval and representative coverage. No
+qualifying externally approved private-corpus report has yet been returned.
 
 The address-space ceiling bounds virtual mappings, while fixed `GOMEMLIMIT`
 and `GOMAXPROCS` values constrain the reference Go scanner. `RLIMIT_NPROC` is a
