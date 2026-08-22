@@ -33,7 +33,12 @@ import (
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema = "tos.messaging.local-request.v7"
+	RequestSchema = "tos.messaging.local-request.v8"
+	// RequestSchemaV6 and RequestSchemaV7 remain accepted for the operations
+	// they can express. Per-operation strict field validation prevents an older
+	// client from smuggling newer authority while allowing rolling upgrades.
+	RequestSchemaV6 = "tos.messaging.local-request.v6"
+	RequestSchemaV7 = "tos.messaging.local-request.v7"
 	// ResponseSchema is the strict wire schema of a response.
 	ResponseSchema = "tos.messaging.local-response.v5"
 
@@ -68,6 +73,10 @@ const (
 	// OpComposeProtocolResult queues a daemon-identified A2A response or MCP
 	// result. It cannot synthesize an inbound call.
 	OpComposeProtocolResult Operation = "outbox.compose-protocol-result"
+	// OpResolveContact canonicalizes one human recipient input. It returns an
+	// AgentID only after the normal finalized identity and directory chain has
+	// succeeded; CanonicalName is non-authoritative display metadata.
+	OpResolveContact Operation = "contacts.resolve"
 	// OpPendingAttachments lists only opaque metadata for encrypted attachment
 	// Events. It never exposes the E2EE-carried Reference or fetch key.
 	OpPendingAttachments Operation = "attachments.pending"
@@ -171,6 +180,7 @@ const (
 var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
 		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
+		OpResolveContact:     {},
 		OpPendingAttachments: {}, OpClaimAttachment: {},
 		OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
@@ -200,6 +210,7 @@ func Permits(principal Principal, operation Operation) bool {
 
 var operations = map[Operation]struct{}{
 	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
+	OpResolveContact:     {},
 	OpPendingAttachments: {}, OpClaimAttachment: {},
 	OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
@@ -243,23 +254,31 @@ type Request struct {
 	LeaseSeconds uint64     `json:"lease_seconds,omitempty"`
 	Code         fault.Code `json:"code,omitempty"`
 	Limit        int        `json:"limit,omitempty"`
+	// Recipient is a human input accepted only by contacts.resolve. It is
+	// either a canonical AgentID or a canonical .tos alias and never carries
+	// endpoint, device, session, route, or authorization data.
+	Recipient string `json:"recipient,omitempty"`
 
 	// Event is an encoded Messaging Event, for submission.
 	Event               json.RawMessage `json:"event,omitempty"`
 	SessionID           string          `json:"session_id,omitempty"`
 	RecipientEndpointID string          `json:"recipient_endpoint_id,omitempty"`
-	ExpiresAtUnix       uint64          `json:"expires_at_unix,omitempty"`
-	ConversationID      string          `json:"conversation_id,omitempty"`
-	RoomID              string          `json:"room_id,omitempty"`
-	ReplyToEventID      string          `json:"reply_to_event_id,omitempty"`
-	MembershipEpoch     uint64          `json:"membership_epoch,omitempty"`
-	MediaType           string          `json:"media_type,omitempty"`
-	Body                string          `json:"body,omitempty"`
-	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
-	ProtocolKind        string          `json:"protocol_kind,omitempty"`
-	Protocol            string          `json:"protocol,omitempty"`
-	ProtocolVersion     string          `json:"protocol_version,omitempty"`
-	ProtocolBody        []byte          `json:"protocol_body_base64,omitempty"`
+	// RecipientAgentID is an optional canonical assertion on compose. When
+	// present, the daemon re-verifies that the selected Endpoint belongs to
+	// this exact Agent before queueing.
+	RecipientAgentID string `json:"recipient_agent_id,omitempty"`
+	ExpiresAtUnix    uint64 `json:"expires_at_unix,omitempty"`
+	ConversationID   string `json:"conversation_id,omitempty"`
+	RoomID           string `json:"room_id,omitempty"`
+	ReplyToEventID   string `json:"reply_to_event_id,omitempty"`
+	MembershipEpoch  uint64 `json:"membership_epoch,omitempty"`
+	MediaType        string `json:"media_type,omitempty"`
+	Body             string `json:"body,omitempty"`
+	IdempotencyKey   string `json:"idempotency_key,omitempty"`
+	ProtocolKind     string `json:"protocol_kind,omitempty"`
+	Protocol         string `json:"protocol,omitempty"`
+	ProtocolVersion  string `json:"protocol_version,omitempty"`
+	ProtocolBody     []byte `json:"protocol_body_base64,omitempty"`
 
 	// Action is one proposed action, for the firewall operations. It is the
 	// action itself rather than an identifier, because the identifier is
@@ -484,6 +503,10 @@ type Response struct {
 	UploadID    string              `json:"upload_id,omitempty"`
 	NextChunk   uint32              `json:"next_chunk,omitempty"`
 	Complete    bool                `json:"complete,omitempty"`
+	// AgentID is the protocol identity returned by contacts.resolve.
+	// CanonicalName is optional display metadata and MUST NOT be used as a key.
+	AgentID       string `json:"agent_id,omitempty"`
+	CanonicalName string `json:"canonical_name,omitempty"`
 
 	// Actions lists decisions waiting for the owner.
 	Actions []WaitingAction `json:"actions,omitempty"`
@@ -569,7 +592,7 @@ func DecodeRequest(raw []byte) (Request, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Request{}, errors.New("request has trailing JSON")
 	}
-	if request.Schema != RequestSchema {
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV7 && request.Schema != RequestSchemaV6 {
 		return Request{}, errors.New("unsupported request schema")
 	}
 	if err := ValidateRequest(request); err != nil {
@@ -652,6 +675,12 @@ func ValidateRequest(request Request) error {
 		(request.InvitedAgentID != "" || request.InviteExpiresAtUnix != 0) {
 		return errors.New("only admission invite creation carries invite terms")
 	}
+	if request.Op != OpResolveContact && request.Recipient != "" {
+		return errors.New("only contact resolution carries a recipient input")
+	}
+	if request.Op != OpCompose && request.RecipientAgentID != "" {
+		return errors.New("only message composition carries a recipient Agent assertion")
+	}
 	if request.Op != OpRecordEscrowLocation && request.Op != OpVerifyAcceptedQuote && request.QuoteCommitment != "" {
 		return errors.New("only escrow recording or Quote verification carries a Quote commitment")
 	}
@@ -694,6 +723,16 @@ func ValidateRequest(request Request) error {
 		return errors.New("only device-history export carries history terms")
 	}
 	switch request.Op {
+	case OpResolveContact:
+		if request.Recipient == "" || len(request.Recipient) > 255 {
+			return errors.New("contact resolution needs one bounded recipient input")
+		}
+		if request.Limit != 0 || request.Code != "" || request.RecipientEndpointID != "" ||
+			request.ExpiresAtUnix != 0 || request.LeaseSeconds != 0 || request.Action != nil ||
+			request.ActionID != "" || request.Reason != "" || request.Mandate != nil || request.MandateID != "" {
+			return errors.New("contact resolution cannot carry route or control fields")
+		}
+		return requireEmpty(request, "contact resolution", request.EventID, request.LeaseID, request.SessionID)
 	case OpPending, OpAwaitingAdmission, OpPendingAttachments:
 		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
 			return errors.New("invalid pending limit")
@@ -747,6 +786,9 @@ func ValidateRequest(request Request) error {
 		}
 		if request.MediaType == "" || request.Body == "" {
 			return errors.New("a composition needs media type and body")
+		}
+		if request.RecipientAgentID != "" && !agentPattern.MatchString(request.RecipientAgentID) {
+			return errors.New("a composition has an invalid recipient Agent assertion")
 		}
 		return nil
 	case OpComposeProtocolResult:

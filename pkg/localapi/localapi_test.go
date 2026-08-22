@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/pkg/contact"
+	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
@@ -81,6 +84,17 @@ type fixedQuoteResolver struct {
 	quote negotiation.VerifiedAcceptedQuote
 	found bool
 	err   error
+}
+
+type fixedContactResolver struct {
+	result contact.Result
+	err    error
+	input  string
+}
+
+func (r *fixedContactResolver) Resolve(_ context.Context, input string) (contact.Result, error) {
+	r.input = input
+	return r.result, r.err
 }
 
 func (r fixedQuoteResolver) ResolveAcceptedQuote(string) (negotiation.VerifiedAcceptedQuote, bool, error) {
@@ -196,6 +210,60 @@ func TestOwnerCreatesScopedOneTimeAdmissionInvite(t *testing.T) {
 		created.AdmissionToken, peerMEP, senderID, "evt_"+strings.Repeat("b", 64), h.clock.Add(2*time.Minute),
 	); err == nil {
 		t.Fatal("owner-created invite authorized two events")
+	}
+}
+
+func TestRuntimeResolvesRecipientToCanonicalAgentID(t *testing.T) {
+	h := newHarness(t)
+	resolver := &fixedContactResolver{result: contact.Result{AgentID: senderID, CanonicalName: "alice.tos"}}
+	h.server.config.ContactResolver = resolver
+	response := h.call(t, Request{Op: OpResolveContact, Recipient: "alice.tos"})
+	if !response.OK || response.AgentID != senderID || response.CanonicalName != "alice.tos" || resolver.input != "alice.tos" {
+		t.Fatalf("resolve contact: response=%+v input=%q", response, resolver.input)
+	}
+	if owner := h.owner(t, Request{Op: OpResolveContact, Recipient: "alice.tos"}); owner.OK {
+		t.Fatal("owner socket unexpectedly exposed runtime contact resolution")
+	}
+}
+
+func TestRequestDecoderKeepsRollingUpgradeCompatibility(t *testing.T) {
+	for _, schema := range []string{RequestSchemaV6, RequestSchemaV7, RequestSchema} {
+		raw, err := json.Marshal(Request{Schema: schema, Op: OpPending, Limit: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeRequest(raw); err != nil {
+			t.Fatalf("decode %s: %v", schema, err)
+		}
+	}
+	raw, _ := json.Marshal(Request{Schema: "tos.messaging.local-request.v5", Op: OpPending})
+	if _, err := DecodeRequest(raw); err == nil {
+		t.Fatal("unsupported request schema was accepted")
+	}
+}
+
+func TestContactResolutionFailsClosed(t *testing.T) {
+	h := newHarness(t)
+	h.server.config.ContactResolver = &fixedContactResolver{err: errors.New("expired finalized proof")}
+	if response := h.call(t, Request{Op: OpResolveContact, Recipient: "alice.tos"}); response.OK {
+		t.Fatalf("unsafe contact resolved: %+v", response)
+	}
+	for name, request := range map[string]Request{
+		"session": {Op: OpResolveContact, Recipient: "alice.tos", SessionID: sessionID},
+		"endpoint": {
+			Op: OpResolveContact, Recipient: "alice.tos", RecipientEndpointID: peerMEP,
+		},
+		"expiry": {Op: OpResolveContact, Recipient: "alice.tos", ExpiresAtUnix: baseUnix + 1},
+		"mandate": {
+			Op: OpResolveContact, Recipient: "alice.tos", Mandate: &MandateTerms{Objective: "retarget"},
+		},
+		"action": {
+			Op: OpResolveContact, Recipient: "alice.tos", Action: &ProposedAction{Effect: "message"},
+		},
+	} {
+		if _, err := EncodeRequest(request); err == nil {
+			t.Fatalf("contact resolution accepted model-selected %s authority", name)
+		}
 	}
 }
 
@@ -544,6 +612,35 @@ func TestRuntimeComposesDaemonOwnedEventWithStableRetry(t *testing.T) {
 	substitution.RecipientEndpointID = "mep_" + strings.Repeat("9", 64)
 	if response := h.call(t, substitution); response.OK {
 		t.Fatal("one idempotency key accepted a different recipient")
+	}
+}
+
+func TestProactiveCompositionReverifiesCanonicalAgentRoute(t *testing.T) {
+	h := newHarness(t)
+	recipientAgentID := "agent_" + strings.Repeat("5", 64)
+	resolver := &fixedContactResolver{result: contact.Result{
+		AgentID: recipientAgentID,
+		Directory: directory.RefreshResult{Descriptor: directory.Descriptor{
+			AgentID: recipientAgentID, EndpointID: peerMEP,
+		}},
+	}}
+	h.server.config.ContactResolver = resolver
+	request := Request{
+		Op: OpCompose, ConversationID: convoID, MediaType: "text/plain; charset=utf-8", Body: "hello",
+		IdempotencyKey: "idem_" + strings.Repeat("c", 64), SessionID: sessionID,
+		RecipientEndpointID: peerMEP, RecipientAgentID: recipientAgentID, ExpiresAtUnix: baseUnix + 3600,
+	}
+	if response := h.call(t, request); !response.OK {
+		t.Fatalf("canonical Agent route refused: %+v", response)
+	}
+	if resolver.input != recipientAgentID {
+		t.Fatalf("compose re-resolved %q, want canonical AgentID", resolver.input)
+	}
+	wrong := request
+	wrong.IdempotencyKey = "idem_" + strings.Repeat("d", 64)
+	wrong.RecipientEndpointID = "mep_" + strings.Repeat("9", 64)
+	if response := h.call(t, wrong); response.OK {
+		t.Fatal("canonical Agent assertion accepted another Endpoint")
 	}
 }
 

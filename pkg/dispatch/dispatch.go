@@ -95,6 +95,7 @@ type ComposeRequest struct {
 	MembershipEpoch                        uint64
 	MediaType, Body, IdempotencyKey        string
 	SessionID, RecipientEndpointID         string
+	RecipientAgentID                       string
 	ExpiresAtUnix                          uint64
 }
 
@@ -316,6 +317,19 @@ func (d *Dispatcher) ComposeAndQueue(request ComposeRequest) (envelope.Event, bo
 		return envelope.Event{}, false, errors.New("dispatch composition has no network")
 	}
 	now := d.config.Now()
+	if request.RecipientAgentID != "" && !ids.Agent.MatchString(request.RecipientAgentID) {
+		return envelope.Event{}, false, errors.New("invalid expected recipient Agent identifier")
+	}
+	if request.RecipientAgentID != "" && d.CanSend() {
+		binding, err := d.config.Bindings.BindingFor(eventlog.Delivery{
+			SessionID: request.SessionID, RecipientEndpointID: request.RecipientEndpointID,
+			ConversationID: request.ConversationID,
+		})
+		if err != nil || binding.RecipientAgentID != request.RecipientAgentID ||
+			binding.RecipientEndpointID != request.RecipientEndpointID || binding.ConversationID != request.ConversationID {
+			return envelope.Event{}, false, errors.New("outbound route is not bound to the expected recipient Agent")
+		}
+	}
 	if now.IsZero() || now.Unix() < 0 || request.ExpiresAtUnix <= uint64(now.Unix()) {
 		return envelope.Event{}, false, errors.New("invalid outbound lifetime")
 	}
@@ -349,7 +363,7 @@ func (d *Dispatcher) ComposeAndQueue(request ComposeRequest) (envelope.Event, bo
 	for _, value := range []string{d.config.Network.NetworkId, d.config.Network.GenesisRootHash,
 		d.config.Network.GenesisFileHash, d.config.Identity.AgentID, d.config.Identity.EndpointID,
 		d.config.Identity.DeviceID, request.ConversationID, request.RoomID, request.ReplyToEventID, request.MediaType,
-		request.Body, request.IdempotencyKey, request.SessionID, request.RecipientEndpointID} {
+		request.Body, request.IdempotencyKey, request.SessionID, request.RecipientEndpointID, request.RecipientAgentID} {
 		canon.Text(intent, value)
 	}
 	canon.Uint64(intent, request.MembershipEpoch)
