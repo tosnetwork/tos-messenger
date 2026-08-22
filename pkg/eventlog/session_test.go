@@ -2,6 +2,7 @@ package eventlog
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
+	"github.com/tosnetwork/tos-messenger/pkg/identity"
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
 const algorithm = "tos.messaging.e2ee.example-suite.v1"
@@ -46,6 +49,74 @@ func TestSessionStateRoundTrip(t *testing.T) {
 	if record.AlgorithmID != algorithm {
 		t.Fatalf("the suite was not recorded: %+v", record)
 	}
+}
+
+func TestBootstrappedSessionCommitsEvidenceWithStateAndPreservesIt(t *testing.T) {
+	journal, _ := openJournal(t)
+	now := time.Unix(int64(acceptAt), 0)
+	bootstrap, sessionID := sessionBootstrap(t, now)
+	if err := journal.PutBootstrappedSessionState(sessionID, e2ee.State("initiator state"), bootstrap, now); err != nil {
+		t.Fatalf("put bootstrap: %v", err)
+	}
+	if err := journal.PutBootstrappedSessionState(sessionID, e2ee.State("replacement"), bootstrap, now); !errors.Is(err, ErrSessionConflict) {
+		t.Fatalf("session replacement was not refused: %v", err)
+	}
+	record, found, err := journal.SessionState(sessionID)
+	if err != nil || !found {
+		t.Fatalf("lookup: found=%v err=%v", found, err)
+	}
+	restored, present, err := record.Bootstrap()
+	if err != nil || !present || restored.Binding.ConversationID != bootstrap.Binding.ConversationID {
+		t.Fatalf("bootstrap: present=%v value=%+v err=%v", present, restored, err)
+	}
+	if err := journal.advanceSession(sessionID, bootstrap.Binding.AlgorithmID, record.Generation,
+		e2ee.State("advanced state"), now.Add(time.Second)); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	advanced, _, err := journal.SessionState(sessionID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if _, present, err := advanced.Bootstrap(); err != nil || !present {
+		t.Fatalf("advance lost bootstrap: present=%v err=%v", present, err)
+	}
+}
+
+func sessionBootstrap(t *testing.T, now time.Time) (e2ee.FirstContact, string) {
+	t.Helper()
+	network := &nativev1.NetworkDomain{NetworkId: "tos-local", GenesisRootHash: strings.Repeat("a", 64),
+		GenesisFileHash: strings.Repeat("b", 64)}
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
+	public := key.Public().(ed25519.PublicKey)
+	senderAgent := "agent_" + strings.Repeat("2", 64)
+	senderEndpoint, err := identity.DeriveEndpointID(network, senderAgent, public)
+	if err != nil {
+		t.Fatalf("derive endpoint: %v", err)
+	}
+	senderDevice := "dev_" + strings.Repeat("4", 64)
+	recipientDevice := "dev_" + strings.Repeat("7", 64)
+	bundle, err := e2ee.SignBundle(e2ee.Bundle{Network: network, AgentID: senderAgent,
+		EndpointID: senderEndpoint, DeviceID: senderDevice, AlgorithmID: algorithm,
+		Material: bytes.Repeat([]byte{0x31}, 64), IssuedAtUnix: uint64(now.Unix()),
+		ExpiresAtUnix: uint64(now.Add(time.Hour).Unix())}, key)
+	if err != nil {
+		t.Fatalf("sign bundle: %v", err)
+	}
+	digest, err := e2ee.BundleDigest(bundle)
+	if err != nil {
+		t.Fatalf("bundle digest: %v", err)
+	}
+	bootstrap := e2ee.FirstContact{Binding: e2ee.Binding{Network: network, AlgorithmID: algorithm,
+		ConversationID: "conv_" + strings.Repeat("1", 64), SenderAgentID: senderAgent,
+		SenderEndpointID: senderEndpoint, SenderDeviceID: senderDevice,
+		RecipientAgentID:    "agent_" + strings.Repeat("5", 64),
+		RecipientEndpointID: "mep_" + strings.Repeat("6", 64), RecipientDeviceID: recipientDevice},
+		SenderBundle: bundle, RecipientBundleDigest: digest, Initial: []byte("initial")}
+	sessionID, err := e2ee.DeviceSessionID(senderDevice, recipientDevice)
+	if err != nil {
+		t.Fatalf("session id: %v", err)
+	}
+	return bootstrap, sessionID
 }
 
 // The inbound order: the event is durable before the session advances. A crash

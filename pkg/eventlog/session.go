@@ -50,6 +50,11 @@ type SessionRecord struct {
 	// session moved on for some other reason", which are the same generation
 	// number and opposite answers.
 	LastInboundEventID string `json:"last_inbound_event_id,omitempty"`
+	// BootstrapBase64 is public asynchronous first-contact evidence. It is
+	// committed with the initiator state so a crash cannot retain one without
+	// the other. Device private prekeys are never included.
+	BootstrapBase64 string `json:"bootstrap_base64,omitempty"`
+	BootstrapDigest string `json:"bootstrap_digest,omitempty"`
 }
 
 // State returns the persisted suite state.
@@ -62,6 +67,23 @@ func (s SessionRecord) State() (e2ee.State, error) {
 		return nil, errors.New("persisted session state does not match its digest")
 	}
 	return state, nil
+}
+
+// Bootstrap returns the public first-contact evidence, when this device
+// initiated the session.
+func (s SessionRecord) Bootstrap() (e2ee.FirstContact, bool, error) {
+	if s.BootstrapBase64 == "" && s.BootstrapDigest == "" {
+		return e2ee.FirstContact{}, false, nil
+	}
+	raw, err := base64.StdEncoding.Strict().DecodeString(s.BootstrapBase64)
+	if err != nil || canon.Digest(raw) != s.BootstrapDigest {
+		return e2ee.FirstContact{}, false, errors.New("invalid persisted session bootstrap")
+	}
+	value, err := e2ee.DecodeFirstContactJSON(raw)
+	if err != nil {
+		return e2ee.FirstContact{}, false, errors.New("invalid persisted session bootstrap")
+	}
+	return value, true, nil
 }
 
 // SessionState returns the persisted state for one session.
@@ -101,6 +123,48 @@ func (j *Journal) PutSessionState(sessionID, algorithm string, state e2ee.State,
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 	return j.writeSession(sessionID, algorithm, state, now)
+}
+
+// PutBootstrappedSessionState atomically persists initiator ratchet state and
+// the public evidence a recipient needs to accept it. It refuses replacement:
+// callers reload an existing session instead of generating a second initial
+// handshake for the same deterministic device pair.
+func (j *Journal) PutBootstrappedSessionState(sessionID string, state e2ee.State,
+	bootstrap e2ee.FirstContact, now time.Time) error {
+	if err := j.usable(); err != nil {
+		return err
+	}
+	if err := validateSessionInput(sessionID, bootstrap.Binding.AlgorithmID, state, now); err != nil {
+		return err
+	}
+	if err := e2ee.ValidateFirstContact(bootstrap); err != nil {
+		return err
+	}
+	expected, err := e2ee.DeviceSessionID(bootstrap.Binding.SenderDeviceID, bootstrap.Binding.RecipientDeviceID)
+	if err != nil || expected != sessionID {
+		return errors.New("first-contact bootstrap belongs to another session")
+	}
+	raw, err := e2ee.EncodeFirstContactJSON(bootstrap)
+	if err != nil {
+		return err
+	}
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+	if _, err := readSession(j.sessionPath(sessionID)); err == nil {
+		return ErrSessionConflict
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	record := SessionRecord{Schema: SessionSchema, Generation: 1, SessionID: sessionID,
+		AlgorithmID: bootstrap.Binding.AlgorithmID,
+		StateBase64: base64.StdEncoding.EncodeToString(state), StateDigest: canon.Digest(state),
+		UpdatedAtUnix: uint64(now.Unix()), BootstrapBase64: base64.StdEncoding.EncodeToString(raw),
+		BootstrapDigest: canon.Digest(raw)}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return j.replace(j.sessionPath(sessionID), encoded)
 }
 
 // CommitInbound makes an opened event durable, then advances the session, in
@@ -271,6 +335,12 @@ func (j *Journal) writeSessionAt(sessionID, algorithm string, generation uint64,
 
 func (j *Journal) writeSessionInbound(sessionID, algorithm string, generation uint64,
 	state e2ee.State, inboundEventID string, seconds uint64) error {
+	var bootstrapBase64, bootstrapDigest string
+	if current, err := readSession(j.sessionPath(sessionID)); err == nil {
+		bootstrapBase64, bootstrapDigest = current.BootstrapBase64, current.BootstrapDigest
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	record := SessionRecord{
 		Schema:             SessionSchema,
 		Generation:         generation,
@@ -280,6 +350,7 @@ func (j *Journal) writeSessionInbound(sessionID, algorithm string, generation ui
 		StateDigest:        canon.Digest(state),
 		UpdatedAtUnix:      seconds,
 		LastInboundEventID: inboundEventID,
+		BootstrapBase64:    bootstrapBase64, BootstrapDigest: bootstrapDigest,
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -325,6 +396,9 @@ func readSession(path string) (SessionRecord, error) {
 		return SessionRecord{}, errors.New("invalid session record")
 	}
 	if _, err := record.State(); err != nil {
+		return SessionRecord{}, errors.New("invalid session record")
+	}
+	if _, _, err := record.Bootstrap(); err != nil {
 		return SessionRecord{}, errors.New("invalid session record")
 	}
 	return record, nil

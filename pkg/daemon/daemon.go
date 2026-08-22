@@ -19,6 +19,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/contact"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
+	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
@@ -136,10 +137,113 @@ func (d *Daemon) EnsureDirectConversation(
 	if err != nil {
 		return localapi.DirectConversationResult{}, err
 	}
+	if d.prekeys != nil && d.prekeys.signer != nil {
+		if err := d.ensureDirectSessions(resolved, record.ConversationID, now); err != nil {
+			return localapi.DirectConversationResult{}, err
+		}
+	}
 	return localapi.DirectConversationResult{
 		AgentID: resolved.AgentID, CanonicalName: resolved.CanonicalName,
 		ConversationID: record.ConversationID, Readiness: "transport-pending",
 	}, nil
+}
+
+// ensureDirectSessions establishes every reachable recipient-device session
+// from verified directory bundles. Endpoint, Device and session choices remain
+// daemon-owned; neither the local API nor OpenFox can supply them.
+func (d *Daemon) ensureDirectSessions(resolved contact.Result, conversationID string, now time.Time) error {
+	localBundle, private, err := d.prekeys.localBootstrapMaterial(now)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for index := range private {
+			private[index] = 0
+		}
+	}()
+	if len(resolved.Directory.Bundles) == 0 {
+		return errors.New("verified recipient directory has no device prekeys")
+	}
+	sessions := make(map[string]bool)
+	for _, bundle := range append(append([]e2ee.Bundle(nil), resolved.Directory.Bundles...),
+		d.prekeysCurrentBundles(now)...) {
+		sessionID, sessionErr := e2ee.DeviceSessionID(d.config.DeviceID, bundle.DeviceID)
+		if sessionErr != nil {
+			continue
+		}
+		_, found, lookupErr := d.journal.SessionState(sessionID)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		sessions[sessionID] = found
+	}
+	senderSet := d.prekeysCurrentBundles(now)
+	plan, err := e2ee.FanOut(e2ee.PlanInput{SenderDeviceID: d.config.DeviceID,
+		SenderSet: senderSet, RecipientSet: resolved.Directory.Bundles, Now: now,
+		SessionExists: func(sessionID string) bool { return sessions[sessionID] }})
+	if err != nil {
+		return err
+	}
+	if len(plan.Unreachable) != 0 {
+		return errors.New("one or more verified recipient devices have no live session bootstrap")
+	}
+	bundles := make(map[string]e2ee.Bundle, len(senderSet)+len(resolved.Directory.Bundles))
+	for _, bundle := range senderSet {
+		bundles[bundle.DeviceID] = bundle
+	}
+	for _, bundle := range resolved.Directory.Bundles {
+		bundles[bundle.DeviceID] = bundle
+	}
+	targets := append(append([]e2ee.Target(nil), plan.Recipients...), plan.SelfCopies...)
+	for _, target := range targets {
+		if !target.Bootstrap {
+			continue
+		}
+		peer, found := bundles[target.DeviceID]
+		if !found {
+			return errors.New("fan-out selected a device without verified prekey material")
+		}
+		binding := e2ee.Binding{Network: d.config.Network(), AlgorithmID: localBundle.AlgorithmID,
+			ConversationID: conversationID, SenderAgentID: d.config.AgentID,
+			SenderEndpointID: d.config.EndpointID, SenderDeviceID: d.config.DeviceID,
+			RecipientAgentID: peer.AgentID, RecipientEndpointID: peer.EndpointID,
+			RecipientDeviceID: peer.DeviceID}
+		bindingBytes, err := binding.Bytes()
+		if err != nil {
+			return err
+		}
+		state, initial, err := d.prekeys.suite.Initiate(private, peer.Material, bindingBytes)
+		if err != nil {
+			return errors.New("initiate device session: " + err.Error())
+		}
+		err = d.journal.PutBootstrappedSessionState(target.SessionID, state, e2ee.FirstContact{
+			Binding: binding, SenderBundle: localBundle,
+			RecipientBundleDigest: target.BundleDigest, Initial: initial,
+		}, now)
+		if errors.Is(err, eventlog.ErrSessionConflict) {
+			// A concurrent exact ensure won. Its deterministic session identity is
+			// authoritative; reload validates that a usable record exists.
+			if _, found, reloadErr := d.journal.SessionState(target.SessionID); reloadErr == nil && found {
+				continue
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) prekeysCurrentBundles(now time.Time) []e2ee.Bundle {
+	if d == nil || d.prekeys == nil || d.prekeys.planner == nil {
+		return nil
+	}
+	collection, found, err := d.prekeys.planner.contributions.CurrentPrekeyCollection(
+		d.prekeys.planner.delegation, now)
+	if err != nil || !found {
+		return nil
+	}
+	return collection.Contributions
 }
 
 // Open assembles a daemon and takes ownership of its state.

@@ -97,6 +97,37 @@ func (r *prekeyRuntime) maintainLocalDevice() error {
 	return r.ensureLocalDevice()
 }
 
+// localBootstrapMaterial returns the configured Device's exact current public
+// bundle and a private copy for one suite transition. The caller must clear
+// the returned private bytes. No API above daemon may expose this method.
+func (r *prekeyRuntime) localBootstrapMaterial(now time.Time) (e2ee.Bundle, []byte, error) {
+	if r == nil || r.planner == nil || r.devices == nil || r.signer == nil || r.deviceID == "" {
+		return e2ee.Bundle{}, nil, errors.New("local device prekeys are not configured")
+	}
+	if now.IsZero() || now.Unix() < 0 {
+		return e2ee.Bundle{}, nil, errors.New("invalid local prekey selection time")
+	}
+	collection, found, err := r.planner.contributions.CurrentPrekeyCollection(r.planner.delegation, now)
+	if err != nil || !found {
+		return e2ee.Bundle{}, nil, err
+	}
+	for _, bundle := range collection.Contributions {
+		if bundle.DeviceID != r.deviceID {
+			continue
+		}
+		digest, err := e2ee.BundleDigest(bundle)
+		if err != nil {
+			return e2ee.Bundle{}, nil, err
+		}
+		private, err := r.devices.DevicePrekeyPrivate(bundle.EndpointID, bundle.DeviceID, digest, now)
+		if err != nil {
+			return e2ee.Bundle{}, nil, err
+		}
+		return bundle, private, nil
+	}
+	return e2ee.Bundle{}, nil, errors.New("configured device has no current prekey contribution")
+}
+
 func (r *prekeyRuntime) runPlanner(ctx context.Context, failed func(error)) {
 	ticker := time.NewTicker(r.planner.config.CheckInterval())
 	defer ticker.Stop()
