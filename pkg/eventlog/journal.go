@@ -49,12 +49,13 @@ const (
 	canonicalStateMarkerName = ".canonical-network-preimages"
 	canonicalStateMarker     = "tos.messaging.canonical-network-preimages.v2\n"
 
-	lockName       = ".messenger-event-journal.lock"
-	inboundDir     = "inbound"
-	outboundDir    = "outbound"
-	compositionDir = "outbound-compositions"
-	moderationDir  = "room-moderation"
-	historySyncDir = "history-sync"
+	lockName              = ".messenger-event-journal.lock"
+	inboundDir            = "inbound"
+	outboundDir           = "outbound"
+	compositionDir        = "outbound-compositions"
+	moderationDir         = "room-moderation"
+	historySyncDir        = "history-sync"
+	directConversationDir = "direct-conversations"
 
 	// MaxRecordBytes bounds one on-disk record. It has to hold a complete
 	// event, because a record without its event cannot be re-delivered, and an
@@ -313,7 +314,7 @@ func openJournalAt(root string, quota Quota) (*Journal, error) {
 	if err := ensureCanonicalStateMarker(root); err != nil {
 		return nil, err
 	}
-	for _, name := range []string{inboundDir, outboundDir, compositionDir, moderationDir, historySyncDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, devicePrekeyDir, prekeyContributionDir, prekeyPublicationDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, escrowLocatorDir, agentPacketDir, admissionInviteDir} {
+	for _, name := range []string{inboundDir, outboundDir, compositionDir, moderationDir, historySyncDir, directConversationDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, devicePrekeyDir, prekeyContributionDir, prekeyPublicationDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, escrowLocatorDir, agentPacketDir, admissionInviteDir} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			return nil, errors.New("create event journal directory")
 		}

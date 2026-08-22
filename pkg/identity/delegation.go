@@ -254,35 +254,45 @@ func DecodeJSON(raw []byte) (Delegation, error) {
 // accumulates a digest through a delegation action signed for that purpose, and
 // loses it when the commitment is withdrawn.
 func Verify(resolver AgentResolver, network *nativev1.NetworkDomain, chain ChainPolicy, raw []byte, now time.Time) (Delegation, error) {
+	delegation, _, err := VerifyWithCheckpoint(resolver, network, chain, raw, now)
+	return delegation, err
+}
+
+// VerifyWithCheckpoint performs Verify and also returns the finalized
+// checkpoint that authorized the exact delegation. The checkpoint is evidence
+// for durable discovery monotonicity; it does not become a substitute for a
+// future finalized refresh.
+func VerifyWithCheckpoint(resolver AgentResolver, network *nativev1.NetworkDomain, chain ChainPolicy,
+	raw []byte, now time.Time) (Delegation, uint64, error) {
 	if resolver == nil || now.IsZero() {
-		return Delegation{}, errors.New("invalid delegation verification context")
+		return Delegation{}, 0, errors.New("invalid delegation verification context")
 	}
 	if err := validateNetwork(network); err != nil {
-		return Delegation{}, err
+		return Delegation{}, 0, err
 	}
 	delegation, err := DecodeJSON(raw)
 	if err != nil {
-		return Delegation{}, err
+		return Delegation{}, 0, err
 	}
 	if delegation.Network.NetworkId != network.NetworkId ||
 		delegation.Network.GenesisRootHash != network.GenesisRootHash ||
 		delegation.Network.GenesisFileHash != network.GenesisFileHash {
-		return Delegation{}, errors.New("delegation network tuple mismatch")
+		return Delegation{}, 0, errors.New("delegation network tuple mismatch")
 	}
 	state, found, err := resolver.ResolveAgent(delegation.AgentID)
 	if err != nil {
-		return Delegation{}, err
+		return Delegation{}, 0, err
 	}
 	if !found {
-		return Delegation{}, errors.New("delegation Agent is not finalized")
+		return Delegation{}, 0, errors.New("delegation Agent is not finalized")
 	}
 	agent, err := CheckState(chain, network, delegation.AgentID, state)
 	if err != nil {
-		return Delegation{}, err
+		return Delegation{}, 0, err
 	}
 	digest, err := Digest(delegation)
 	if err != nil {
-		return Delegation{}, err
+		return Delegation{}, 0, err
 	}
 	committed := false
 	for _, candidate := range agent.DelegationDigests {
@@ -292,12 +302,12 @@ func Verify(resolver AgentResolver, network *nativev1.NetworkDomain, chain Chain
 		}
 	}
 	if !committed {
-		return Delegation{}, errors.New("delegation is not committed by the finalized Agent")
+		return Delegation{}, 0, errors.New("delegation is not committed by the finalized Agent")
 	}
 	if err := CheckWindow(delegation, now); err != nil {
-		return Delegation{}, err
+		return Delegation{}, 0, err
 	}
-	return delegation, nil
+	return delegation, state.Reference.FinalizedCheckpoint, nil
 }
 
 // CheckWindow reports whether the delegation is inside its validity window.

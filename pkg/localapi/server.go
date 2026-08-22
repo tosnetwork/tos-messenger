@@ -66,10 +66,24 @@ type Config struct {
 	// boundary. The runtime receives no directory, endpoint, device, prekey, or
 	// session authority through this interface.
 	ContactResolver ContactResolver
+	// DirectConversationEnsurer owns the durable AgentID-keyed first-contact
+	// boundary. Its result deliberately exposes no Endpoint, Device or Session.
+	DirectConversationEnsurer DirectConversationEnsurer
 }
 
 type ContactResolver interface {
 	Resolve(context.Context, string) (contact.Result, error)
+}
+
+type DirectConversationResult struct {
+	AgentID        string
+	CanonicalName  string
+	ConversationID string
+	Readiness      string
+}
+
+type DirectConversationEnsurer interface {
+	EnsureDirectConversation(context.Context, string) (DirectConversationResult, error)
 }
 
 type AttachmentAdmitter interface {
@@ -235,6 +249,8 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.composeProtocolResult(request)
 	case OpResolveContact:
 		return s.resolveContact(ctx, request)
+	case OpEnsureDirectConversation:
+		return s.ensureDirectConversation(ctx, request)
 	case OpPendingAttachments:
 		return s.pendingAttachments(request, now)
 	case OpClaimAttachment:
@@ -301,6 +317,24 @@ func (s *Server) resolveContact(ctx context.Context, request Request) Response {
 		return refuse(fault.CodeNotAuthentic, errors.New("contact resolution returned no canonical AgentID"))
 	}
 	return Response{OK: true, AgentID: result.AgentID, CanonicalName: result.CanonicalName}
+}
+
+func (s *Server) ensureDirectConversation(ctx context.Context, request Request) Response {
+	if s.config.DirectConversationEnsurer == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("direct conversation discovery is not configured"))
+	}
+	result, err := s.config.DirectConversationEnsurer.EnsureDirectConversation(ctx, request.Recipient)
+	if err != nil {
+		return refuse(fault.CodeNotAuthentic, err)
+	}
+	if !agentPattern.MatchString(result.AgentID) || !conversationPattern.MatchString(result.ConversationID) ||
+		result.Readiness != "transport-pending" {
+		return refuse(fault.CodeNotAuthentic, errors.New("direct conversation result is not canonical"))
+	}
+	return Response{
+		OK: true, AgentID: result.AgentID, CanonicalName: result.CanonicalName,
+		ConversationID: result.ConversationID, Readiness: result.Readiness,
+	}
 }
 
 func (s *Server) beginOutboundAttachment(request Request) Response {
