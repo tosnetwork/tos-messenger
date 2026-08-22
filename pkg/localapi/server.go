@@ -222,6 +222,8 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.queue(request)
 	case OpCompose:
 		return s.compose(request)
+	case OpComposeProtocolResult:
+		return s.composeProtocolResult(request)
 	case OpPendingAttachments:
 		return s.pendingAttachments(request, now)
 	case OpClaimAttachment:
@@ -527,6 +529,20 @@ func (s *Server) compose(request Request) Response {
 		ConversationID: request.ConversationID, RoomID: request.RoomID,
 		ReplyToEventID: request.ReplyToEventID, MembershipEpoch: request.MembershipEpoch,
 		MediaType: request.MediaType, Body: request.Body, IdempotencyKey: request.IdempotencyKey,
+		SessionID: request.SessionID, RecipientEndpointID: request.RecipientEndpointID,
+		ExpiresAtUnix: request.ExpiresAtUnix,
+	})
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, Fresh: fresh, EventID: event.EventID}
+}
+
+func (s *Server) composeProtocolResult(request Request) Response {
+	event, fresh, err := s.config.Dispatcher.ComposeProtocolResultAndQueue(dispatch.ProtocolResultRequest{
+		ConversationID: request.ConversationID, ReplyToEventID: request.ReplyToEventID,
+		Kind: request.ProtocolKind, Protocol: request.Protocol, Version: request.ProtocolVersion,
+		Body: request.ProtocolBody, IdempotencyKey: request.IdempotencyKey,
 		SessionID: request.SessionID, RecipientEndpointID: request.RecipientEndpointID,
 		ExpiresAtUnix: request.ExpiresAtUnix,
 	})

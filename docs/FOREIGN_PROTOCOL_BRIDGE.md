@@ -29,3 +29,13 @@ timeout, disconnect, or bounded-response failure leaves the event pending for
 retry after lease expiry. A 202 completes it durably, so daemon restart does
 not deliver that Event again. This is local protocol consumption only and
 does not select or imply a network transport.
+
+Local request v7 adds the reverse, result-only boundary
+`outbox.compose-protocol-result`. The runtime supplies the source Event ID,
+conversation, exact A2A Task or MCP Output bytes, stable idempotency key and an
+already established recipient route. The daemon supplies network, sender
+Agent/Endpoint/Device, clock, payload schema and Event ID. Only `a2a.message`
+with protocol `a2a` or `mcp.result` with protocol `mcp`, carriage version `1`,
+can be composed; `mcp.call`, text/room semantics and cross-profile substitution
+are refused. Exact retry returns the same Event ID, while changed bytes under
+one idempotency key fail before queueing.

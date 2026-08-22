@@ -98,6 +98,17 @@ type ComposeRequest struct {
 	ExpiresAtUnix                          uint64
 }
 
+// ProtocolResultRequest is the narrow runtime-selected meaning of a reply.
+// Identity, network, clock, schema and Event ID remain daemon-owned.
+type ProtocolResultRequest struct {
+	ConversationID, ReplyToEventID string
+	Kind, Protocol, Version        string
+	Body                           []byte
+	IdempotencyKey                 string
+	SessionID, RecipientEndpointID string
+	ExpiresAtUnix                  uint64
+}
+
 // AttachmentRequest is assembled only by the daemon-owned attachment
 // emitter after it has encrypted the complete plaintext and obtained exact
 // Endpoint-signed storage grants. An Agent runtime never supplies Reference,
@@ -342,6 +353,71 @@ func (d *Dispatcher) ComposeAndQueue(request ComposeRequest) (envelope.Event, bo
 		canon.Text(intent, value)
 	}
 	canon.Uint64(intent, request.MembershipEpoch)
+	canon.Uint64(intent, request.ExpiresAtUnix)
+	chosen, compositionFresh, err := d.config.Journal.ClaimOutboundComposition(request.IdempotencyKey, canon.Digest(intent.Bytes()), eventlog.Outbound{
+		EventID: event.EventID, SessionID: request.SessionID, RecipientEndpointID: request.RecipientEndpointID,
+		ConversationID: request.ConversationID, Payload: encoded, CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: request.ExpiresAtUnix})
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	if !compositionFresh {
+		event, err = envelope.DecodeEventJSON(chosen.Payload)
+		if err != nil {
+			return envelope.Event{}, false, err
+		}
+	}
+	fresh, _, err := d.config.Journal.Enqueue(chosen)
+	return event, fresh, err
+}
+
+// ComposeProtocolResultAndQueue constructs only A2A responses and MCP results.
+// Calls cannot be synthesized through this result-only boundary.
+func (d *Dispatcher) ComposeProtocolResultAndQueue(request ProtocolResultRequest) (envelope.Event, bool, error) {
+	if d == nil || d.config.Network == nil {
+		return envelope.Event{}, false, errors.New("protocol result composition has no network")
+	}
+	now := d.config.Now()
+	if now.IsZero() || now.Unix() < 0 || request.ExpiresAtUnix <= uint64(now.Unix()) ||
+		request.Protocol == "" || request.Version != "1" || len(request.Body) == 0 {
+		return envelope.Event{}, false, errors.New("invalid outbound protocol result")
+	}
+	foreign := payload.Foreign{Protocol: request.Protocol, Version: request.Version, Body: append([]byte(nil), request.Body...)}
+	var body payload.Payload
+	switch request.Kind {
+	case "a2a.message":
+		body = payload.A2AMessage{Foreign: foreign}
+	case "mcp.result":
+		body = payload.MCPResult{Foreign: foreign}
+	default:
+		return envelope.Event{}, false, errors.New("kind is not an outbound protocol result")
+	}
+	if !d.authorizedKind(request.Kind) {
+		return envelope.Event{}, false, errors.New("event class is not authorized by the endpoint delegation")
+	}
+	content, err := payload.Encode(body)
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	event, err := envelope.NewEvent(envelope.Event{Network: d.config.Network,
+		ConversationID: request.ConversationID, SenderAgentID: d.config.Identity.AgentID,
+		SenderEndpointID: d.config.Identity.EndpointID, SenderDeviceID: d.config.Identity.DeviceID,
+		ReplyToEventID: request.ReplyToEventID, CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: request.ExpiresAtUnix,
+		Kind: request.Kind, IdempotencyKey: strings.TrimPrefix(request.IdempotencyKey, "idem_"), Content: content})
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	encoded, err := envelope.EncodeEventJSON(event)
+	if err != nil {
+		return envelope.Event{}, false, err
+	}
+	intent := bytes.NewBufferString(canon.DomainOutboundIntent)
+	for _, value := range []string{d.config.Network.NetworkId, d.config.Network.GenesisRootHash,
+		d.config.Network.GenesisFileHash, d.config.Identity.AgentID, d.config.Identity.EndpointID,
+		d.config.Identity.DeviceID, request.ConversationID, request.ReplyToEventID, request.Kind,
+		request.Protocol, request.Version, request.IdempotencyKey, request.SessionID, request.RecipientEndpointID} {
+		canon.Text(intent, value)
+	}
+	canon.Bytes(intent, request.Body)
 	canon.Uint64(intent, request.ExpiresAtUnix)
 	chosen, compositionFresh, err := d.config.Journal.ClaimOutboundComposition(request.IdempotencyKey, canon.Digest(intent.Bytes()), eventlog.Outbound{
 		EventID: event.EventID, SessionID: request.SessionID, RecipientEndpointID: request.RecipientEndpointID,
