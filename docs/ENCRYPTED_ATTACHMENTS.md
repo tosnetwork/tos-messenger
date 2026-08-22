@@ -219,6 +219,31 @@ FreshClam directory, form the accepted snapshot. EICAR and signature-failure
 checks prove plumbing and supply-chain enforcement, not representative malware
 coverage; the approved hostile corpus remains open.
 
+`tos-attachment-corpus` makes that remaining acceptance reproducible without
+checking malware into this repository. An external approver signs a strict,
+sorted private-sample manifest that commits corpus/revision/scope, approval
+time, single-component filenames, size, SHA-256, category, media type and the
+expected allow/deny decision. The runner is configured with that approver's
+exact Ed25519 public key, so a manifest cannot select its own authority. It
+rehashes every non-writable regular sample, requires exactly the
+`clamav-official` admission scanner, and exercises `Seal` → `OpenForAgent`
+through the same outer sandbox. Only a completed structured scanner deny counts
+as detection; missing resources, invalid policy, launch failure, timeout and
+engine error abort the run instead of satisfying a deny expectation.
+
+On complete agreement, the runner emits a new mode-`0600` Ed25519-signed report
+binding the raw signed-manifest digest, raw admission-policy digest, exact clean
+repository commit/toolchain, each result, scanner binary and staged resource
+evidence. `verify` independently checks both fixed public keys, both artifact
+digests, every approved sample/result and the report signature. This records
+who approved which bytes and who ran them; it cannot prove that the parties are
+organizationally independent or that the selected corpus is representative.
+The same-host plumbing run recorded in
+[`ATTACHMENT_CORPUS_PLUMBING_2026-08-22.md`](evidence/ATTACHMENT_CORPUS_PLUMBING_2026-08-22.md)
+passed clean/EICAR, missing-resource and runner-key-substitution cases. Its
+scope explicitly disclaims external approval and representative coverage. No
+qualifying externally approved private-corpus report has yet been returned.
+
 The address-space ceiling bounds virtual mappings, while fixed `GOMEMLIMIT`
 and `GOMAXPROCS` values constrain the reference Go scanner. `RLIMIT_NPROC` is a
 per-real-user limit on many Linux systems, so it is not by itself an isolated
@@ -264,7 +289,8 @@ releasing plaintext; a separate host probe records exact memory, zero-swap and
 task ceilings from cgroup v2.
 Still open are an independently operated public-TLS deployment, measured
 interrupted wide-area transfer, independently audited retention behavior,
-a representative approved hostile corpus for the pinned ClamAV release,
+a qualifying externally approved representative hostile-corpus report for the
+pinned ClamAV release,
 independent hard-isolation review/evidence, non-text product policy, and
 commercial attachment service terms. A content-addressed object may have
 been copied, so no storage API promises cryptographic erasure it cannot prove.
