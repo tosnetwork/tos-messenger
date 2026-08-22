@@ -102,6 +102,12 @@ also exercises 1/8/32 simultaneous strict peer walks. It corrected a native
 1,024-fetch ceiling that could not represent a valid maximum-size linear
 history and replaced per-request whole-history scans with a verified immutable
 exact-ID index. Independent byte/time/Event ceilings remain in force.
+`NativeNode` also single-flights each exact canonical Head: additional
+authenticated peers claiming it enter a 256-candidate maximum queue instead of
+starting duplicate fetch/verification walks. Failure hands the Head to the
+next still-connected peer; success drops every redundant claimant, exact
+replay is free, stale completion cannot replace the active fallback, and node
+shutdown clears queued work.
 Representative low-cost hardware, concurrent peers, the real M0-R carrier and
 abuse measurements are still required before production defaults are frozen.
 

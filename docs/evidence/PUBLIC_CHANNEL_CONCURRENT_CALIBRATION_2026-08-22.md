@@ -54,3 +54,18 @@ low-cost hardware and hostile-but-authenticated peers still require measured
 external calibration. Large histories should continue to use the verified TOS
 Storage snapshot path where available; raising the fetch-count ceiling does
 not freeze a preferred production route before M0-R.
+
+## Follow-up scheduling correction
+
+The measurement also made duplicate work visible: several authenticated peers
+claiming one exact Head could each start the complete wire, verification and
+commit walk. `NativeNode` now canonicalizes the full Head and permits one
+active peer for it. Up to `MaxSyncPeers * MaxCandidateHeadsPerPeer` candidates
+remain bounded and exact-replay idempotent. A failed active peer selects the
+first still-connected same-Head waiter as its preferred fallback, while
+independently ready distinct Heads may proceed; a successful peer removes all
+redundant waiters. Distinct Heads remain distinct,
+including a History-digest reuse with substituted tips, so a malicious false
+Head cannot suppress the canonical one. Stale completion, disconnected peers,
+queue overflow, caller mutation and node shutdown fail closed under focused and
+race tests.
