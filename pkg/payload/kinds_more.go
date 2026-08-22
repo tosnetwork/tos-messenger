@@ -256,7 +256,12 @@ type A2AMessage struct{ Foreign }
 func (A2AMessage) Schema() string { return "tos.messaging.payload.a2a-message.v1" }
 
 // Validate implements Payload.
-func (a A2AMessage) Validate() error { return a.Foreign.validate() }
+func (a A2AMessage) Validate() error {
+	if a.Protocol != "a2a" {
+		return errors.New("invalid A2A carriage profile")
+	}
+	return a.Foreign.validate()
+}
 
 func decodeA2AMessage(reader *canon.Reader) Payload {
 	return A2AMessage{Foreign: decodeForeign(reader)}
@@ -269,7 +274,12 @@ type MCPCall struct{ Foreign }
 func (MCPCall) Schema() string { return "tos.messaging.payload.mcp-call.v1" }
 
 // Validate implements Payload.
-func (m MCPCall) Validate() error { return m.Foreign.validate() }
+func (m MCPCall) Validate() error {
+	if m.Protocol != "mcp" {
+		return errors.New("invalid MCP call carriage profile")
+	}
+	return m.Foreign.validate()
+}
 
 func decodeMCPCall(reader *canon.Reader) Payload {
 	return MCPCall{Foreign: decodeForeign(reader)}
@@ -282,7 +292,12 @@ type MCPResult struct{ Foreign }
 func (MCPResult) Schema() string { return "tos.messaging.payload.mcp-result.v1" }
 
 // Validate implements Payload.
-func (m MCPResult) Validate() error { return m.Foreign.validate() }
+func (m MCPResult) Validate() error {
+	if m.Protocol != "mcp" {
+		return errors.New("invalid MCP result carriage profile")
+	}
+	return m.Foreign.validate()
+}
 
 func decodeMCPResult(reader *canon.Reader) Payload {
 	return MCPResult{Foreign: decodeForeign(reader)}

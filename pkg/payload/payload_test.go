@@ -379,6 +379,12 @@ func TestInvalidBodiesAreRefused(t *testing.T) {
 		"room with no members": RoomMembershipCommit{RoomID: "room_" + strings.Repeat("9", 64),
 			Epoch: 1, MembershipDigest: "sha256:" + strings.Repeat("b", 64)},
 		"carried message with no body": A2AMessage{Foreign: Foreign{Protocol: "a2a", Version: "1"}},
+		"A2A kind carrying MCP": A2AMessage{Foreign: Foreign{
+			Protocol: "mcp", Version: "2025-06-18", Body: []byte("{}")}},
+		"MCP call carrying A2A": MCPCall{Foreign: Foreign{
+			Protocol: "a2a", Version: "1.0", Body: []byte("{}")}},
+		"MCP result carrying A2A": MCPResult{Foreign: Foreign{
+			Protocol: "a2a", Version: "1.0", Body: []byte("{}")}},
 	}
 	for name, value := range cases {
 		t.Run(name, func(t *testing.T) {
