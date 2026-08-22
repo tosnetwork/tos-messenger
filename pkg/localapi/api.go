@@ -33,7 +33,7 @@ import (
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema = "tos.messaging.local-request.v6"
+	RequestSchema = "tos.messaging.local-request.v7"
 	// ResponseSchema is the strict wire schema of a response.
 	ResponseSchema = "tos.messaging.local-response.v5"
 
@@ -65,6 +65,9 @@ const (
 	// OpCompose submits message meaning; the daemon supplies identity, network,
 	// clock, payload schema, kind and Event ID.
 	OpCompose Operation = "outbox.compose"
+	// OpComposeProtocolResult queues a daemon-identified A2A response or MCP
+	// result. It cannot synthesize an inbound call.
+	OpComposeProtocolResult Operation = "outbox.compose-protocol-result"
 	// OpPendingAttachments lists only opaque metadata for encrypted attachment
 	// Events. It never exposes the E2EE-carried Reference or fetch key.
 	OpPendingAttachments Operation = "attachments.pending"
@@ -167,7 +170,7 @@ const (
 
 var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
-		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {},
+		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 		OpPendingAttachments: {}, OpClaimAttachment: {},
 		OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
@@ -196,7 +199,7 @@ func Permits(principal Principal, operation Operation) bool {
 }
 
 var operations = map[Operation]struct{}{
-	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {},
+	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 	OpPendingAttachments: {}, OpClaimAttachment: {},
 	OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
@@ -253,6 +256,10 @@ type Request struct {
 	MediaType           string          `json:"media_type,omitempty"`
 	Body                string          `json:"body,omitempty"`
 	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
+	ProtocolKind        string          `json:"protocol_kind,omitempty"`
+	Protocol            string          `json:"protocol,omitempty"`
+	ProtocolVersion     string          `json:"protocol_version,omitempty"`
+	ProtocolBody        []byte          `json:"protocol_body_base64,omitempty"`
 
 	// Action is one proposed action, for the firewall operations. It is the
 	// action itself rather than an identifier, because the identifier is
@@ -655,19 +662,23 @@ func ValidateRequest(request Request) error {
 	if request.Op != OpVerifyAcceptedQuote && request.ExpectedQuoteTerms != nil {
 		return errors.New("only Quote verification carries expected Quote terms")
 	}
-	if request.Op != OpCompose && request.Op != OpBeginOutboundAttachment && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
+	if request.Op != OpCompose && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
 		(request.ConversationID != "" || request.IdempotencyKey != "") {
 		return errors.New("only outbound composition carries message semantics")
 	}
 	if request.Op == OpListDeviceHistory && request.IdempotencyKey != "" {
 		return errors.New("a history listing has no idempotency key")
 	}
-	if request.Op != OpCompose && request.Op != OpBeginOutboundAttachment && (request.RoomID != "" || request.ReplyToEventID != "" ||
+	if request.Op != OpCompose && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && (request.RoomID != "" || request.ReplyToEventID != "" ||
 		request.MembershipEpoch != 0 || request.MediaType != "" || request.Body != "") {
 		return errors.New("only message composition carries message body semantics")
 	}
 	if request.Op == OpBeginOutboundAttachment && request.Body != "" {
 		return errors.New("outbound attachment begin does not carry an inline body")
+	}
+	if request.Op != OpComposeProtocolResult && (request.ProtocolKind != "" || request.Protocol != "" ||
+		request.ProtocolVersion != "" || len(request.ProtocolBody) != 0) {
+		return errors.New("only protocol result composition carries protocol body semantics")
 	}
 	if request.Op != OpBeginOutboundAttachment && (request.Filename != "" || request.PlaintextDigest != "" || request.PlaintextBytes != 0) {
 		return errors.New("only outbound attachment begin carries plaintext metadata")
@@ -736,6 +747,20 @@ func ValidateRequest(request Request) error {
 		}
 		if request.MediaType == "" || request.Body == "" {
 			return errors.New("a composition needs media type and body")
+		}
+		return nil
+	case OpComposeProtocolResult:
+		if !conversationPattern.MatchString(request.ConversationID) || !eventPattern.MatchString(request.ReplyToEventID) ||
+			!sessionPattern.MatchString(request.SessionID) || !endpointPattern.MatchString(request.RecipientEndpointID) ||
+			!idempotencyPattern.MatchString(request.IdempotencyKey) || request.ExpiresAtUnix == 0 || len(request.ProtocolBody) == 0 {
+			return errors.New("a protocol result needs canonical source, route, expiry, idempotency and body")
+		}
+		if !((request.ProtocolKind == "a2a.message" && request.Protocol == "a2a") ||
+			(request.ProtocolKind == "mcp.result" && request.Protocol == "mcp")) || request.ProtocolVersion != "1" {
+			return errors.New("invalid protocol result profile")
+		}
+		if request.RoomID != "" || request.MembershipEpoch != 0 || request.MediaType != "" || request.Body != "" {
+			return errors.New("a protocol result cannot carry text or room semantics")
 		}
 		return nil
 	case OpBeginOutboundAttachment:

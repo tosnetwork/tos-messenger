@@ -547,6 +547,51 @@ func TestRuntimeComposesDaemonOwnedEventWithStableRetry(t *testing.T) {
 	}
 }
 
+func TestRuntimeComposesOnlyBoundProtocolResults(t *testing.T) {
+	h := newHarness(t)
+	request := Request{Op: OpComposeProtocolResult, ConversationID: convoID,
+		ReplyToEventID: "evt_" + strings.Repeat("9", 64), ProtocolKind: "a2a.message",
+		Protocol: "a2a", ProtocolVersion: "1", ProtocolBody: []byte(`{"task":"complete"}`),
+		IdempotencyKey: "idem_" + strings.Repeat("b", 64), SessionID: sessionID,
+		RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 3600}
+	first := h.call(t, request)
+	if !first.OK || !first.Fresh || first.EventID == "" {
+		t.Fatalf("compose A2A result: %+v", first)
+	}
+	retry := h.call(t, request)
+	if !retry.OK || retry.Fresh || retry.EventID != first.EventID {
+		t.Fatalf("protocol result retry changed: first=%+v retry=%+v", first, retry)
+	}
+	delivery, found, err := h.journal.LookupDelivery(first.EventID)
+	if err != nil || !found {
+		t.Fatalf("lookup protocol result: found=%v err=%v", found, err)
+	}
+	raw, _ := delivery.Payload()
+	event, err := envelope.DecodeEventJSON(raw)
+	if err != nil || event.Kind != "a2a.message" || event.SenderAgentID != senderID || event.ReplyToEventID != request.ReplyToEventID {
+		t.Fatalf("protocol result escaped daemon authority: %+v err=%v", event, err)
+	}
+	decoded, err := payload.Decode(event.Kind, event.Content)
+	body, ok := decoded.(payload.A2AMessage)
+	if err != nil || !ok || body.Protocol != "a2a" || !bytes.Equal(body.Body, request.ProtocolBody) {
+		t.Fatalf("unexpected protocol result body: %+v err=%v", decoded, err)
+	}
+	for name, mutate := range map[string]func(*Request){
+		"call kind":     func(r *Request) { r.ProtocolKind = "mcp.call"; r.Protocol = "mcp" },
+		"cross profile": func(r *Request) { r.Protocol = "mcp" },
+		"text body":     func(r *Request) { r.Body = "smuggled" },
+		"no source":     func(r *Request) { r.ReplyToEventID = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := request
+			mutate(&changed)
+			if err := ValidateRequest(changed); err == nil {
+				t.Fatalf("invalid protocol result validated: %+v", changed)
+			}
+		})
+	}
+}
+
 func TestRuntimeComposesBoundRoomMessage(t *testing.T) {
 	h := newHarness(t)
 	roomID := "room_" + strings.Repeat("b", 64)

@@ -272,7 +272,7 @@ For outbound OpenFox attachments, create a mode-`0600` operator document:
 
 The storage and Endpoint keys must be distinct. Startup pins the signer to the
 live finalized Endpoint public key. OpenFox streams exact MediaStore files over
-local API v6; the daemon encrypts each 1 MiB chunk, durably resumes ingestion
+local API v7; the daemon encrypts each 1 MiB chunk, durably resumes ingestion
 and storage upload, signs separate upload/fetch capabilities, verifies the
 final `StoredAck`, and only then queues the v3 Event. The model cannot select
 the storage origin, retention, authority keys, network identity or Event ID.
@@ -447,7 +447,7 @@ currently recorded.
 
 Startup re-hashes every configured executable before opening the runtime
 socket. OpenFox's `tos_messenger` settings must set
-`"enable_attachments": true`; it then uses local request v6/response v5 and
+`"enable_attachments": true`; it then uses local request v7/response v5 and
 receives only admitted `text/plain`, never the Reference or fetch key.
 Production deployment still needs a release-pinned scanner selection and representative corpus,
 must enable the explicit cgroup block when hard RSS/swap/task isolation is

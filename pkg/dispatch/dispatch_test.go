@@ -190,6 +190,43 @@ func TestComposeRetrySurvivesRestartWithoutTransport(t *testing.T) {
 	}
 }
 
+func TestComposeProtocolResultIsDaemonOwnedStableAndProfileBound(t *testing.T) {
+	journal, err := eventlog.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	dispatcher, err := New(Config{Journal: journal, Now: func() time.Time { return time.Unix(int64(baseUnix), 0) },
+		Identity: testIdentity(), Network: &nativev1.NetworkDomain{NetworkId: "tos-local",
+			GenesisRootHash: strings.Repeat("a", 64), GenesisFileHash: strings.Repeat("b", 64)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ProtocolResultRequest{ConversationID: convoID, ReplyToEventID: "evt_" + strings.Repeat("9", 64),
+		Kind: "mcp.result", Protocol: "mcp", Version: "1", Body: []byte(`{"ok":true}`),
+		IdempotencyKey: "idem_" + strings.Repeat("a", 64), SessionID: sessionID,
+		RecipientEndpointID: peerMEP, ExpiresAtUnix: baseUnix + 3600}
+	first, fresh, err := dispatcher.ComposeProtocolResultAndQueue(request)
+	if err != nil || !fresh || first.Kind != "mcp.result" || first.SenderAgentID != senderID ||
+		first.ReplyToEventID != request.ReplyToEventID {
+		t.Fatalf("unexpected protocol result: %+v fresh=%v err=%v", first, fresh, err)
+	}
+	retry, fresh, err := dispatcher.ComposeProtocolResultAndQueue(request)
+	if err != nil || fresh || retry.EventID != first.EventID {
+		t.Fatalf("protocol result retry changed: %+v fresh=%v err=%v", retry, fresh, err)
+	}
+	changed := request
+	changed.Body = []byte(`{"ok":false}`)
+	if _, _, err := dispatcher.ComposeProtocolResultAndQueue(changed); err == nil {
+		t.Fatal("idempotency key accepted a substituted protocol result")
+	}
+	changed = request
+	changed.Kind, changed.Protocol = "mcp.call", "mcp"
+	if _, _, err := dispatcher.ComposeProtocolResultAndQueue(changed); err == nil {
+		t.Fatal("result boundary synthesized an MCP call")
+	}
+}
+
 func (h *harness) event(t *testing.T, body string) envelope.Event {
 	t.Helper()
 	event, err := envelope.NewEvent(envelope.Event{
