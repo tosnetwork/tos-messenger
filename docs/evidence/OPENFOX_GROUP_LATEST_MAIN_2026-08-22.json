@@ -1,0 +1,69 @@
+{
+  "schema": "openfox.messenger-lab-acceptance.v1",
+  "verified_at": "2026-08-22T07:46:26.591434907Z",
+  "scope": "same-host-local-route-only",
+  "room_id": "room_2f58a0e48fd6ff8f52653abc51cf3b87762f604a7af903bed5a110d8073d4fd5",
+  "request_id": "acceptance-aa02f93e-20260822-v1",
+  "opening_event_id": "msg_e387831755d1aad4ccaeb6e198f2c9ed8081ab8644b0453f0cb90fdab6cc15c5",
+  "bob_reply_event_id": "msg_82e86a102fe79950291fd01792eb48032938121dccc1769b7b63a2c522aaaffa",
+  "carol_reply_event_id": "msg_70fe4912aa5996b4a5a955baee5513f2d9ec9f511885900522f6143271497eea",
+  "exact_replay_stable": true,
+  "relay_state": "/home/tomi/.local/state/tos-messenger-openfox-mls/relay.json",
+  "relay_mode": "0600",
+  "relay_bytes": 152784,
+  "relay_sha256": "c2a3761d517febdacde3d17a9af9363c8848897b642c39cd7f4c04632a4caf50",
+  "relay_plaintext_found": false,
+  "agents": [
+    {
+      "agent_id": "agent_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "control_socket": "/run/user/1000/openfox-messenger-agent-alice.sock",
+      "active_member": true,
+      "reply_mode": "agent-loop",
+      "transcript_records": 123,
+      "acceptance_events": 3
+    },
+    {
+      "agent_id": "agent_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "control_socket": "/run/user/1000/openfox-messenger-agent-bob.sock",
+      "active_member": true,
+      "reply_mode": "agent-loop",
+      "transcript_records": 123,
+      "acceptance_events": 3
+    },
+    {
+      "agent_id": "agent_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "control_socket": "/run/user/1000/openfox-messenger-agent-carol.sock",
+      "active_member": true,
+      "reply_mode": "agent-loop",
+      "transcript_records": 123,
+      "acceptance_events": 3
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "openfox-messenger-lab-agent",
+      "path": "/home/tomi/.local/bin/openfox-messenger-lab-agent",
+      "sha256": "84cfb1b2b0b4bd43e8bb1a055c7875a18356b43e70b7a0dde433596af8a5d3d2"
+    },
+    {
+      "name": "openfox-messenger-lab-deploy",
+      "path": "/home/tomi/.local/bin/openfox-messenger-lab-deploy",
+      "sha256": "ffb59d56a905919e3354f8cd32a729a05a111110ee80f0e03f54421f9fb8c2d1"
+    },
+    {
+      "name": "tos-messenger-lab-group",
+      "path": "/home/tomi/.local/bin/tos-messenger-lab-group",
+      "sha256": "ac7a9fd9f4addeaa1edc47a4e52b77fd71b8385c2c6a347862d6dda3abda9bd0"
+    },
+    {
+      "name": "tos-messenger-openfox-mls",
+      "path": "/home/tomi/.local/bin/tos-messenger-openfox-mls",
+      "sha256": "8f4dfeaeceb64499eb380c154760413b67ac6888ecf0cb418ad2e11540c2a74f"
+    },
+    {
+      "name": "tos-openmls-driver",
+      "path": "/home/tomi/.local/libexec/tos-openmls-driver",
+      "sha256": "4abfcc49acb24481b0b51319b8ca2f9cbe906c90fbccb156946f76e651111ceb"
+    }
+  ]
+}
