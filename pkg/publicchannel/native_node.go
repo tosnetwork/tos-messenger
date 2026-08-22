@@ -181,7 +181,7 @@ type NativeNode struct {
 	mutex        sync.Mutex
 	allowed      map[string]ed25519.PublicKey
 	carriers     map[string]*NativeCarrier
-	syncing      map[string]bool
+	syncs        nativeSyncScheduler
 	catching     map[string]bool
 	history      History
 	historyByID  map[string]int
@@ -230,7 +230,7 @@ func NewNativeNode(config NativeNodeConfig) (*NativeNode, error) {
 		onSitesHint: config.OnSitesHint,
 		now:         now, logf: config.Logf,
 		overlayKey: overlayKey, localID: string(localID), allowed: make(map[string]ed25519.PublicKey),
-		carriers: make(map[string]*NativeCarrier), syncing: make(map[string]bool), catching: make(map[string]bool),
+		carriers: make(map[string]*NativeCarrier), catching: make(map[string]bool),
 		syncContext: syncContext, cancelSync: cancelSync}
 	history, found, err := n.store.LoadHistory(n.profile, n.authority, n.delegations, n.now())
 	if err != nil {
@@ -493,40 +493,34 @@ func indexNativeHistory(history History) (map[string]int, error) {
 	return index, nil
 }
 
-func (n *NativeNode) syncHead(peerID string, head Head) {
+func (n *NativeNode) syncHead(peerID string, head Head) bool {
 	n.mutex.Lock()
-	if n.closed || n.syncing[peerID] {
+	if n.closed {
 		n.mutex.Unlock()
-		return
+		return false
 	}
 	carrier := n.carriers[idFromPeerLabel(peerID)]
 	if carrier == nil {
 		n.mutex.Unlock()
-		return
+		return false
 	}
 	if n.historyFound && head.Matches(n.history) {
 		n.mutex.Unlock()
-		return
+		return true
 	}
-	n.syncing[peerID] = true
 	n.mutex.Unlock()
-	defer func() {
-		n.mutex.Lock()
-		delete(n.syncing, peerID)
-		n.mutex.Unlock()
-	}()
 	ctx, cancel := context.WithTimeout(n.syncContext, 5*time.Minute)
 	defer cancel()
 	cursor, err := NewFetchCursor(head, nil)
 	if err != nil {
 		n.log("public channel sync cursor rejected peer=%s: %v", peerID, err)
-		return
+		return false
 	}
 	for {
 		request, needed, err := cursor.Next()
 		if err != nil {
 			n.log("public channel sync rejected peer=%s: %v", peerID, err)
-			return
+			return false
 		}
 		if !needed {
 			break
@@ -534,27 +528,27 @@ func (n *NativeNode) syncHead(peerID string, head Head) {
 		fetched, unavailable, err := carrier.Fetch(ctx, request)
 		if err != nil || len(unavailable) != 0 {
 			n.log("public channel sync incomplete peer=%s unavailable=%d err=%v", peerID, len(unavailable), err)
-			return
+			return false
 		}
 		if err = cursor.Merge(fetched); err != nil {
 			n.log("public channel sync merge rejected peer=%s: %v", peerID, err)
-			return
+			return false
 		}
 	}
 	known := cursor.Events()
 	if _, err := VerifySyncedHistory(head, n.profile, known, n.authority, n.delegations, n.now()); err != nil {
 		n.log("public channel sync head did not reproduce peer=%s: %v", peerID, err)
-		return
+		return false
 	}
 	history, changed, err := n.store.CommitHistory(n.profile, known, n.authority, n.delegations, n.now())
 	if err != nil {
 		n.log("public channel sync commit rejected peer=%s: %v", peerID, err)
-		return
+		return false
 	}
 	index, err := indexNativeHistory(history)
 	if err != nil {
 		n.log("public channel sync index rejected peer=%s: %v", peerID, err)
-		return
+		return false
 	}
 	n.mutex.Lock()
 	n.history, n.historyByID, n.historyFound = history, index, true
@@ -570,19 +564,50 @@ func (n *NativeNode) syncHead(peerID string, head Head) {
 			go n.publishHeadTo(item, history.Head())
 		}
 	}
+	return true
 }
 
 func (n *NativeNode) scheduleSync(peerID string, head Head) {
+	candidate, err := newNativeSyncCandidate(peerID, head)
+	if err != nil {
+		n.log("public channel sync candidate rejected peer=%s: %v", peerID, err)
+		return
+	}
 	n.mutex.Lock()
-	if n.closed {
+	if n.closed || n.historyFound && head.Matches(n.history) || n.carriers[idFromPeerLabel(peerID)] == nil {
 		n.mutex.Unlock()
 		return
 	}
-	n.wait.Add(1)
+	start, err := n.syncs.enqueue(candidate)
+	if err != nil {
+		n.mutex.Unlock()
+		n.log("public channel sync candidate refused peer=%s: %v", peerID, err)
+		return
+	}
+	if start {
+		n.startSyncLocked(candidate)
+	}
 	n.mutex.Unlock()
+}
+
+func (n *NativeNode) startSyncLocked(candidate nativeSyncCandidate) {
+	n.wait.Add(1)
 	go func() {
 		defer n.wait.Done()
-		n.syncHead(peerID, head)
+		succeeded := n.syncHead(candidate.peerID, candidate.head)
+		n.mutex.Lock()
+		if n.closed {
+			n.syncs.reset()
+			n.mutex.Unlock()
+			return
+		}
+		starts := n.syncs.complete(candidate, succeeded, func(peerID string) bool {
+			return n.carriers[idFromPeerLabel(peerID)] != nil
+		})
+		for _, next := range starts {
+			n.startSyncLocked(next)
+		}
+		n.mutex.Unlock()
 	}()
 }
 
@@ -760,6 +785,7 @@ func (n *NativeNode) Close() {
 	}
 	n.closed = true
 	n.cancelSync()
+	n.syncs.reset()
 	carriers := make([]*NativeCarrier, 0, len(n.carriers))
 	for _, carrier := range n.carriers {
 		carriers = append(carriers, carrier)
