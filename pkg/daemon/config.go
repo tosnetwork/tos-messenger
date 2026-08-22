@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/internal/ids"
+	"github.com/tosnetwork/tos-messenger/internal/securefile"
 	"github.com/tosnetwork/tos-messenger/pkg/admission"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentapi"
 	"github.com/tosnetwork/tos-messenger/pkg/attachments"
@@ -31,11 +33,12 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/tosaddr"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/nativeclient"
 	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
 )
 
 // ConfigSchema is the strict schema of a daemon configuration.
-const ConfigSchema = "tos.messaging.daemon-config.v9"
+const ConfigSchema = "tos.messaging.daemon-config.v10"
 
 // PublicationMode names the route-independent public material maintained by
 // this installation. It does not select an HTTPS, DHT, or message transport.
@@ -138,6 +141,12 @@ type Config struct {
 	// message over the same network path.
 	Discovery DiscoveryConfig `json:"discovery"`
 
+	// ContactDNS optionally enables human .tos recipient input at the runtime
+	// socket. It is only a canonicalization transport: the returned AgentID
+	// must still pass Discovery's delegation, descriptor, endpoint, device and
+	// prekey verification chain.
+	ContactDNS *ContactDNSConfig `json:"contact_dns,omitempty"`
+
 	// Publication must be stated separately from Discovery and Transport. In
 	// prekeys mode the daemon plans public generations and accepts public,
 	// device-signed contributions; it never creates or stores device secrets.
@@ -197,6 +206,65 @@ type Config struct {
 	SweepIntervalSeconds       uint64 `json:"sweep_interval_seconds,omitempty"`
 	MaintenanceIntervalSeconds uint64 `json:"maintenance_interval_seconds,omitempty"`
 	RetentionSeconds           uint64 `json:"retention_seconds,omitempty"`
+}
+
+// ContactDNSConfig authenticates the daemon to a TOS Native DNS gateway.
+// The bearer itself is read from a bounded regular file so it is not copied
+// into the reviewable daemon configuration.
+type ContactDNSConfig struct {
+	BaseURL         string `json:"base_url"`
+	BearerTokenFile string `json:"bearer_token_file"`
+	TimeoutSeconds  uint64 `json:"timeout_seconds,omitempty"`
+	MaxMessageBytes int    `json:"max_message_bytes,omitempty"`
+	Insecure        bool   `json:"insecure,omitempty"`
+	ServerName      string `json:"server_name,omitempty"`
+	CAFile          string `json:"ca_file,omitempty"`
+	ClientCertFile  string `json:"client_cert_file,omitempty"`
+	ClientKeyFile   string `json:"client_key_file,omitempty"`
+}
+
+func (c ContactDNSConfig) Validate() error {
+	parsed, err := url.Parse(c.BaseURL)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		parsed.Path != "" || parsed.Scheme != "https" && !(parsed.Scheme == "http" && c.Insecure) {
+		return errors.New("contact DNS gateway URL is invalid")
+	}
+	for label, path := range map[string]string{
+		"bearer token": c.BearerTokenFile, "CA": c.CAFile,
+		"client certificate": c.ClientCertFile, "client key": c.ClientKeyFile,
+	} {
+		if path != "" && (!filepath.IsAbs(path) || filepath.Clean(path) != path) {
+			return errors.New("contact DNS " + label + " path must be absolute and clean")
+		}
+	}
+	if c.BearerTokenFile == "" || (c.ClientCertFile == "") != (c.ClientKeyFile == "") {
+		return errors.New("contact DNS credentials are incomplete")
+	}
+	if c.TimeoutSeconds > 15*60 || c.MaxMessageBytes < 0 || c.MaxMessageBytes > 64<<20 {
+		return errors.New("contact DNS resource bound is invalid")
+	}
+	return nil
+}
+
+func (c ContactDNSConfig) Client() (*nativeclient.Client, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	raw, err := securefile.ReadBoundedRegular(c.BearerTokenFile, 16<<10)
+	if err != nil {
+		return nil, errors.New("read contact DNS bearer token: " + err.Error())
+	}
+	token := strings.TrimSpace(string(raw))
+	clear(raw)
+	client, err := nativeclient.New(nativeclient.Config{
+		BaseURL: c.BaseURL, BearerToken: token, Timeout: time.Duration(c.TimeoutSeconds) * time.Second,
+		MaxMessageBytes: c.MaxMessageBytes, Insecure: c.Insecure, ServerName: c.ServerName,
+		CAFile: c.CAFile, ClientCertFile: c.ClientCertFile, ClientKeyFile: c.ClientKeyFile,
+	})
+	if err != nil {
+		return nil, errors.New("construct contact DNS client: " + err.Error())
+	}
+	return client, nil
 }
 
 type AttachmentScannerConfig struct {
@@ -750,6 +818,14 @@ func (c Config) Validate() error {
 	}
 	if err := c.Discovery.Validate(c.AgentID); err != nil {
 		return err
+	}
+	if c.ContactDNS != nil {
+		if c.Discovery.Mode == DiscoveryNone {
+			return errors.New("contact DNS requires verified directory discovery")
+		}
+		if err := c.ContactDNS.Validate(); err != nil {
+			return err
+		}
 	}
 	if err := c.Identity().Validate(); err != nil {
 		return err

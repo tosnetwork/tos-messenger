@@ -169,6 +169,14 @@ nobody made:
   settings. `tos-dht-https` pins one bounded local DHT global configuration and
   a finite peer list mapping every non-local Agent to delegation and committed
   descriptor-policy files, with explicit refresh and HTTPS budgets;
+- optional **contact DNS** credentials for human `.tos` recipient input. The
+  bearer is read from a bounded regular file and the gateway must be HTTPS
+  unless plaintext is explicitly enabled for a test deployment. This layer
+  resolves only to AgentID; `tos-dht-https` discovery must then verify the
+  configured peer's delegation, descriptor, Endpoint, devices and prekeys.
+  Omitting it disables `.tos` input but explicit AgentID resolution still uses
+  the same verified directory path; see
+  [`DNS_RECIPIENT_CANONICALIZATION.md`](DNS_RECIPIENT_CANONICALIZATION.md);
 - **who this installation speaks for** — its Agent, endpoint and device — since
   an outbound event must say it came from here; and
 - the **inbox admission policy**, private known/blocked rosters, payload bound,
@@ -206,7 +214,7 @@ misspelled setting that is silently dropped is a setting an operator believes
 is in force.
 
 `docs/daemon-config.example.json` is a complete file with placeholder values.
-Finalized Quote verification is retained in schema `tos.messaging.daemon-config.v9`;
+Finalized Quote verification is retained in schema `tos.messaging.daemon-config.v10`;
 older files are rejected instead of silently disabling discovery or public
 generation planning, applying an inbox policy the endpoint never committed, or
 leaving the native buyer without its finalized-Quote check.
@@ -302,7 +310,7 @@ and launcher files must be regular, executable, non-writable and not symlinks.
 
 `tos-attachment-text-scanner` is a parser-free reference inspector, not a
 production malware product. It refuses every non-text type. To enable the
-daemon-owned OpenFox path, add the following to daemon config v9 after replacing
+daemon-owned OpenFox path, add the following to daemon config v10 after replacing
 all digest placeholders with the reviewed lowercase `sha256:` values:
 
 ```json

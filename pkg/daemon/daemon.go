@@ -27,6 +27,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
 	"github.com/tosnetwork/tos-messenger/pkg/protocolbridge"
+	"github.com/tosnetwork/tos-service-protocol/pkg/nativeclient"
 )
 
 const (
@@ -65,9 +66,16 @@ type Daemon struct {
 	a2aReceiver   protocolEventReceiver
 	mcpReceiver   protocolEventReceiver
 	quoteResolver negotiation.QuoteResolver
+	contactDNS    *nativeclient.Client
 	now           func() time.Time
 
 	closeOnce sync.Once
+}
+
+type contactResolveFunc func(context.Context, string) (contact.Result, error)
+
+func (f contactResolveFunc) Resolve(ctx context.Context, input string) (contact.Result, error) {
+	return f(ctx, input)
 }
 
 // ResolveContact accepts a human contact input at the daemon boundary. A .tos
@@ -76,10 +84,9 @@ type Daemon struct {
 // chain as an explicit Agent ID. The returned CanonicalName is display metadata;
 // callers must persist and authorize only Result.AgentID.
 //
-// DNS is supplied by the caller so transport credentials remain outside the
-// daemon configuration. The service-protocol nativeclient.Client satisfies the
-// interface. Discovery must be enabled because there is no safe contact result
-// without the existing directory chain.
+// DNS transport credentials are operator-owned. The service-protocol
+// nativeclient.Client satisfies the interface. Discovery must be enabled
+// because there is no safe contact result without the existing directory chain.
 func (d *Daemon) ResolveContact(ctx context.Context, input string, dns contact.DNSAliasClient) (contact.Result, error) {
 	if d == nil || d.discovery == nil || d.discovery.contacts == nil {
 		return contact.Result{}, errors.New("contact discovery is not enabled")
@@ -150,6 +157,12 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		return nil, err
 	}
 	instance := &Daemon{config: config, journal: journal, observer: observer, now: time.Now}
+	assembled := false
+	defer func() {
+		if !assembled && instance.contactDNS != nil {
+			_ = instance.contactDNS.Close()
+		}
+	}()
 	delegation, err := verifier.Verify(config, time.Now())
 	if err != nil {
 		_ = journal.Close()
@@ -241,6 +254,19 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		serverConfig.QuoteResolver = quoteResolver
 		serverConfig.Network = config.Network()
 	}
+	var contactDNS contact.DNSAliasClient
+	if config.ContactDNS != nil {
+		client, clientErr := config.ContactDNS.Client()
+		if clientErr != nil {
+			_ = journal.Close()
+			return nil, clientErr
+		}
+		instance.contactDNS = client
+		contactDNS = client
+	}
+	serverConfig.ContactResolver = contactResolveFunc(func(ctx context.Context, input string) (contact.Result, error) {
+		return instance.ResolveContact(ctx, input, contactDNS)
+	})
 	server, err := localapi.NewServer(serverConfig)
 	if err != nil {
 		_ = journal.Close()
@@ -346,6 +372,7 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		}
 		prekeys.listener = device
 	}
+	assembled = true
 	return instance, nil
 }
 
@@ -735,6 +762,9 @@ func (d *Daemon) Close() error {
 			_ = os.Remove(d.config.Publication.DeviceSocketPath)
 		}
 		_ = d.discovery.Close()
+		if d.contactDNS != nil {
+			_ = d.contactDNS.Close()
+		}
 		err = d.journal.Close()
 	})
 	return err

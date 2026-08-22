@@ -16,6 +16,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/internal/localwire"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentadmission"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentops"
+	"github.com/tosnetwork/tos-messenger/pkg/contact"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
@@ -61,6 +62,14 @@ type Config struct {
 	// AttachmentEmitter is optional and independently operator-configured. It
 	// owns outbound encryption, capability signing, upload and durable ordering.
 	AttachmentEmitter AttachmentEmitter
+	// ContactResolver is the daemon-owned alias/AgentID canonicalization
+	// boundary. The runtime receives no directory, endpoint, device, prekey, or
+	// session authority through this interface.
+	ContactResolver ContactResolver
+}
+
+type ContactResolver interface {
+	Resolve(context.Context, string) (contact.Result, error)
 }
 
 type AttachmentAdmitter interface {
@@ -221,9 +230,11 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 	case OpQueue:
 		return s.queue(request)
 	case OpCompose:
-		return s.compose(request)
+		return s.compose(ctx, request)
 	case OpComposeProtocolResult:
 		return s.composeProtocolResult(request)
+	case OpResolveContact:
+		return s.resolveContact(ctx, request)
 	case OpPendingAttachments:
 		return s.pendingAttachments(request, now)
 	case OpClaimAttachment:
@@ -276,6 +287,20 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.listDeviceHistory(request)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
+}
+
+func (s *Server) resolveContact(ctx context.Context, request Request) Response {
+	if s.config.ContactResolver == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("contact resolution is not configured"))
+	}
+	result, err := s.config.ContactResolver.Resolve(ctx, request.Recipient)
+	if err != nil {
+		return refuse(fault.CodeNotAuthentic, err)
+	}
+	if !agentPattern.MatchString(result.AgentID) {
+		return refuse(fault.CodeNotAuthentic, errors.New("contact resolution returned no canonical AgentID"))
+	}
+	return Response{OK: true, AgentID: result.AgentID, CanonicalName: result.CanonicalName}
 }
 
 func (s *Server) beginOutboundAttachment(request Request) Response {
@@ -524,13 +549,28 @@ func (s *Server) queue(request Request) Response {
 	return Response{OK: true, Fresh: fresh}
 }
 
-func (s *Server) compose(request Request) Response {
+func (s *Server) compose(ctx context.Context, request Request) Response {
+	if request.RecipientAgentID != "" {
+		if s.config.ContactResolver == nil {
+			return refuse(fault.CodeClassNotDelegated, errors.New("recipient route verification is not configured"))
+		}
+		resolved, err := s.config.ContactResolver.Resolve(ctx, request.RecipientAgentID)
+		if err != nil || resolved.AgentID != request.RecipientAgentID ||
+			resolved.Directory.Descriptor.AgentID != request.RecipientAgentID ||
+			resolved.Directory.Descriptor.EndpointID != request.RecipientEndpointID {
+			if err == nil {
+				err = errors.New("recipient route is not bound to the canonical AgentID")
+			}
+			return refuse(fault.CodeNotAuthentic, err)
+		}
+	}
 	event, fresh, err := s.config.Dispatcher.ComposeAndQueue(dispatch.ComposeRequest{
 		ConversationID: request.ConversationID, RoomID: request.RoomID,
 		ReplyToEventID: request.ReplyToEventID, MembershipEpoch: request.MembershipEpoch,
 		MediaType: request.MediaType, Body: request.Body, IdempotencyKey: request.IdempotencyKey,
 		SessionID: request.SessionID, RecipientEndpointID: request.RecipientEndpointID,
-		ExpiresAtUnix: request.ExpiresAtUnix,
+		RecipientAgentID: request.RecipientAgentID,
+		ExpiresAtUnix:    request.ExpiresAtUnix,
 	})
 	if err != nil {
 		return refuse(fault.CodeInternal, err)
