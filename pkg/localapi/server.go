@@ -69,6 +69,9 @@ type Config struct {
 	// DirectConversationEnsurer owns the durable AgentID-keyed first-contact
 	// boundary. Its result deliberately exposes no Endpoint, Device or Session.
 	DirectConversationEnsurer DirectConversationEnsurer
+	// DirectMessageSender accepts only human recipient intent and message
+	// semantics. It never accepts Endpoint, Device, Session or route authority.
+	DirectMessageSender DirectMessageSender
 }
 
 type ContactResolver interface {
@@ -84,6 +87,14 @@ type DirectConversationResult struct {
 
 type DirectConversationEnsurer interface {
 	EnsureDirectConversation(context.Context, string) (DirectConversationResult, error)
+}
+
+type DirectMessageResult struct {
+	AgentID, CanonicalName, ConversationID, EventID, Readiness string
+}
+
+type DirectMessageSender interface {
+	SendDirectMessage(context.Context, string, string, string, string, uint64) (DirectMessageResult, error)
 }
 
 type AttachmentAdmitter interface {
@@ -251,6 +262,8 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.resolveContact(ctx, request)
 	case OpEnsureDirectConversation:
 		return s.ensureDirectConversation(ctx, request)
+	case OpSendDirect:
+		return s.sendDirect(ctx, request)
 	case OpPendingAttachments:
 		return s.pendingAttachments(request, now)
 	case OpClaimAttachment:
@@ -303,6 +316,23 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.listDeviceHistory(request)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
+}
+
+func (s *Server) sendDirect(ctx context.Context, request Request) Response {
+	if s.config.DirectMessageSender == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("direct message sending is not configured"))
+	}
+	result, err := s.config.DirectMessageSender.SendDirectMessage(ctx, request.Recipient,
+		request.MediaType, request.Body, request.IdempotencyKey, request.ExpiresAtUnix)
+	if err != nil {
+		return refuse(fault.CodeNotAuthentic, err)
+	}
+	if !agentPattern.MatchString(result.AgentID) || !conversationPattern.MatchString(result.ConversationID) ||
+		!eventPattern.MatchString(result.EventID) || result.Readiness != "queued" {
+		return refuse(fault.CodeNotAuthentic, errors.New("direct message result is not canonical"))
+	}
+	return Response{OK: true, AgentID: result.AgentID, CanonicalName: result.CanonicalName,
+		ConversationID: result.ConversationID, EventID: result.EventID, Readiness: result.Readiness}
 }
 
 func (s *Server) resolveContact(ctx context.Context, request Request) Response {

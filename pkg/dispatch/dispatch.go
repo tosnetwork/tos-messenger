@@ -35,9 +35,14 @@ type Message struct {
 	EventID             string
 	SessionID           string
 	RecipientEndpointID string
+	RecipientDeviceID   string
 	ConversationID      string
-	Ciphertext          []byte
-	ExpiresAtUnix       uint64
+	// Bootstrap is present on an initiator's first-contact retries and contains
+	// only signed public prekey evidence and suite initial bytes.
+	Bootstrap      []byte
+	AdmissionToken string
+	Ciphertext     []byte
+	ExpiresAtUnix  uint64
 }
 
 // Sender delivers a sealed message.
@@ -261,20 +266,68 @@ func (d *Dispatcher) Network() *nativev1.NetworkDomain {
 // advancing the session and committing the ciphertext leaves something to seal
 // again.
 func (d *Dispatcher) Queue(event envelope.Event, sessionID, recipientEndpointID string, expiresAtUnix uint64) (bool, eventlog.Delivery, error) {
-	if d == nil {
-		return false, eventlog.Delivery{}, errors.New("no dispatcher")
-	}
-	if err := envelope.ValidateEvent(event); err != nil {
+	stored, now, err := d.prepareQueue(event)
+	if err != nil {
 		return false, eventlog.Delivery{}, err
 	}
+	return d.config.Journal.Enqueue(eventlog.Outbound{
+		EventID: event.EventID, SessionID: sessionID, RecipientEndpointID: recipientEndpointID,
+		ConversationID: event.ConversationID, Payload: stored, CreatedAtUnix: uint64(now.Unix()),
+		ExpiresAtUnix: expiresAtUnix,
+	})
+}
+
+// CopyTarget is one daemon-selected device destination for a logical Event.
+type CopyTarget struct {
+	SessionID, RecipientEndpointID, RecipientDeviceID string
+}
+
+// QueueCopies records one independently sealed delivery per verified device.
+// Every copy carries the same Event bytes and EventID; only the journal key and
+// cryptographic device session differ.
+func (d *Dispatcher) QueueCopies(event envelope.Event, targets []CopyTarget,
+	expiresAtUnix uint64) ([]eventlog.Delivery, error) {
+	stored, now, err := d.prepareQueue(event)
+	if err != nil {
+		return nil, err
+	}
+	if len(targets) == 0 || len(targets) > e2ee.MaxDevicesPerSet*2-1 {
+		return nil, errors.New("invalid delivery fan-out size")
+	}
+	deliveries := make([]eventlog.Delivery, 0, len(targets))
+	for _, target := range targets {
+		copyID, err := eventlog.NewDeliveryCopyID(event.EventID, target.RecipientEndpointID, target.RecipientDeviceID)
+		if err != nil {
+			return nil, err
+		}
+		_, delivery, err := d.config.Journal.Enqueue(eventlog.Outbound{DeliveryID: copyID,
+			EventID: event.EventID, SessionID: target.SessionID,
+			RecipientEndpointID: target.RecipientEndpointID, RecipientDeviceID: target.RecipientDeviceID,
+			ConversationID: event.ConversationID, Payload: stored, CreatedAtUnix: uint64(now.Unix()),
+			ExpiresAtUnix: expiresAtUnix})
+		if err != nil {
+			return nil, err
+		}
+		deliveries = append(deliveries, delivery)
+	}
+	return deliveries, nil
+}
+
+func (d *Dispatcher) prepareQueue(event envelope.Event) ([]byte, time.Time, error) {
+	if d == nil {
+		return nil, time.Time{}, errors.New("no dispatcher")
+	}
+	if err := envelope.ValidateEvent(event); err != nil {
+		return nil, time.Time{}, err
+	}
 	if !d.authorizedKind(event.Kind) {
-		return false, eventlog.Delivery{}, errors.New("event class is not authorized by the endpoint delegation")
+		return nil, time.Time{}, errors.New("event class is not authorized by the endpoint delegation")
 	}
 	// A local-only kind carries authority granted here. The receiving side
 	// refuses it on every route, and refusing to send it is what makes the
 	// invariant hold at both ends rather than only at the far one.
 	if envelope.LocalOnly(event.Kind) {
-		return false, eventlog.Delivery{}, errors.New("this event kind exists only on the owner's own interface")
+		return nil, time.Time{}, errors.New("this event kind exists only on the owner's own interface")
 	}
 	// The sender fields say who this came from, and a runtime does not get to
 	// choose that: the session it would be sealed under belongs to this
@@ -282,31 +335,23 @@ func (d *Dispatcher) Queue(event envelope.Event, sessionID, recipientEndpointID 
 	if event.SenderAgentID != d.config.Identity.AgentID ||
 		event.SenderEndpointID != d.config.Identity.EndpointID ||
 		event.SenderDeviceID != d.config.Identity.DeviceID {
-		return false, eventlog.Delivery{}, errors.New("event does not come from this installation")
+		return nil, time.Time{}, errors.New("event does not come from this installation")
 	}
 	// A body that does not meet its own kind's contract must not leave here.
 	// The recipient will refuse it, and queueing it would spend the sender's
 	// delivery attempts on a message that was never going to be interpreted.
 	if err := payload.Validate(event.Kind, event.Content); err != nil {
-		return false, eventlog.Delivery{}, err
+		return nil, time.Time{}, err
 	}
 	stored, err := envelope.EncodeEventJSON(event)
 	if err != nil {
-		return false, eventlog.Delivery{}, err
+		return nil, time.Time{}, err
 	}
 	now := d.config.Now()
 	if now.IsZero() || now.Unix() < 0 {
-		return false, eventlog.Delivery{}, errors.New("invalid dispatch time")
+		return nil, time.Time{}, errors.New("invalid dispatch time")
 	}
-	return d.config.Journal.Enqueue(eventlog.Outbound{
-		EventID:             event.EventID,
-		SessionID:           sessionID,
-		RecipientEndpointID: recipientEndpointID,
-		ConversationID:      event.ConversationID,
-		Payload:             stored,
-		CreatedAtUnix:       uint64(now.Unix()),
-		ExpiresAtUnix:       expiresAtUnix,
-	})
+	return stored, now, nil
 }
 
 // ComposeAndQueue constructs the canonical event under daemon-owned identity,
@@ -682,7 +727,7 @@ func (d *Dispatcher) Sweep(ctx context.Context, limit int) (Summary, error) {
 		// The claim returns the delivery as it now stands, and that is the one
 		// the attempt works from. Carrying on with the copy read before the
 		// claim would mean acting on state the claim may have changed.
-		claimed, err := d.config.Journal.ClaimForSend(delivery.EventID, attemptID, now, d.config.AttemptLease)
+		claimed, err := d.config.Journal.ClaimForSend(delivery.Key(), attemptID, now, d.config.AttemptLease)
 		if err != nil {
 			continue
 		}
@@ -694,7 +739,7 @@ func (d *Dispatcher) Sweep(ctx context.Context, limit int) (Summary, error) {
 			summary.Sent++
 			continue
 		}
-		settled, failErr := d.config.Journal.Failed(delivery.EventID, attemptID, fault.CodeOf(err), d.config.Now())
+		settled, failErr := d.config.Journal.Failed(delivery.Key(), attemptID, fault.CodeOf(err), d.config.Now())
 		if failErr != nil {
 			return summary, failErr
 		}
@@ -724,18 +769,35 @@ func (d *Dispatcher) attempt(ctx context.Context, delivery eventlog.Delivery, at
 		}
 		sealed = true
 	}
+	record, found, err := d.config.Journal.SessionState(delivery.SessionID)
+	if err != nil || !found {
+		return sealed, fault.New(fault.CodeInternal, "no session bootstrap state")
+	}
+	var bootstrap []byte
+	if record.BootstrapBase64 != "" {
+		value, present, bootstrapErr := record.Bootstrap()
+		if bootstrapErr != nil || !present {
+			return sealed, fault.Wrap(fault.CodeInternal, bootstrapErr)
+		}
+		bootstrap, bootstrapErr = e2ee.EncodeFirstContactJSON(value)
+		if bootstrapErr != nil {
+			return sealed, fault.Wrap(fault.CodeInternal, bootstrapErr)
+		}
+	}
 	message := Message{
 		EventID:             delivery.EventID,
 		SessionID:           delivery.SessionID,
 		RecipientEndpointID: delivery.RecipientEndpointID,
+		RecipientDeviceID:   delivery.RecipientDeviceID,
 		ConversationID:      delivery.ConversationID,
+		Bootstrap:           bootstrap,
 		Ciphertext:          ciphertext,
 		ExpiresAtUnix:       delivery.ExpiresAtUnix,
 	}
 	if err := d.config.Sender.Send(ctx, message); err != nil {
 		return sealed, err
 	}
-	if _, err := d.config.Journal.Delivered(delivery.EventID, attemptID, d.config.Now()); err != nil {
+	if _, err := d.config.Journal.Delivered(delivery.Key(), attemptID, d.config.Now()); err != nil {
 		return sealed, fault.Wrap(fault.CodeInternal, err)
 	}
 	return sealed, nil
@@ -785,7 +847,7 @@ func (d *Dispatcher) seal(delivery eventlog.Delivery, attemptID string, now time
 	// and this attempt's ciphertext is discarded rather than sent under a key
 	// somebody else already used.
 	if _, err := d.config.Journal.CommitSealed(delivery.SessionID, record.AlgorithmID,
-		record.Generation, next, delivery.EventID, attemptID, ciphertext, now); err != nil {
+		record.Generation, next, delivery.Key(), attemptID, ciphertext, now); err != nil {
 		return nil, fault.Wrap(fault.CodeInternal, err)
 	}
 	return ciphertext, nil

@@ -96,6 +96,10 @@ func (f *fakeSender) Send(_ context.Context, message Message) error {
 type bindings struct{}
 
 func (bindings) BindingFor(delivery eventlog.Delivery) (e2ee.Binding, error) {
+	recipientDevice := delivery.RecipientDeviceID
+	if recipientDevice == "" {
+		recipientDevice = peerDev
+	}
 	return e2ee.Binding{
 		Network: &nativev1.NetworkDomain{
 			NetworkId:       "tos-local",
@@ -109,8 +113,43 @@ func (bindings) BindingFor(delivery eventlog.Delivery) (e2ee.Binding, error) {
 		SenderDeviceID:      senderDev,
 		RecipientAgentID:    peerID,
 		RecipientEndpointID: delivery.RecipientEndpointID,
-		RecipientDeviceID:   peerDev,
+		RecipientDeviceID:   recipientDevice,
 	}, nil
+}
+
+func TestQueueCopiesSealsOneLogicalEventForEveryDevice(t *testing.T) {
+	h := newHarness(t)
+	otherDevice := "dev_" + strings.Repeat("9", 64)
+	otherSession := "ses_" + strings.Repeat("a", 64)
+	if err := h.journal.PutSessionState(otherSession, algorithm, e2ee.State(make([]byte, 8)), h.clock); err != nil {
+		t.Fatalf("other session: %v", err)
+	}
+	event := h.event(t, "fan out")
+	deliveries, err := h.dispatcher.QueueCopies(event, []CopyTarget{
+		{SessionID: sessionID, RecipientEndpointID: peerMEP, RecipientDeviceID: peerDev},
+		{SessionID: otherSession, RecipientEndpointID: peerMEP, RecipientDeviceID: otherDevice},
+	}, baseUnix+3600)
+	if err != nil {
+		t.Fatalf("queue copies: %v", err)
+	}
+	if len(deliveries) != 2 || deliveries[0].EventID != event.EventID ||
+		deliveries[1].EventID != event.EventID || deliveries[0].Key() == deliveries[1].Key() {
+		t.Fatalf("copies did not preserve one logical Event: %+v", deliveries)
+	}
+	summary, err := h.dispatcher.Sweep(context.Background(), 0)
+	if err != nil || summary.Sent != 2 || len(h.sender.sent) != 2 {
+		t.Fatalf("sweep: summary=%+v sent=%d err=%v", summary, len(h.sender.sent), err)
+	}
+	seen := map[string]bool{}
+	for _, message := range h.sender.sent {
+		if message.EventID != event.EventID || message.RecipientEndpointID != peerMEP {
+			t.Fatalf("copy changed logical authority: %+v", message)
+		}
+		seen[message.RecipientDeviceID] = true
+	}
+	if !seen[peerDev] || !seen[otherDevice] {
+		t.Fatalf("missing device copy: %v", seen)
+	}
 }
 
 type harness struct {

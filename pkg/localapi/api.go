@@ -33,13 +33,14 @@ import (
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema = "tos.messaging.local-request.v9"
-	// RequestSchemaV6 through RequestSchemaV8 remain accepted for the operations
+	RequestSchema = "tos.messaging.local-request.v10"
+	// RequestSchemaV6 through RequestSchemaV9 remain accepted for the operations
 	// they can express. Per-operation strict field validation prevents an older
 	// client from smuggling newer authority while allowing rolling upgrades.
 	RequestSchemaV6 = "tos.messaging.local-request.v6"
 	RequestSchemaV7 = "tos.messaging.local-request.v7"
 	RequestSchemaV8 = "tos.messaging.local-request.v8"
+	RequestSchemaV9 = "tos.messaging.local-request.v9"
 	// ResponseSchema is the strict wire schema of a response.
 	ResponseSchema = "tos.messaging.local-response.v5"
 
@@ -82,6 +83,9 @@ const (
 	// or reuses the daemon's AgentID-keyed discovered conversation. It exposes
 	// no route/session authority and makes no transport-delivery claim.
 	OpEnsureDirectConversation Operation = "conversations.ensure-direct"
+	// OpSendDirect accepts recipient intent plus message semantics and delegates
+	// all identity, session, device fan-out and route authority to the daemon.
+	OpSendDirect Operation = "messages.send-direct"
 	// OpPendingAttachments lists only opaque metadata for encrypted attachment
 	// Events. It never exposes the E2EE-carried Reference or fetch key.
 	OpPendingAttachments Operation = "attachments.pending"
@@ -186,6 +190,7 @@ var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
 		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 		OpResolveContact: {}, OpEnsureDirectConversation: {},
+		OpSendDirect:         {},
 		OpPendingAttachments: {}, OpClaimAttachment: {},
 		OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
@@ -216,6 +221,7 @@ func Permits(principal Principal, operation Operation) bool {
 var operations = map[Operation]struct{}{
 	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 	OpResolveContact: {}, OpEnsureDirectConversation: {},
+	OpSendDirect:         {},
 	OpPendingAttachments: {}, OpClaimAttachment: {},
 	OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
@@ -602,7 +608,7 @@ func DecodeRequest(raw []byte) (Request, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Request{}, errors.New("request has trailing JSON")
 	}
-	if request.Schema != RequestSchema && request.Schema != RequestSchemaV8 &&
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV9 && request.Schema != RequestSchemaV8 &&
 		request.Schema != RequestSchemaV7 && request.Schema != RequestSchemaV6 {
 		return Request{}, errors.New("unsupported request schema")
 	}
@@ -686,7 +692,7 @@ func ValidateRequest(request Request) error {
 		(request.InvitedAgentID != "" || request.InviteExpiresAtUnix != 0) {
 		return errors.New("only admission invite creation carries invite terms")
 	}
-	if request.Op != OpResolveContact && request.Op != OpEnsureDirectConversation && request.Recipient != "" {
+	if request.Op != OpResolveContact && request.Op != OpEnsureDirectConversation && request.Op != OpSendDirect && request.Recipient != "" {
 		return errors.New("only contact or direct-conversation resolution carries a recipient input")
 	}
 	if request.Op != OpCompose && request.RecipientAgentID != "" {
@@ -702,14 +708,14 @@ func ValidateRequest(request Request) error {
 	if request.Op != OpVerifyAcceptedQuote && request.ExpectedQuoteTerms != nil {
 		return errors.New("only Quote verification carries expected Quote terms")
 	}
-	if request.Op != OpCompose && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
+	if request.Op != OpCompose && request.Op != OpSendDirect && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
 		(request.ConversationID != "" || request.IdempotencyKey != "") {
 		return errors.New("only outbound composition carries message semantics")
 	}
 	if request.Op == OpListDeviceHistory && request.IdempotencyKey != "" {
 		return errors.New("a history listing has no idempotency key")
 	}
-	if request.Op != OpCompose && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && (request.RoomID != "" || request.ReplyToEventID != "" ||
+	if request.Op != OpCompose && request.Op != OpSendDirect && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && (request.RoomID != "" || request.ReplyToEventID != "" ||
 		request.MembershipEpoch != 0 || request.MediaType != "" || request.Body != "") {
 		return errors.New("only message composition carries message body semantics")
 	}
@@ -734,6 +740,17 @@ func ValidateRequest(request Request) error {
 		return errors.New("only device-history export carries history terms")
 	}
 	switch request.Op {
+	case OpSendDirect:
+		if request.Recipient == "" || len(request.Recipient) > 255 || request.MediaType == "" || request.Body == "" ||
+			!idempotencyPattern.MatchString(request.IdempotencyKey) || request.ExpiresAtUnix == 0 {
+			return errors.New("a direct send needs recipient, message, expiry and idempotency")
+		}
+		if request.Limit != 0 || request.Code != "" || request.SessionID != "" ||
+			request.RecipientEndpointID != "" || request.RecipientAgentID != "" || request.ConversationID != "" ||
+			request.RoomID != "" || request.ReplyToEventID != "" || request.MembershipEpoch != 0 {
+			return errors.New("a direct send cannot carry low-level routing authority")
+		}
+		return requireEmpty(request, "a direct send", request.EventID, request.LeaseID)
 	case OpResolveContact, OpEnsureDirectConversation:
 		if request.Recipient == "" || len(request.Recipient) > 255 {
 			return errors.New("recipient resolution needs one bounded input")

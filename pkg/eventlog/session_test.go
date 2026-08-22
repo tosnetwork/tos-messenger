@@ -80,6 +80,31 @@ func TestBootstrappedSessionCommitsEvidenceWithStateAndPreservesIt(t *testing.T)
 	if _, present, err := advanced.Bootstrap(); err != nil || !present {
 		t.Fatalf("advance lost bootstrap: present=%v err=%v", present, err)
 	}
+	if advanced.Authority == nil || advanced.Authority.LocalAgentID != bootstrap.Binding.SenderAgentID ||
+		advanced.Authority.PeerDeviceID != bootstrap.Binding.RecipientDeviceID {
+		t.Fatalf("initiator authority was not preserved: %+v", advanced.Authority)
+	}
+}
+
+func TestFirstContactInboundCommitsResponderAuthorityWithEvent(t *testing.T) {
+	journal, _ := openJournal(t)
+	now := time.Unix(int64(acceptAt), 0)
+	bootstrap, sessionID := sessionBootstrap(t, now)
+	inbound := entry(eventA, bootstrap.Binding.SenderEndpointID)
+	inbound.ConversationID = bootstrap.Binding.ConversationID
+	if _, _, err := journal.CommitInboundFirstContact(sessionID, bootstrap.Binding.AlgorithmID,
+		e2ee.State("responder advanced"), inbound, bootstrap, now); err != nil {
+		t.Fatalf("commit first contact: %v", err)
+	}
+	record, found, err := journal.SessionState(sessionID)
+	if err != nil || !found || record.Authority == nil {
+		t.Fatalf("session authority: found=%v record=%+v err=%v", found, record, err)
+	}
+	if record.Authority.LocalAgentID != bootstrap.Binding.RecipientAgentID ||
+		record.Authority.LocalDeviceID != bootstrap.Binding.RecipientDeviceID ||
+		record.Authority.PeerAgentID != bootstrap.Binding.SenderAgentID {
+		t.Fatalf("responder authority has wrong orientation: %+v", record.Authority)
+	}
 }
 
 func sessionBootstrap(t *testing.T, now time.Time) (e2ee.FirstContact, string) {

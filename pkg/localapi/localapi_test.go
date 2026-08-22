@@ -266,8 +266,49 @@ func TestRuntimeEnsuresAgentBoundDirectConversationWithoutRouteAuthority(t *test
 	}
 }
 
+type fixedDirectMessageSender struct {
+	result                              DirectMessageResult
+	input, mediaType, body, idempotency string
+	expires                             uint64
+}
+
+func (s *fixedDirectMessageSender) SendDirectMessage(_ context.Context, input, mediaType, body,
+	idempotency string, expires uint64) (DirectMessageResult, error) {
+	s.input, s.mediaType, s.body, s.idempotency, s.expires = input, mediaType, body, idempotency, expires
+	return s.result, nil
+}
+
+func TestRuntimeSendsDirectIntentWithoutLowLevelAuthority(t *testing.T) {
+	h := newHarness(t)
+	eventID := "evt_" + strings.Repeat("d", 64)
+	sender := &fixedDirectMessageSender{result: DirectMessageResult{AgentID: senderID,
+		CanonicalName: "alice.tos", ConversationID: convoID, EventID: eventID, Readiness: "queued"}}
+	h.server.config.DirectMessageSender = sender
+	request := Request{Op: OpSendDirect, Recipient: "alice.tos", MediaType: "text/plain; charset=utf-8",
+		Body: "hello", IdempotencyKey: "idem_" + strings.Repeat("e", 64), ExpiresAtUnix: baseUnix + 600}
+	response := h.call(t, request)
+	if !response.OK || response.AgentID != senderID || response.EventID != eventID ||
+		response.ConversationID != convoID || response.Readiness != "queued" || sender.input != "alice.tos" {
+		t.Fatalf("send direct: response=%+v sender=%+v", response, sender)
+	}
+	for name, mutate := range map[string]func(*Request){
+		"session":                  func(r *Request) { r.SessionID = sessionID },
+		"endpoint":                 func(r *Request) { r.RecipientEndpointID = peerMEP },
+		"conversation":             func(r *Request) { r.ConversationID = convoID },
+		"recipient Agent override": func(r *Request) { r.RecipientAgentID = senderID },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := request
+			mutate(&candidate)
+			if _, err := EncodeRequest(candidate); err == nil {
+				t.Fatal("model-selected routing authority was accepted")
+			}
+		})
+	}
+}
+
 func TestRequestDecoderKeepsRollingUpgradeCompatibility(t *testing.T) {
-	for _, schema := range []string{RequestSchemaV6, RequestSchemaV7, RequestSchemaV8, RequestSchema} {
+	for _, schema := range []string{RequestSchemaV6, RequestSchemaV7, RequestSchemaV8, RequestSchemaV9, RequestSchema} {
 		raw, err := json.Marshal(Request{Schema: schema, Op: OpPending, Limit: 1})
 		if err != nil {
 			t.Fatal(err)

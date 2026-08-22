@@ -256,6 +256,27 @@ func newTestGate(t *testing.T, policy ContactPolicy, seed func(*testing.T, *even
 	return gate, journal, delegation, encoded
 }
 
+func TestAdmitWithCommitKeepsSessionTransitionAheadOfRuntimeVisibility(t *testing.T) {
+	gate, journal, delegation, encoded := testGate(t, OpenInbox())
+	event := testEvent(t, delegation, nil)
+	sessionID := "ses_" + strings.Repeat("8", 64)
+	called := false
+	decision, err := gate.AdmitWithCommit(Inbound{Event: event, DelegationJSON: encoded,
+		Route: RouteDirect, ReceivedAtUnix: baseUnix + 30}, func(entry eventlog.Entry) (bool, error) {
+		called = true
+		fresh, _, commitErr := journal.CommitInbound(sessionID, "tos.messaging.e2ee.example-suite.v1", 0,
+			e2ee.State("advanced"), entry, time.Unix(int64(baseUnix+30), 0))
+		return fresh, commitErr
+	})
+	if err != nil || !called || decision.Outcome != Accepted {
+		t.Fatalf("admit with commit: called=%v decision=%+v err=%v", called, decision, err)
+	}
+	pending, err := journal.ListPending(time.Unix(int64(baseUnix+31), 0), 10)
+	if err != nil || len(pending) != 1 || pending[0].Crypto != eventlog.CryptoCommitted {
+		t.Fatalf("runtime visibility preceded session commit: pending=%+v err=%v", pending, err)
+	}
+}
+
 var overlayRoom = "room_" + strings.Repeat("a", 64)
 
 func seedRoom(members ...string) func(*testing.T, *eventlog.RoomLedger) {

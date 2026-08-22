@@ -226,6 +226,26 @@ func New(config Config) (*Gate, error) {
 // refusal is a result, and turning it into an error would tempt a caller into
 // treating the two the same way.
 func (g *Gate) Admit(inbound Inbound) (Decision, error) {
+	return g.admit(inbound, nil)
+}
+
+// Committer lets the session layer replace the gate's ordinary event write
+// with a recoverable event+ratchet transaction after every admission check has
+// passed. It must preserve Journal.Accept's fresh/duplicate semantics.
+type Committer func(eventlog.Entry) (bool, error)
+
+// AdmitWithCommit applies exactly the ordinary admission policy but commits
+// accepted plaintext through the caller's session transaction. This prevents
+// a decrypted Event from becoming runtime-visible before its ratchet advance
+// is durable.
+func (g *Gate) AdmitWithCommit(inbound Inbound, commit Committer) (Decision, error) {
+	if commit == nil {
+		return Decision{}, errors.New("admission session committer is missing")
+	}
+	return g.admit(inbound, commit)
+}
+
+func (g *Gate) admit(inbound Inbound, commit Committer) (Decision, error) {
 	if g == nil {
 		return Decision{}, errors.New("no admission gate")
 	}
@@ -425,7 +445,7 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 	if admission == AdmitHoldForApproval {
 		admitted = eventlog.AdmissionPending
 	}
-	fresh, _, err := g.config.Journal.Accept(eventlog.Entry{
+	entry := eventlog.Entry{
 		EventID:          inbound.Event.EventID,
 		SenderEndpointID: inbound.Event.SenderEndpointID,
 		ConversationID:   inbound.Event.ConversationID,
@@ -433,7 +453,13 @@ func (g *Gate) Admit(inbound Inbound) (Decision, error) {
 		Admission:        admitted,
 		ReceivedAtUnix:   inbound.ReceivedAtUnix,
 		ExpiresAtUnix:    inbound.Event.ExpiresAtUnix,
-	})
+	}
+	var fresh bool
+	if commit == nil {
+		fresh, _, err = g.config.Journal.Accept(entry)
+	} else {
+		fresh, err = commit(entry)
+	}
 	if err != nil {
 		if errors.Is(err, eventlog.ErrConflict) {
 			// The same content-addressed identifier arrived bound to a

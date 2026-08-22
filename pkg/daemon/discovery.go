@@ -31,6 +31,8 @@ type discoveryRuntime struct {
 	runner   directoryRunner
 	contacts contact.Directory
 	chain    identity.ChainPolicy
+	resolver identity.AgentResolver
+	devices  *eventlog.DeviceLedger
 	peers    []string
 	close    func()
 }
@@ -127,10 +129,11 @@ func (productionDiscoveryBuilder) Build(config Config, journal *eventlog.Journal
 		Lead:     config.Discovery.RefreshLead(),
 		Observer: daemonRefreshObserver{observer: observer},
 	}
-	return &discoveryRuntime{runner: manager, contacts: manager, chain: chain, peers: peers, close: func() {
-		objects.CloseIdleConnections()
-		client.Close()
-	}}, nil
+	return &discoveryRuntime{runner: manager, contacts: manager, chain: chain, resolver: resolver,
+		devices: devices, peers: peers, close: func() {
+			objects.CloseIdleConnections()
+			client.Close()
+		}}, nil
 }
 
 type daemonRefreshObserver struct{ observer Observer }

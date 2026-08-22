@@ -207,35 +207,37 @@ type Transition struct {
 	ExpectedGeneration uint64
 	// NextState is the session state after the ciphertext was opened.
 	NextState []byte
+	Authority *SessionAuthority
 }
 
 // Record is the durable state of one inbound event.
 type Record struct {
-	Schema           string           `json:"schema"`
-	EventID          string           `json:"event_id"`
-	SenderEndpointID string           `json:"sender_messaging_endpoint_id"`
-	ConversationID   string           `json:"conversation_id"`
-	Admission        AdmissionState   `json:"admission"`
-	AdmissionAtUnix  uint64           `json:"admission_at_unix,omitempty"`
-	AdmissionCode    fault.Code       `json:"admission_code,omitempty"`
-	PayloadBase64    string           `json:"payload_base64"`
-	PayloadDigest    string           `json:"payload_digest"`
-	ReceivedAtUnix   uint64           `json:"received_at_unix"`
-	EventExpiresAt   uint64           `json:"event_expires_at_unix,omitempty"`
-	Crypto           CryptoState      `json:"crypto"`
-	CryptoAtUnix     uint64           `json:"crypto_at_unix,omitempty"`
-	SessionID        string           `json:"session_id,omitempty"`
-	AlgorithmID      string           `json:"algorithm_id,omitempty"`
-	ExpectedGen      uint64           `json:"expected_session_generation,omitempty"`
-	NextStateBase64  string           `json:"next_session_state_base64,omitempty"`
-	NextStateDigest  string           `json:"next_session_state_digest,omitempty"`
-	Application      ApplicationState `json:"application"`
-	LeaseID          string           `json:"lease_id,omitempty"`
-	LeaseExpiresAt   uint64           `json:"lease_expires_at_unix,omitempty"`
-	AppliedAtUnix    uint64           `json:"applied_at_unix,omitempty"`
-	RejectedAtUnix   uint64           `json:"rejected_at_unix,omitempty"`
-	RejectionCode    fault.Code       `json:"rejection_code,omitempty"`
-	ReadAtUnix       uint64           `json:"read_at_unix,omitempty"`
+	Schema           string            `json:"schema"`
+	EventID          string            `json:"event_id"`
+	SenderEndpointID string            `json:"sender_messaging_endpoint_id"`
+	ConversationID   string            `json:"conversation_id"`
+	Admission        AdmissionState    `json:"admission"`
+	AdmissionAtUnix  uint64            `json:"admission_at_unix,omitempty"`
+	AdmissionCode    fault.Code        `json:"admission_code,omitempty"`
+	PayloadBase64    string            `json:"payload_base64"`
+	PayloadDigest    string            `json:"payload_digest"`
+	ReceivedAtUnix   uint64            `json:"received_at_unix"`
+	EventExpiresAt   uint64            `json:"event_expires_at_unix,omitempty"`
+	Crypto           CryptoState       `json:"crypto"`
+	CryptoAtUnix     uint64            `json:"crypto_at_unix,omitempty"`
+	SessionID        string            `json:"session_id,omitempty"`
+	AlgorithmID      string            `json:"algorithm_id,omitempty"`
+	ExpectedGen      uint64            `json:"expected_session_generation,omitempty"`
+	NextStateBase64  string            `json:"next_session_state_base64,omitempty"`
+	NextStateDigest  string            `json:"next_session_state_digest,omitempty"`
+	SessionAuthority *SessionAuthority `json:"session_authority,omitempty"`
+	Application      ApplicationState  `json:"application"`
+	LeaseID          string            `json:"lease_id,omitempty"`
+	LeaseExpiresAt   uint64            `json:"lease_expires_at_unix,omitempty"`
+	AppliedAtUnix    uint64            `json:"applied_at_unix,omitempty"`
+	RejectedAtUnix   uint64            `json:"rejected_at_unix,omitempty"`
+	RejectionCode    fault.Code        `json:"rejection_code,omitempty"`
+	ReadAtUnix       uint64            `json:"read_at_unix,omitempty"`
 }
 
 // Payload returns the stored event.
@@ -451,6 +453,7 @@ func (j *Journal) Accept(entry Entry) (bool, Record, error) {
 		record.ExpectedGen = entry.Transition.ExpectedGeneration
 		record.NextStateBase64 = base64.StdEncoding.EncodeToString(entry.Transition.NextState)
 		record.NextStateDigest = canon.Digest(entry.Transition.NextState)
+		record.SessionAuthority = entry.Transition.Authority
 		record.CryptoAtUnix = entry.ReceivedAtUnix
 	}
 	encoded, err := json.Marshal(record)
@@ -973,6 +976,11 @@ func readRecord(path string) (Record, error) {
 	if _, err := record.Payload(); err != nil {
 		return Record{}, errors.New("invalid event journal record")
 	}
+	if record.SessionAuthority != nil {
+		if err := record.SessionAuthority.validate(record.SessionID); err != nil {
+			return Record{}, errors.New("invalid event journal record")
+		}
+	}
 	return record, nil
 }
 
@@ -1150,7 +1158,7 @@ func (j *Journal) resolveStaged(path string, record Record) error {
 			return commitErr
 		}
 		if err := j.writeSessionInbound(record.SessionID, record.AlgorithmID,
-			record.ExpectedGen+1, next, record.EventID, record.CryptoAtUnix); err != nil {
+			record.ExpectedGen+1, next, record.EventID, record.SessionAuthority, record.CryptoAtUnix); err != nil {
 			return err
 		}
 		record.Crypto = CryptoCommitted

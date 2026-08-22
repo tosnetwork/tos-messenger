@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -12,6 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/securefile"
+	"github.com/tosnetwork/tos-messenger/pkg/admission"
 	"github.com/tosnetwork/tos-messenger/pkg/agentpacketbridge"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentadmission"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentops"
@@ -63,6 +67,7 @@ type Daemon struct {
 	observer      Observer
 	discovery     *discoveryRuntime
 	prekeys       *prekeyRuntime
+	admission     *admission.Gate
 	agentPackets  *agentpacketbridge.Bridge
 	a2aReceiver   protocolEventReceiver
 	mcpReceiver   protocolEventReceiver
@@ -85,6 +90,13 @@ func (f directConversationEnsureFunc) EnsureDirectConversation(
 	ctx context.Context, input string,
 ) (localapi.DirectConversationResult, error) {
 	return f(ctx, input)
+}
+
+type directMessageSendFunc func(context.Context, string, string, string, string, uint64) (localapi.DirectMessageResult, error)
+
+func (f directMessageSendFunc) SendDirectMessage(ctx context.Context, recipient, mediaType, body,
+	idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
+	return f(ctx, recipient, mediaType, body, idempotencyKey, expiresAt)
 }
 
 // ResolveContact accepts a human contact input at the daemon boundary. A .tos
@@ -138,7 +150,7 @@ func (d *Daemon) EnsureDirectConversation(
 		return localapi.DirectConversationResult{}, err
 	}
 	if d.prekeys != nil && d.prekeys.signer != nil {
-		if err := d.ensureDirectSessions(resolved, record.ConversationID, now); err != nil {
+		if _, err := d.ensureDirectSessions(resolved, record.ConversationID, now); err != nil {
 			return localapi.DirectConversationResult{}, err
 		}
 	}
@@ -148,13 +160,90 @@ func (d *Daemon) EnsureDirectConversation(
 	}, nil
 }
 
+// SendDirectMessage turns human recipient intent into one AgentID-bound Event
+// and daemon-selected per-device copies. The caller cannot name Endpoint,
+// Device, Session, relay or transport authority.
+func (d *Daemon) SendDirectMessage(ctx context.Context, input, mediaType, body,
+	idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
+	resolved, err := d.ResolveContact(ctx, input, d.contactDNS)
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	now := time.Now()
+	if d.now != nil {
+		now = d.now()
+	}
+	if expiresAt <= uint64(now.Unix()) {
+		return localapi.DirectMessageResult{}, errors.New("direct message expiry is not in the future")
+	}
+	var entropy [32]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return localapi.DirectMessageResult{}, errors.New("create direct conversation identity")
+	}
+	record, _, err := d.journal.EnsureDirectConversation(d.config.AgentID, resolved.AgentID,
+		resolved.Directory.Descriptor.EndpointID, resolved.Directory.FinalizedCheckpoint, now, entropy)
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	if d.prekeys == nil || d.prekeys.signer == nil {
+		return localapi.DirectMessageResult{}, errors.New("direct session bootstrap is not configured")
+	}
+	targets, err := d.ensureDirectSessions(resolved, record.ConversationID, now)
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	if len(targets) == 0 {
+		return localapi.DirectMessageResult{}, errors.New("direct message has no verified device target")
+	}
+	content, err := payload.Encode(payload.Text{MediaType: mediaType, Body: body})
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	event, err := envelope.NewEvent(envelope.Event{Network: d.config.Network(),
+		ConversationID: record.ConversationID, SenderAgentID: d.config.AgentID,
+		SenderEndpointID: d.config.EndpointID, SenderDeviceID: d.config.DeviceID,
+		CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: expiresAt, Kind: "text",
+		IdempotencyKey: strings.TrimPrefix(idempotencyKey, "idem_"), Content: content})
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	encoded, err := envelope.EncodeEventJSON(event)
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	intent := bytes.NewBufferString(canon.DomainOutboundIntent)
+	for _, value := range []string{d.config.AgentID, resolved.AgentID, record.ConversationID,
+		mediaType, body, idempotencyKey} {
+		canon.Text(intent, value)
+	}
+	canon.Uint64(intent, expiresAt)
+	chosen, _, err := d.journal.ClaimOutboundComposition(idempotencyKey, canon.Digest(intent.Bytes()),
+		eventlog.Outbound{EventID: event.EventID, SessionID: targets[0].SessionID,
+			RecipientEndpointID: targets[0].RecipientEndpointID, ConversationID: record.ConversationID,
+			Payload: encoded, CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: expiresAt})
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	if chosen.EventID != event.EventID {
+		event, err = envelope.DecodeEventJSON(chosen.Payload)
+		if err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+	}
+	if _, err := d.dispatch.QueueCopies(event, targets, chosen.ExpiresAtUnix); err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	return localapi.DirectMessageResult{AgentID: resolved.AgentID, CanonicalName: resolved.CanonicalName,
+		ConversationID: record.ConversationID, EventID: event.EventID, Readiness: "queued"}, nil
+}
+
 // ensureDirectSessions establishes every reachable recipient-device session
 // from verified directory bundles. Endpoint, Device and session choices remain
 // daemon-owned; neither the local API nor OpenFox can supply them.
-func (d *Daemon) ensureDirectSessions(resolved contact.Result, conversationID string, now time.Time) error {
+func (d *Daemon) ensureDirectSessions(resolved contact.Result, conversationID string, now time.Time) ([]dispatch.CopyTarget, error) {
 	localBundle, private, err := d.prekeys.localBootstrapMaterial(now)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() {
 		for index := range private {
@@ -162,7 +251,7 @@ func (d *Daemon) ensureDirectSessions(resolved contact.Result, conversationID st
 		}
 	}()
 	if len(resolved.Directory.Bundles) == 0 {
-		return errors.New("verified recipient directory has no device prekeys")
+		return nil, errors.New("verified recipient directory has no device prekeys")
 	}
 	sessions := make(map[string]bool)
 	for _, bundle := range append(append([]e2ee.Bundle(nil), resolved.Directory.Bundles...),
@@ -173,7 +262,7 @@ func (d *Daemon) ensureDirectSessions(resolved contact.Result, conversationID st
 		}
 		_, found, lookupErr := d.journal.SessionState(sessionID)
 		if lookupErr != nil {
-			return lookupErr
+			return nil, lookupErr
 		}
 		sessions[sessionID] = found
 	}
@@ -182,10 +271,10 @@ func (d *Daemon) ensureDirectSessions(resolved contact.Result, conversationID st
 		SenderSet: senderSet, RecipientSet: resolved.Directory.Bundles, Now: now,
 		SessionExists: func(sessionID string) bool { return sessions[sessionID] }})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(plan.Unreachable) != 0 {
-		return errors.New("one or more verified recipient devices have no live session bootstrap")
+		return nil, errors.New("one or more verified recipient devices have no live session bootstrap")
 	}
 	bundles := make(map[string]e2ee.Bundle, len(senderSet)+len(resolved.Directory.Bundles))
 	for _, bundle := range senderSet {
@@ -195,13 +284,16 @@ func (d *Daemon) ensureDirectSessions(resolved contact.Result, conversationID st
 		bundles[bundle.DeviceID] = bundle
 	}
 	targets := append(append([]e2ee.Target(nil), plan.Recipients...), plan.SelfCopies...)
+	deliveryTargets := make([]dispatch.CopyTarget, 0, len(targets))
 	for _, target := range targets {
-		if !target.Bootstrap {
-			continue
-		}
 		peer, found := bundles[target.DeviceID]
 		if !found {
-			return errors.New("fan-out selected a device without verified prekey material")
+			return nil, errors.New("fan-out selected a device without verified prekey material")
+		}
+		deliveryTargets = append(deliveryTargets, dispatch.CopyTarget{SessionID: target.SessionID,
+			RecipientEndpointID: peer.EndpointID, RecipientDeviceID: peer.DeviceID})
+		if !target.Bootstrap {
+			continue
 		}
 		binding := e2ee.Binding{Network: d.config.Network(), AlgorithmID: localBundle.AlgorithmID,
 			ConversationID: conversationID, SenderAgentID: d.config.AgentID,
@@ -210,11 +302,11 @@ func (d *Daemon) ensureDirectSessions(resolved contact.Result, conversationID st
 			RecipientDeviceID: peer.DeviceID}
 		bindingBytes, err := binding.Bytes()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		state, initial, err := d.prekeys.suite.Initiate(private, peer.Material, bindingBytes)
 		if err != nil {
-			return errors.New("initiate device session: " + err.Error())
+			return nil, errors.New("initiate device session: " + err.Error())
 		}
 		err = d.journal.PutBootstrappedSessionState(target.SessionID, state, e2ee.FirstContact{
 			Binding: binding, SenderBundle: localBundle,
@@ -228,10 +320,10 @@ func (d *Daemon) ensureDirectSessions(resolved contact.Result, conversationID st
 			}
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return deliveryTargets, nil
 }
 
 func (d *Daemon) prekeysCurrentBundles(now time.Time) []e2ee.Bundle {
@@ -416,6 +508,7 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 			return instance.EnsureDirectConversation(ctx, input, contactDNS)
 		},
 	)
+	serverConfig.DirectMessageSender = directMessageSendFunc(instance.SendDirectMessage)
 	server, err := localapi.NewServer(serverConfig)
 	if err != nil {
 		_ = journal.Close()
@@ -468,6 +561,30 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		return nil, errors.New("build peer discovery: " + err.Error())
 	}
 	instance.discovery = discovery
+	if discovery != nil && discovery.resolver != nil && discovery.devices != nil {
+		localDelegation, readErr := securefile.ReadBoundedRegular(config.DelegationPath, maxDelegationFileBytes)
+		if readErr != nil {
+			_ = discovery.Close()
+			_ = journal.Close()
+			return nil, errors.New("read local admission delegation: " + readErr.Error())
+		}
+		rooms, roomsErr := journal.OpenRooms()
+		if roomsErr != nil {
+			_ = discovery.Close()
+			_ = journal.Close()
+			return nil, errors.New("open room admission ledger: " + roomsErr.Error())
+		}
+		gate, gateErr := admission.New(admission.Config{Network: config.Network(), Chain: discovery.chain,
+			Resolver: discovery.resolver, Journal: journal, Policy: policy, Devices: discovery.devices, Rooms: rooms,
+			LocalDelegationJSON: localDelegation, LocalAgentID: config.AgentID, LocalEndpointID: config.EndpointID,
+			Now: instance.now, InstallSalt: instance.salt})
+		if gateErr != nil {
+			_ = discovery.Close()
+			_ = journal.Close()
+			return nil, errors.New("build inbound admission gate: " + gateErr.Error())
+		}
+		instance.admission = gate
+	}
 	prekeys, err := newPrekeyRuntime(config, delegation, journal, time.Now)
 	if err != nil {
 		_ = discovery.Close()

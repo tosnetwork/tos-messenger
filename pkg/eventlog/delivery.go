@@ -1,16 +1,21 @@
 package eventlog
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
+	"regexp"
 	"sort"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 )
+
+var deliveryCopyPattern = regexp.MustCompile(`^cpy_[0-9a-f]{64}$`)
 
 // Payload returns the queued event.
 func (d Delivery) Payload() ([]byte, error) {
@@ -77,7 +82,10 @@ var ErrAlreadySealed = errors.New("delivery has already been sealed")
 // between losing the event and duplicating it would be made by whichever
 // failure happened.
 type Delivery struct {
-	Schema           string `json:"schema"`
+	Schema string `json:"schema"`
+	// DeliveryID identifies one device copy. Legacy single-target records omit
+	// it and use EventID. Multiple copies retain the same logical EventID.
+	DeliveryID       string `json:"delivery_id,omitempty"`
 	EventID          string `json:"event_id"`
 	SessionID        string `json:"session_id,omitempty"`
 	PayloadBase64    string `json:"payload_base64"`
@@ -89,6 +97,7 @@ type Delivery struct {
 	AttemptID           string        `json:"attempt_id,omitempty"`
 	AttemptExpiresAt    uint64        `json:"attempt_expires_at_unix,omitempty"`
 	RecipientEndpointID string        `json:"recipient_messaging_endpoint_id"`
+	RecipientDeviceID   string        `json:"recipient_device_id,omitempty"`
 	ConversationID      string        `json:"conversation_id"`
 	State               DeliveryState `json:"state"`
 	Attempts            uint32        `json:"attempts"`
@@ -101,12 +110,16 @@ type Delivery struct {
 
 // Outbound is a request to deliver one event.
 type Outbound struct {
-	EventID string
+	// DeliveryID is empty for the legacy one-event/one-target path. Fan-out
+	// supplies a deterministic cpy_ identifier per recipient device.
+	DeliveryID string
+	EventID    string
 	// SessionID is known when the event is queued, not when it is sealed. A
 	// process that picked up a queued event after a restart would otherwise
 	// have no way to find the session it belongs to.
 	SessionID           string
 	RecipientEndpointID string
+	RecipientDeviceID   string
 	ConversationID      string
 	// Payload is the event to send. It is queued before it is sealed, so that
 	// a crash between advancing the session and storing the ciphertext leaves
@@ -131,14 +144,20 @@ func (j *Journal) Enqueue(request Outbound) (bool, Delivery, error) {
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
-	path := j.deliveryPath(request.EventID)
+	deliveryID := request.DeliveryID
+	if deliveryID == "" {
+		deliveryID = request.EventID
+	}
+	path := j.deliveryPath(deliveryID)
 	delivery := Delivery{
 		Schema:              DeliverySchema,
+		DeliveryID:          request.DeliveryID,
 		EventID:             request.EventID,
 		SessionID:           request.SessionID,
 		PayloadBase64:       base64.StdEncoding.EncodeToString(request.Payload),
 		PayloadDigest:       canon.Digest(request.Payload),
 		RecipientEndpointID: request.RecipientEndpointID,
+		RecipientDeviceID:   request.RecipientDeviceID,
 		ConversationID:      request.ConversationID,
 		State:               StatePending,
 		NextAttemptAtUnix:   request.CreatedAtUnix,
@@ -168,6 +187,7 @@ func (j *Journal) Enqueue(request Outbound) (bool, Delivery, error) {
 		return false, Delivery{}, err
 	}
 	if existing.RecipientEndpointID != request.RecipientEndpointID ||
+		existing.RecipientDeviceID != request.RecipientDeviceID ||
 		existing.ConversationID != request.ConversationID ||
 		existing.SessionID != request.SessionID ||
 		existing.PayloadDigest != canon.Digest(request.Payload) {
@@ -225,7 +245,7 @@ func (j *Journal) Due(now time.Time) ([]Delivery, error) {
 		if due[first].NextAttemptAtUnix != due[second].NextAttemptAtUnix {
 			return due[first].NextAttemptAtUnix < due[second].NextAttemptAtUnix
 		}
-		return due[first].EventID < due[second].EventID
+		return due[first].Key() < due[second].Key()
 	})
 	return due, nil
 }
@@ -236,12 +256,12 @@ func (j *Journal) Due(now time.Time) ([]Delivery, error) {
 // send. The session's own conflict check stops the second from committing a
 // ratchet advance, but it does not stop the second from putting a message on
 // the wire, and a lease does.
-func (j *Journal) ClaimForSend(eventID, attemptID string, now time.Time, lease time.Duration) (Delivery, error) {
+func (j *Journal) ClaimForSend(deliveryID, attemptID string, now time.Time, lease time.Duration) (Delivery, error) {
 	if err := j.usable(); err != nil {
 		return Delivery{}, err
 	}
-	if !eventPattern.MatchString(eventID) {
-		return Delivery{}, errors.New("invalid event identifier")
+	if !validDeliveryID(deliveryID) {
+		return Delivery{}, errors.New("invalid delivery identifier")
 	}
 	if !attemptPattern.MatchString(attemptID) {
 		return Delivery{}, errors.New("invalid send attempt identifier")
@@ -256,7 +276,7 @@ func (j *Journal) ClaimForSend(eventID, attemptID string, now time.Time, lease t
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
-	path := j.deliveryPath(eventID)
+	path := j.deliveryPath(deliveryID)
 	delivery, err := readDelivery(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -283,12 +303,12 @@ func (j *Journal) ClaimForSend(eventID, attemptID string, now time.Time, lease t
 // event, an approval hold stops the timer without abandoning anything, and a
 // retryable code moves the next attempt out along the fixed curve until the
 // attempt budget is spent.
-func (j *Journal) Failed(eventID, attemptID string, code fault.Code, now time.Time) (Delivery, error) {
+func (j *Journal) Failed(deliveryID, attemptID string, code fault.Code, now time.Time) (Delivery, error) {
 	if err := j.usable(); err != nil {
 		return Delivery{}, err
 	}
-	if !eventPattern.MatchString(eventID) {
-		return Delivery{}, errors.New("invalid event identifier")
+	if !validDeliveryID(deliveryID) {
+		return Delivery{}, errors.New("invalid delivery identifier")
 	}
 	if now.IsZero() || now.Unix() < 0 {
 		return Delivery{}, errors.New("invalid delivery attempt time")
@@ -296,7 +316,7 @@ func (j *Journal) Failed(eventID, attemptID string, code fault.Code, now time.Ti
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
-	path := j.deliveryPath(eventID)
+	path := j.deliveryPath(deliveryID)
 	delivery, err := readDelivery(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -346,24 +366,24 @@ func (j *Journal) Failed(eventID, attemptID string, code fault.Code, now time.Ti
 
 // Delivered records that a recipient device durably accepted the event. Only
 // the sweep holding the attempt may settle it.
-func (j *Journal) Delivered(eventID, attemptID string, now time.Time) (Delivery, error) {
-	return j.settle(eventID, attemptID, StateDelivered, now)
+func (j *Journal) Delivered(deliveryID, attemptID string, now time.Time) (Delivery, error) {
+	return j.settle(deliveryID, attemptID, StateDelivered, now)
 }
 
 // Abandon gives up on an event on the owner's instruction. It needs no attempt
 // because the owner is overriding whatever is in flight.
-func (j *Journal) Abandon(eventID string, now time.Time) (Delivery, error) {
-	return j.settle(eventID, "", StateAbandoned, now)
+func (j *Journal) Abandon(deliveryID string, now time.Time) (Delivery, error) {
+	return j.settle(deliveryID, "", StateAbandoned, now)
 }
 
 // Resume returns a held delivery to the queue once the decision it was waiting
 // on has been made.
-func (j *Journal) Resume(eventID string, now time.Time) (Delivery, error) {
+func (j *Journal) Resume(deliveryID string, now time.Time) (Delivery, error) {
 	if err := j.usable(); err != nil {
 		return Delivery{}, err
 	}
-	if !eventPattern.MatchString(eventID) {
-		return Delivery{}, errors.New("invalid event identifier")
+	if !validDeliveryID(deliveryID) {
+		return Delivery{}, errors.New("invalid delivery identifier")
 	}
 	if now.IsZero() || now.Unix() < 0 {
 		return Delivery{}, errors.New("invalid delivery resume time")
@@ -371,7 +391,7 @@ func (j *Journal) Resume(eventID string, now time.Time) (Delivery, error) {
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
-	path := j.deliveryPath(eventID)
+	path := j.deliveryPath(deliveryID)
 	delivery, err := readDelivery(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -403,15 +423,27 @@ func holdsAttempt(delivery Delivery, attemptID string) error {
 
 // LookupDelivery returns the durable state of an outbound event.
 func (j *Journal) LookupDelivery(eventID string) (Delivery, bool, error) {
+	return j.lookupDelivery(eventID)
+}
+
+// LookupDeliveryCopy returns one exact device-copy record.
+func (j *Journal) LookupDeliveryCopy(deliveryID string) (Delivery, bool, error) {
+	if !deliveryCopyPattern.MatchString(deliveryID) {
+		return Delivery{}, false, errors.New("invalid delivery copy identifier")
+	}
+	return j.lookupDelivery(deliveryID)
+}
+
+func (j *Journal) lookupDelivery(deliveryID string) (Delivery, bool, error) {
 	if err := j.usable(); err != nil {
 		return Delivery{}, false, err
 	}
-	if !eventPattern.MatchString(eventID) {
-		return Delivery{}, false, errors.New("invalid event identifier")
+	if !validDeliveryID(deliveryID) {
+		return Delivery{}, false, errors.New("invalid delivery identifier")
 	}
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
-	delivery, err := readDelivery(j.deliveryPath(eventID))
+	delivery, err := readDelivery(j.deliveryPath(deliveryID))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Delivery{}, false, nil
@@ -421,12 +453,12 @@ func (j *Journal) LookupDelivery(eventID string) (Delivery, bool, error) {
 	return delivery, true, nil
 }
 
-func (j *Journal) settle(eventID, attemptID string, state DeliveryState, now time.Time) (Delivery, error) {
+func (j *Journal) settle(deliveryID, attemptID string, state DeliveryState, now time.Time) (Delivery, error) {
 	if err := j.usable(); err != nil {
 		return Delivery{}, err
 	}
-	if !eventPattern.MatchString(eventID) {
-		return Delivery{}, errors.New("invalid event identifier")
+	if !validDeliveryID(deliveryID) {
+		return Delivery{}, errors.New("invalid delivery identifier")
 	}
 	if now.IsZero() || now.Unix() < 0 {
 		return Delivery{}, errors.New("invalid delivery settle time")
@@ -434,7 +466,7 @@ func (j *Journal) settle(eventID, attemptID string, state DeliveryState, now tim
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
-	path := j.deliveryPath(eventID)
+	path := j.deliveryPath(deliveryID)
 	delivery, err := readDelivery(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -477,8 +509,17 @@ func validateOutbound(request Outbound) error {
 	if !eventPattern.MatchString(request.EventID) {
 		return errors.New("invalid event identifier")
 	}
+	if request.DeliveryID != "" && !deliveryCopyPattern.MatchString(request.DeliveryID) {
+		return errors.New("invalid delivery copy identifier")
+	}
 	if !endpointPattern.MatchString(request.RecipientEndpointID) {
 		return errors.New("invalid delivery recipient endpoint")
+	}
+	if request.DeliveryID != "" && !ids.Device.MatchString(request.RecipientDeviceID) {
+		return errors.New("a delivery copy needs a recipient device")
+	}
+	if request.DeliveryID == "" && request.RecipientDeviceID != "" && !ids.Device.MatchString(request.RecipientDeviceID) {
+		return errors.New("invalid delivery recipient device")
 	}
 	if !convPattern.MatchString(request.ConversationID) {
 		return errors.New("invalid delivery conversation identifier")
@@ -511,6 +552,14 @@ func readDelivery(path string) (Delivery, error) {
 		!canon.ValidDigest(delivery.PayloadDigest) {
 		return Delivery{}, errors.New("invalid delivery record")
 	}
+	if delivery.DeliveryID != "" && (!deliveryCopyPattern.MatchString(delivery.DeliveryID) ||
+		!ids.Device.MatchString(delivery.RecipientDeviceID)) {
+		return Delivery{}, errors.New("invalid delivery record")
+	}
+	if delivery.DeliveryID == "" && delivery.RecipientDeviceID != "" &&
+		!ids.Device.MatchString(delivery.RecipientDeviceID) {
+		return Delivery{}, errors.New("invalid delivery record")
+	}
 	if !sessionPattern.MatchString(delivery.SessionID) {
 		return Delivery{}, errors.New("invalid delivery record")
 	}
@@ -531,6 +580,33 @@ func readDelivery(path string) (Delivery, error) {
 		return Delivery{}, errors.New("invalid delivery record")
 	}
 	return delivery, nil
+}
+
+// Key is the journal identifier for this device copy.
+func (d Delivery) Key() string {
+	if d.DeliveryID != "" {
+		return d.DeliveryID
+	}
+	return d.EventID
+}
+
+func validDeliveryID(value string) bool {
+	return eventPattern.MatchString(value) || deliveryCopyPattern.MatchString(value)
+}
+
+// NewDeliveryCopyID deterministically names one device copy while preserving
+// EventID as the logical message identity shared by every copy.
+func NewDeliveryCopyID(eventID, endpointID, deviceID string) (string, error) {
+	if !eventPattern.MatchString(eventID) || !endpointPattern.MatchString(endpointID) ||
+		!ids.Device.MatchString(deviceID) {
+		return "", errors.New("invalid delivery copy authority")
+	}
+	buffer := bytes.NewBufferString(canon.DomainDeliveryCopy)
+	canon.Text(buffer, eventID)
+	canon.Text(buffer, endpointID)
+	canon.Text(buffer, deviceID)
+	digest := canon.Digest(buffer.Bytes())
+	return "cpy_" + digest[len("sha256:"):], nil
 }
 
 // ExpireDeliveries settles outbound events that outlived their own expiry.

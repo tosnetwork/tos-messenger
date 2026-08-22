@@ -199,6 +199,9 @@ const (
 	// DomainOutboundIntent binds a runtime's semantic message and fixed route
 	// independently of the daemon-owned creation time and Event ID.
 	DomainOutboundIntent = "tos.messaging.outbound-intent.v1\x00"
+	// DomainDeliveryCopy derives one durable target copy from a logical Event
+	// and daemon-verified recipient Endpoint/Device pair.
+	DomainDeliveryCopy = "tos.messaging.delivery-copy.v1\x00"
 	// DomainOutboundAttachmentIntent binds exact plaintext evidence and the
 	// operator-selected route/storage policy before streaming encryption begins.
 	DomainOutboundAttachmentIntent = "tos.messaging.outbound-attachment-intent.v1\x00"
@@ -269,6 +272,7 @@ var Domains = []string{
 	DomainLabMessage,
 	DomainOpenFoxMLSAAD,
 	DomainOutboundIntent,
+	DomainDeliveryCopy,
 	DomainOutboundAttachmentIntent,
 	DomainAttachmentCorpusManifest,
 	DomainAttachmentCorpusReport,

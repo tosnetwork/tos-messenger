@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/ids"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 )
 
@@ -53,8 +54,45 @@ type SessionRecord struct {
 	// BootstrapBase64 is public asynchronous first-contact evidence. It is
 	// committed with the initiator state so a crash cannot retain one without
 	// the other. Device private prekeys are never included.
-	BootstrapBase64 string `json:"bootstrap_base64,omitempty"`
-	BootstrapDigest string `json:"bootstrap_digest,omitempty"`
+	BootstrapBase64 string            `json:"bootstrap_base64,omitempty"`
+	BootstrapDigest string            `json:"bootstrap_digest,omitempty"`
+	Authority       *SessionAuthority `json:"authority,omitempty"`
+}
+
+// SessionAuthority is the immutable device-pair identity established from
+// finalized first-contact evidence. It is local/peer oriented and deliberately
+// excludes a conversation because one ratchet can carry several conversations.
+type SessionAuthority struct {
+	LocalAgentID    string `json:"local_agent_id"`
+	LocalEndpointID string `json:"local_messaging_endpoint_id"`
+	LocalDeviceID   string `json:"local_device_id"`
+	PeerAgentID     string `json:"peer_agent_id"`
+	PeerEndpointID  string `json:"peer_messaging_endpoint_id"`
+	PeerDeviceID    string `json:"peer_device_id"`
+}
+
+func authorityFromBinding(binding e2ee.Binding, initiator bool) SessionAuthority {
+	if initiator {
+		return SessionAuthority{LocalAgentID: binding.SenderAgentID, LocalEndpointID: binding.SenderEndpointID,
+			LocalDeviceID: binding.SenderDeviceID, PeerAgentID: binding.RecipientAgentID,
+			PeerEndpointID: binding.RecipientEndpointID, PeerDeviceID: binding.RecipientDeviceID}
+	}
+	return SessionAuthority{LocalAgentID: binding.RecipientAgentID, LocalEndpointID: binding.RecipientEndpointID,
+		LocalDeviceID: binding.RecipientDeviceID, PeerAgentID: binding.SenderAgentID,
+		PeerEndpointID: binding.SenderEndpointID, PeerDeviceID: binding.SenderDeviceID}
+}
+
+func (a SessionAuthority) validate(sessionID string) error {
+	if !ids.Agent.MatchString(a.LocalAgentID) || !ids.Endpoint.MatchString(a.LocalEndpointID) ||
+		!ids.Device.MatchString(a.LocalDeviceID) || !ids.Agent.MatchString(a.PeerAgentID) ||
+		!ids.Endpoint.MatchString(a.PeerEndpointID) || !ids.Device.MatchString(a.PeerDeviceID) {
+		return errors.New("invalid session authority")
+	}
+	expected, err := e2ee.DeviceSessionID(a.LocalDeviceID, a.PeerDeviceID)
+	if err != nil || expected != sessionID {
+		return errors.New("session authority belongs to another device pair")
+	}
+	return nil
 }
 
 // State returns the persisted suite state.
@@ -160,6 +198,8 @@ func (j *Journal) PutBootstrappedSessionState(sessionID string, state e2ee.State
 		StateBase64: base64.StdEncoding.EncodeToString(state), StateDigest: canon.Digest(state),
 		UpdatedAtUnix: uint64(now.Unix()), BootstrapBase64: base64.StdEncoding.EncodeToString(raw),
 		BootstrapDigest: canon.Digest(raw)}
+	authority := authorityFromBinding(bootstrap.Binding, true)
+	record.Authority = &authority
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -186,6 +226,26 @@ func (j *Journal) PutBootstrappedSessionState(sessionID string, state e2ee.State
 // is waiting for. A restart finishes it without needing the sender to try
 // again.
 func (j *Journal) CommitInbound(sessionID, algorithm string, expectedGeneration uint64, next e2ee.State, entry Entry, now time.Time) (bool, Record, error) {
+	return j.commitInbound(sessionID, algorithm, expectedGeneration, next, entry, nil, now)
+}
+
+// CommitInboundFirstContact installs responder authority with the first
+// opened Event and ratchet transition in the same recoverable transaction.
+func (j *Journal) CommitInboundFirstContact(sessionID, algorithm string, next e2ee.State,
+	entry Entry, bootstrap e2ee.FirstContact, now time.Time) (bool, Record, error) {
+	if err := e2ee.ValidateFirstContact(bootstrap); err != nil {
+		return false, Record{}, err
+	}
+	expected, err := e2ee.DeviceSessionID(bootstrap.Binding.SenderDeviceID, bootstrap.Binding.RecipientDeviceID)
+	if err != nil || expected != sessionID {
+		return false, Record{}, errors.New("first-contact bootstrap belongs to another session")
+	}
+	authority := authorityFromBinding(bootstrap.Binding, false)
+	return j.commitInbound(sessionID, algorithm, 0, next, entry, &authority, now)
+}
+
+func (j *Journal) commitInbound(sessionID, algorithm string, expectedGeneration uint64,
+	next e2ee.State, entry Entry, authority *SessionAuthority, now time.Time) (bool, Record, error) {
 	if err := j.usable(); err != nil {
 		return false, Record{}, err
 	}
@@ -194,7 +254,7 @@ func (j *Journal) CommitInbound(sessionID, algorithm string, expectedGeneration 
 	}
 	entry.Transition = &Transition{
 		SessionID: sessionID, Algorithm: algorithm,
-		ExpectedGeneration: expectedGeneration, NextState: next,
+		ExpectedGeneration: expectedGeneration, NextState: next, Authority: authority,
 	}
 	fresh, record, err := j.Accept(entry)
 	if err != nil {
@@ -224,7 +284,7 @@ func (j *Journal) CommitInbound(sessionID, algorithm string, expectedGeneration 
 		return false, Record{}, ErrSessionConflict
 	}
 	if err := j.writeSessionInbound(sessionID, algorithm, expectedGeneration+1, next,
-		entry.EventID, uint64(now.Unix())); err != nil {
+		entry.EventID, authority, uint64(now.Unix())); err != nil {
 		return false, Record{}, err
 	}
 	record.Crypto = CryptoCommitted
@@ -245,15 +305,15 @@ func (j *Journal) CommitInbound(sessionID, algorithm string, expectedGeneration 
 // while the state rolled back, and the next seal would reuse a message key and
 // nonce, which is the one failure a ratchet cannot absorb.
 func (j *Journal) CommitSealed(sessionID, algorithm string, expectedGeneration uint64, next e2ee.State,
-	eventID, attemptID string, ciphertext []byte, now time.Time) (Delivery, error) {
+	deliveryID, attemptID string, ciphertext []byte, now time.Time) (Delivery, error) {
 	if err := j.usable(); err != nil {
 		return Delivery{}, err
 	}
 	if err := validateSessionInput(sessionID, algorithm, next, now); err != nil {
 		return Delivery{}, err
 	}
-	if !eventPattern.MatchString(eventID) {
-		return Delivery{}, errors.New("invalid event identifier")
+	if !validDeliveryID(deliveryID) {
+		return Delivery{}, errors.New("invalid delivery identifier")
 	}
 	if !attemptPattern.MatchString(attemptID) {
 		return Delivery{}, errors.New("invalid send attempt identifier")
@@ -264,7 +324,7 @@ func (j *Journal) CommitSealed(sessionID, algorithm string, expectedGeneration u
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
-	path := j.deliveryPath(eventID)
+	path := j.deliveryPath(deliveryID)
 	delivery, err := readDelivery(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -330,14 +390,19 @@ func (j *Journal) writeSession(sessionID, algorithm string, state e2ee.State, no
 }
 
 func (j *Journal) writeSessionAt(sessionID, algorithm string, generation uint64, state e2ee.State, now time.Time) error {
-	return j.writeSessionInbound(sessionID, algorithm, generation, state, "", uint64(now.Unix()))
+	return j.writeSessionInbound(sessionID, algorithm, generation, state, "", nil, uint64(now.Unix()))
 }
 
 func (j *Journal) writeSessionInbound(sessionID, algorithm string, generation uint64,
-	state e2ee.State, inboundEventID string, seconds uint64) error {
+	state e2ee.State, inboundEventID string, authority *SessionAuthority, seconds uint64) error {
 	var bootstrapBase64, bootstrapDigest string
 	if current, err := readSession(j.sessionPath(sessionID)); err == nil {
 		bootstrapBase64, bootstrapDigest = current.BootstrapBase64, current.BootstrapDigest
+		if authority == nil {
+			authority = current.Authority
+		} else if current.Authority != nil && *current.Authority != *authority {
+			return errors.New("session authority cannot change")
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -351,6 +416,7 @@ func (j *Journal) writeSessionInbound(sessionID, algorithm string, generation ui
 		UpdatedAtUnix:      seconds,
 		LastInboundEventID: inboundEventID,
 		BootstrapBase64:    bootstrapBase64, BootstrapDigest: bootstrapDigest,
+		Authority: authority,
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -400,6 +466,11 @@ func readSession(path string) (SessionRecord, error) {
 	}
 	if _, _, err := record.Bootstrap(); err != nil {
 		return SessionRecord{}, errors.New("invalid session record")
+	}
+	if record.Authority != nil {
+		if err := record.Authority.validate(record.SessionID); err != nil {
+			return SessionRecord{}, errors.New("invalid session record")
+		}
 	}
 	return record, nil
 }

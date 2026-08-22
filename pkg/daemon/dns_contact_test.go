@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
+	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
@@ -73,6 +74,11 @@ func TestDaemonEnsuresVerifiedDeviceSessionsWithoutCallerRouteAuthority(t *testi
 	}}
 	d := &Daemon{config: config, journal: journal, prekeys: prekeys,
 		discovery: &discoveryRuntime{contacts: contacts}, now: func() time.Time { return now }}
+	d.dispatch, err = dispatch.New(dispatch.Config{Journal: journal, Identity: config.Identity(),
+		Network: config.Network(), Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("dispatcher: %v", err)
+	}
 	result, err := d.EnsureDirectConversation(context.Background(), remoteAgent, nil)
 	if err != nil {
 		t.Fatalf("ensure direct: %v", err)
@@ -98,6 +104,25 @@ func TestDaemonEnsuresVerifiedDeviceSessionsWithoutCallerRouteAuthority(t *testi
 	reloaded, _, _ := journal.SessionState(sessionID)
 	if reloaded.Generation != record.Generation || reloaded.BootstrapDigest != record.BootstrapDigest {
 		t.Fatal("idempotent ensure replaced an established device session")
+	}
+	idempotency := "idem_" + strings.Repeat("e", 64)
+	sent, err := d.SendDirectMessage(context.Background(), remoteAgent, "text/plain; charset=utf-8",
+		"hello from OpenFox", idempotency, uint64(now.Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatalf("send direct: %v", err)
+	}
+	retry, err := d.SendDirectMessage(context.Background(), remoteAgent, "text/plain; charset=utf-8",
+		"hello from OpenFox", idempotency, uint64(now.Add(time.Hour).Unix()))
+	if err != nil || retry.EventID != sent.EventID {
+		t.Fatalf("idempotent send: first=%+v retry=%+v err=%v", sent, retry, err)
+	}
+	due, err := journal.Due(now)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("fan-out queue: deliveries=%+v err=%v", due, err)
+	}
+	if due[0].EventID != sent.EventID || due[0].RecipientEndpointID != remoteEndpoint ||
+		due[0].RecipientDeviceID != remoteDevice || due[0].DeliveryID == "" {
+		t.Fatalf("queued copy did not use daemon-verified target: %+v", due[0])
 	}
 }
 
