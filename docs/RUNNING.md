@@ -324,11 +324,12 @@ all digest placeholders with the reviewed lowercase `sha256:` values:
 
 For production-candidate malware scanning, build
 `cmd/tos-attachment-clamav-scanner` as a second scanner. Do not point it at a
-mutable database directory. Pin one reviewed ClamScan engine and the exact
-FreshClam-produced official `main`/`daily` CVD or CLD files as named resources;
-optional `bytecode` must be pinned the same way. `ScannerResourceDigest` uses
-the same regular-file, inode, size and SHA-256 checks as admission. A minimal
-shape is:
+mutable database directory. Pin one reviewed ClamScan engine and take one
+immutable snapshot of the exact FreshClam-produced official `main`, `daily`,
+and `bytecode` CVD/CLD files, every matching versioned external `.cvd.sign`,
+and the CVD root certificate. `ScannerResourceDigest` uses the same
+regular-file, inode, size and SHA-256 checks as admission. The complete shape
+occupies the policy's eight-resource maximum:
 
 ```json
 {
@@ -337,13 +338,23 @@ shape is:
   "executable_digest": "sha256:<adapter>",
   "args": [
     "--engine-resource", "clamscan",
-    "--database-resource", "daily.cld",
-    "--database-resource", "main.cvd"
+    "--certificate-resource", "clamav.crt",
+    "--database-resource", "bytecode.cvd",
+    "--database-resource", "daily.cvd",
+    "--database-resource", "main.cvd",
+    "--signature-resource", "bytecode-339.cvd.sign",
+    "--signature-resource", "daily-28099.cvd.sign",
+    "--signature-resource", "main-63.cvd.sign"
   ],
   "resources": [
+    {"name": "bytecode-339.cvd.sign", "path": "/srv/tos-messenger/clamav/bytecode-339.cvd.sign", "digest": "sha256:<bytecode-signature>"},
+    {"name": "bytecode.cvd", "path": "/srv/tos-messenger/clamav/bytecode.cvd", "digest": "sha256:<bytecode>"},
+    {"name": "clamav.crt", "path": "/srv/tos-messenger/clamav/clamav.crt", "digest": "sha256:<certificate>"},
     {"name": "clamscan", "path": "/usr/bin/clamscan", "digest": "sha256:<engine>", "executable": true},
-    {"name": "daily.cld", "path": "/var/lib/clamav/daily.cld", "digest": "sha256:<daily>"},
-    {"name": "main.cvd", "path": "/var/lib/clamav/main.cvd", "digest": "sha256:<main>"}
+    {"name": "daily-28099.cvd.sign", "path": "/srv/tos-messenger/clamav/daily-28099.cvd.sign", "digest": "sha256:<daily-signature>"},
+    {"name": "daily.cvd", "path": "/srv/tos-messenger/clamav/daily.cvd", "digest": "sha256:<daily>"},
+    {"name": "main-63.cvd.sign", "path": "/srv/tos-messenger/clamav/main-63.cvd.sign", "digest": "sha256:<main-signature>"},
+    {"name": "main.cvd", "path": "/srv/tos-messenger/clamav/main.cvd", "digest": "sha256:<main>"}
   ]
 }
 ```
@@ -351,11 +362,16 @@ shape is:
 Both `args` and `resources` are canonical and sorted. Admission copies each
 resource from its validated open inode, verifies the private copy, mounts it
 read-only, and requires its name/digest in the verdict. ClamScan runs with
-official databases only; clean is exit 0, detection is exit 1, and every other
-outcome fails closed. A release deployment must still select a currently
-supported ClamAV patch, refresh and re-pin its official databases, size the
-cgroup for the documented 3–4 GiB engine requirement, and pass the approved
-hostile corpus. EICAR by itself proves plumbing, not production coverage.
+official databases only and `--fips-limits`, so the external signatures and
+pinned certificate are mandatory rather than a legacy-validation fallback.
+Its exact-file limit equals the authenticated input and its internal scan limit
+has only a fixed 1 MiB accounting allowance. Clean is exit 0, detection is exit
+1, and every other outcome fails closed. The 2026-08-22 acceptance used ClamAV
+1.5.3 and current `daily` 28099 through this exact sandbox and passed three
+clean/EICAR/corrupt-signature/corrupt-certificate rounds. A release deployment
+must refresh and re-pin one coherent snapshot, size the cgroup for the
+documented 3–4 GiB engine requirement, and pass the approved hostile corpus.
+EICAR by itself proves plumbing, not production coverage.
 
 Startup re-hashes every configured executable before opening the runtime
 socket. OpenFox's `tos_messenger` settings must set

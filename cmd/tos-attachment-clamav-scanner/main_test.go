@@ -24,8 +24,10 @@ func TestRunBindsPinnedEngineDatabasesAndVerdict(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root, input, adapter, engineLog := clamavFixture(t, test.exitCode)
 			var output bytes.Buffer
-			arguments := []string{"--engine-resource", "clamscan", "--database-resource", "daily.cvd",
-				"--database-resource", "main.cvd", "--tos-scanner-id", "clamav-official",
+			arguments := []string{"--engine-resource", "clamscan", "--certificate-resource", "clamav.crt",
+				"--database-resource", "daily.cvd",
+				"--database-resource", "main.cvd", "--signature-resource", "daily-28099.cvd.sign",
+				"--signature-resource", "main-63.cvd.sign", "--tos-scanner-id", "clamav-official",
 				"--tos-declared-media-type", "text/plain", "--tos-input", input}
 			if err := run(arguments, &output, root, input, adapter); err != nil {
 				t.Fatal(err)
@@ -34,9 +36,10 @@ func TestRunBindsPinnedEngineDatabasesAndVerdict(t *testing.T) {
 			if err := json.Unmarshal(output.Bytes(), &verdict); err != nil {
 				t.Fatal(err)
 			}
-			if verdict.Decision != test.decision || verdict.ReasonCode != test.reason || len(verdict.Resources) != 3 ||
-				verdict.Resources[0].Name != "clamscan" || verdict.Resources[1].Name != "daily.cvd" ||
-				verdict.Resources[2].Name != "main.cvd" {
+			if verdict.Decision != test.decision || verdict.ReasonCode != test.reason || len(verdict.Resources) != 6 ||
+				verdict.Resources[0].Name != "clamav.crt" || verdict.Resources[1].Name != "clamscan" ||
+				verdict.Resources[2].Name != "daily-28099.cvd.sign" || verdict.Resources[3].Name != "daily.cvd" ||
+				verdict.Resources[4].Name != "main-63.cvd.sign" || verdict.Resources[5].Name != "main.cvd" {
 				t.Fatalf("wrong ClamAV verdict: %+v", verdict)
 			}
 			for _, resource := range verdict.Resources {
@@ -48,10 +51,10 @@ func TestRunBindsPinnedEngineDatabasesAndVerdict(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, required := range []string{"--official-db-only=yes", "--alert-encrypted=yes", "--alert-broken=yes",
+			for _, required := range []string{"--official-db-only=yes", "--fips-limits", "--alert-encrypted=yes", "--alert-broken=yes",
 				"--alert-exceeds-max=yes",
-				"--max-filesize=19", "--max-scansize=19", "--database=" + filepath.Join(root, "daily.cvd"),
-				"--database=" + filepath.Join(root, "main.cvd"), input} {
+				"--max-filesize=19", "--max-scansize=1048595", "--database=" + filepath.Join(root, "daily.cvd"),
+				"--database=" + filepath.Join(root, "main.cvd"), "--cvdcertsdir=" + root, input} {
 				if !strings.Contains(string(engineArguments), required) {
 					t.Fatalf("ClamAV invocation omitted %q: %s", required, engineArguments)
 				}
@@ -77,6 +80,19 @@ func TestRunFailsClosedForEngineAndDatabaseErrors(t *testing.T) {
 			"--tos-scanner-id", "clamav-official", "--tos-declared-media-type", "text/plain", "--tos-input", input},
 		{"--engine-resource", "daily.cvd", "--database-resource", "daily.cvd", "--database-resource", "main.cvd",
 			"--tos-scanner-id", "clamav-official", "--tos-declared-media-type", "text/plain", "--tos-input", input},
+		{"--engine-resource", "clamscan", "--database-resource", "daily.cvd", "--database-resource", "main.cvd",
+			"--signature-resource", "daily-28099.cvd.sign", "--tos-scanner-id", "clamav-official",
+			"--tos-declared-media-type", "text/plain", "--tos-input", input},
+		{"--engine-resource", "clamscan", "--database-resource", "daily.cvd", "--database-resource", "main.cvd",
+			"--signature-resource", "daily-28099.cvd.sign", "--signature-resource", "bytecode-339.cvd.sign",
+			"--tos-scanner-id", "clamav-official", "--tos-declared-media-type", "text/plain", "--tos-input", input},
+		{"--engine-resource", "clamscan", "--database-resource", "daily.cvd", "--database-resource", "main.cvd",
+			"--signature-resource", "daily-28099.cvd.sign", "--signature-resource", "main-63.cvd.sign",
+			"--tos-scanner-id", "clamav-official", "--tos-declared-media-type", "text/plain", "--tos-input", input},
+		{"--engine-resource", "clamscan", "--certificate-resource", "clamav.pem", "--database-resource", "daily.cvd",
+			"--database-resource", "main.cvd", "--signature-resource", "daily-28099.cvd.sign",
+			"--signature-resource", "main-63.cvd.sign", "--tos-scanner-id", "clamav-official",
+			"--tos-declared-media-type", "text/plain", "--tos-input", input},
 	} {
 		if err := run(arguments, &bytes.Buffer{}, root, input, adapter); err == nil {
 			t.Fatalf("unsafe database/engine invocation accepted: %v", arguments)
@@ -92,7 +108,7 @@ func clamavFixture(t *testing.T, exitCode string) (string, string, string, strin
 	if err := os.WriteFile(engine, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+engineLog+"\nexit "+exitCode+"\n"), 0o500); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"daily.cvd", "main.cvd"} {
+	for _, name := range []string{"daily.cvd", "main.cvd", "daily-28099.cvd.sign", "main-63.cvd.sign", "clamav.crt"} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte("official-fixture-"+name), 0o400); err != nil {
 			t.Fatal(err)
 		}
