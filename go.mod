@@ -3,7 +3,8 @@ module github.com/tosnetwork/tos-messenger
 go 1.26.5
 
 require (
-	github.com/tosnetwork/tos-service-protocol v0.0.0-20260820090236-2a06d05b29db
+	connectrpc.com/connect v1.19.1
+	github.com/tosnetwork/tos-service-protocol v0.0.0-20260822025249-4fe4342a39e0
 	github.com/tosnetwork/tosutils-go v1.18.2-0.20260820143526-4d1a10d94bef
 	golang.org/x/sys v0.46.0
 	google.golang.org/protobuf v1.36.11

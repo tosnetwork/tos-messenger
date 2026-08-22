@@ -16,6 +16,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentadmission"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentops"
 	"github.com/tosnetwork/tos-messenger/pkg/chainquote"
+	"github.com/tosnetwork/tos-messenger/pkg/contact"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
@@ -60,6 +61,31 @@ type Daemon struct {
 	now           func() time.Time
 
 	closeOnce sync.Once
+}
+
+// ResolveContact accepts a human contact input at the daemon boundary. A .tos
+// name is reduced to a quorum-finalized Agent identifier and immediately run
+// through the same delegation, DHT, Contact Descriptor, and prekey verification
+// chain as an explicit Agent ID. The returned CanonicalName is display metadata;
+// callers must persist and authorize only Result.AgentID.
+//
+// DNS is supplied by the caller so transport credentials remain outside the
+// daemon configuration. The service-protocol nativeclient.Client satisfies the
+// interface. Discovery must be enabled because there is no safe contact result
+// without the existing directory chain.
+func (d *Daemon) ResolveContact(ctx context.Context, input string, dns contact.DNSAliasClient) (contact.Result, error) {
+	if d == nil || d.discovery == nil || d.discovery.contacts == nil {
+		return contact.Result{}, errors.New("contact discovery is not enabled")
+	}
+	now := time.Now
+	if d.now != nil {
+		now = d.now
+	}
+	resolver := &contact.Resolver{
+		DNS: dns, Directory: d.discovery.contacts, Network: d.config.Network(),
+		Chain: d.discovery.chain, CallerID: d.config.AgentID, Now: now,
+	}
+	return resolver.Resolve(ctx, input)
 }
 
 // Open assembles a daemon and takes ownership of its state.

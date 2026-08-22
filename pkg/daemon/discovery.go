@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/securefile"
+	"github.com/tosnetwork/tos-messenger/pkg/contact"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
+	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tosutils-go/adnl"
 	"github.com/tosnetwork/tosutils-go/adnl/dht"
 	"github.com/tosnetwork/tosutils-go/liteclient"
@@ -26,9 +28,11 @@ type directoryRunner interface {
 }
 
 type discoveryRuntime struct {
-	runner directoryRunner
-	peers  []string
-	close  func()
+	runner   directoryRunner
+	contacts contact.Directory
+	chain    identity.ChainPolicy
+	peers    []string
+	close    func()
 }
 
 func (r *discoveryRuntime) Close() error {
@@ -123,7 +127,7 @@ func (productionDiscoveryBuilder) Build(config Config, journal *eventlog.Journal
 		Lead:     config.Discovery.RefreshLead(),
 		Observer: daemonRefreshObserver{observer: observer},
 	}
-	return &discoveryRuntime{runner: manager, peers: peers, close: func() {
+	return &discoveryRuntime{runner: manager, contacts: manager, chain: chain, peers: peers, close: func() {
 		objects.CloseIdleConnections()
 		client.Close()
 	}}, nil
