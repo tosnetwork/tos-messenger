@@ -34,10 +34,16 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(arguments []string, output, errorOutput io.Writer) int {
 	if len(arguments) == 0 {
-		fmt.Fprintln(errorOutput, "usage: tos-attachment-corpus sign|run|verify [flags]")
+		fmt.Fprintln(errorOutput, "usage: tos-attachment-corpus keygen|sign|run|verify [flags]")
 		return 2
 	}
 	switch arguments[0] {
+	case "keygen":
+		if err := generateKey(arguments[1:], output, errorOutput); err != nil {
+			fmt.Fprintln(errorOutput, err)
+			return 1
+		}
+		return 0
 	case "sign":
 		if err := signManifest(arguments[1:], output, errorOutput); err != nil {
 			fmt.Fprintln(errorOutput, err)
@@ -57,9 +63,31 @@ func run(arguments []string, output, errorOutput io.Writer) int {
 		}
 		return 0
 	default:
-		fmt.Fprintln(errorOutput, "usage: tos-attachment-corpus sign|run|verify [flags]")
+		fmt.Fprintln(errorOutput, "usage: tos-attachment-corpus keygen|sign|run|verify [flags]")
 		return 2
 	}
+}
+
+func generateKey(arguments []string, output, errorOutput io.Writer) error {
+	flags := flag.NewFlagSet("keygen", flag.ContinueOnError)
+	flags.SetOutput(errorOutput)
+	keyPath := flags.String("output", "", "new mode-0600 canonical Ed25519 key")
+	if flags.Parse(arguments) != nil || flags.NArg() != 0 || *keyPath == "" {
+		return errors.New("keygen requires output")
+	}
+	if !cleanAbsolute(*keyPath) {
+		return errors.New("key output must be a clean absolute path")
+	}
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	defer clear(private)
+	if err := writeNewPrivate(*keyPath, []byte(hex.EncodeToString(private)+"\n")); err != nil {
+		return err
+	}
+	fmt.Fprintf(output, "public_key=%s\n", hex.EncodeToString(public))
+	return nil
 }
 
 func signManifest(arguments []string, output, errorOutput io.Writer) error {

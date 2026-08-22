@@ -397,11 +397,14 @@ OpenFox input ceiling:
 }
 ```
 
-The approver signs it with a separately custodied mode-`0600` canonical
-Ed25519 private key. The command derives the public key from that key and never
-accepts draft-supplied authority:
+The approver generates a separately custodied mode-`0600` canonical Ed25519
+private key in the approver's isolated environment, then signs the draft. The
+command derives the public key from that key, prints it for out-of-band pinning,
+atomically refuses to overwrite either file, and never accepts draft-supplied
+authority:
 
 ```bash
+tos-attachment-corpus keygen -output /review/approver.key
 tos-attachment-corpus sign \
   -draft /review/corpus-draft.json \
   -approver-key /review/approver.key \
@@ -411,8 +414,9 @@ tos-attachment-corpus sign \
 Copy the exact `attachment_admission` object (not the surrounding daemon
 config) into a reviewed policy file. It must name exactly one scanner with ID
 `clamav-official`; keep the immutable eight-resource snapshot above. Provision
-a different mode-`0600` runner key and run the opt-in target with all paths and
-both public keys fixed:
+a different mode-`0600` runner key with `keygen` in the runner's isolated
+environment, then run the opt-in target with all paths and both public keys
+fixed:
 
 ```bash
 export TOS_ATTACHMENT_CORPUS_RUNNER=/usr/local/libexec/tos-attachment-corpus

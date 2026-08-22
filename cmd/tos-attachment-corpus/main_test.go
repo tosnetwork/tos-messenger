@@ -76,15 +76,36 @@ func TestPrivateKeyAndReportFileBoundaries(t *testing.T) {
 }
 
 func TestCommandRequiresExplicitModeAndAuthority(t *testing.T) {
-	for _, arguments := range [][]string{nil, {"unknown"}, {"sign"}, {"run"}, {"verify"}} {
+	for _, arguments := range [][]string{nil, {"unknown"}, {"keygen"}, {"sign"}, {"run"}, {"verify"}} {
 		var output, errorOutput bytes.Buffer
 		code := run(arguments, &output, &errorOutput)
 		if code != 2 && (len(arguments) == 0 || arguments[0] == "unknown") {
 			t.Fatalf("arguments %v returned %d", arguments, code)
 		}
-		if len(arguments) > 0 && (arguments[0] == "sign" || arguments[0] == "run" || arguments[0] == "verify") && code != 1 {
+		if len(arguments) > 0 && (arguments[0] == "keygen" || arguments[0] == "sign" || arguments[0] == "run" || arguments[0] == "verify") && code != 1 {
 			t.Fatalf("incomplete %s returned %d", arguments[0], code)
 		}
+	}
+}
+
+func TestKeygenCreatesCanonicalPrivateFileWithoutOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "generated.key")
+	var output, errorOutput bytes.Buffer
+	arguments := []string{"keygen", "-output", path}
+	if code := run(arguments, &output, &errorOutput); code != 0 {
+		t.Fatalf("keygen: code=%d stderr=%s", code, errorOutput.String())
+	}
+	key, err := readPrivateKey(path)
+	if err != nil || len(key) != ed25519.PrivateKeySize {
+		t.Fatalf("generated key: %v", err)
+	}
+	public := hex.EncodeToString(key.Public().(ed25519.PublicKey))
+	clear(key)
+	if !strings.Contains(output.String(), public) {
+		t.Fatal("keygen did not return the derived public key")
+	}
+	if code := run(arguments, &output, &errorOutput); code == 0 {
+		t.Fatal("keygen overwrote an existing key")
 	}
 }
 
