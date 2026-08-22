@@ -86,6 +86,8 @@ const (
 	// OpSendDirect accepts recipient intent plus message semantics and delegates
 	// all identity, session, device fan-out and route authority to the daemon.
 	OpSendDirect Operation = "messages.send-direct"
+	// OpReplyDirect derives all addressing from an authenticated inbound Event.
+	OpReplyDirect Operation = "messages.reply-direct"
 	// OpPendingAttachments lists only opaque metadata for encrypted attachment
 	// Events. It never exposes the E2EE-carried Reference or fetch key.
 	OpPendingAttachments Operation = "attachments.pending"
@@ -190,7 +192,7 @@ var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
 		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 		OpResolveContact: {}, OpEnsureDirectConversation: {},
-		OpSendDirect:         {},
+		OpSendDirect: {}, OpReplyDirect: {},
 		OpPendingAttachments: {}, OpClaimAttachment: {},
 		OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
@@ -221,7 +223,7 @@ func Permits(principal Principal, operation Operation) bool {
 var operations = map[Operation]struct{}{
 	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 	OpResolveContact: {}, OpEnsureDirectConversation: {},
-	OpSendDirect:         {},
+	OpSendDirect: {}, OpReplyDirect: {},
 	OpPendingAttachments: {}, OpClaimAttachment: {},
 	OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
@@ -708,14 +710,14 @@ func ValidateRequest(request Request) error {
 	if request.Op != OpVerifyAcceptedQuote && request.ExpectedQuoteTerms != nil {
 		return errors.New("only Quote verification carries expected Quote terms")
 	}
-	if request.Op != OpCompose && request.Op != OpSendDirect && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
+	if request.Op != OpCompose && request.Op != OpSendDirect && request.Op != OpReplyDirect && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
 		(request.ConversationID != "" || request.IdempotencyKey != "") {
 		return errors.New("only outbound composition carries message semantics")
 	}
 	if request.Op == OpListDeviceHistory && request.IdempotencyKey != "" {
 		return errors.New("a history listing has no idempotency key")
 	}
-	if request.Op != OpCompose && request.Op != OpSendDirect && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && (request.RoomID != "" || request.ReplyToEventID != "" ||
+	if request.Op != OpCompose && request.Op != OpSendDirect && request.Op != OpReplyDirect && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && (request.RoomID != "" || request.ReplyToEventID != "" ||
 		request.MembershipEpoch != 0 || request.MediaType != "" || request.Body != "") {
 		return errors.New("only message composition carries message body semantics")
 	}
@@ -740,6 +742,17 @@ func ValidateRequest(request Request) error {
 		return errors.New("only device-history export carries history terms")
 	}
 	switch request.Op {
+	case OpReplyDirect:
+		if !eventPattern.MatchString(request.ReplyToEventID) || request.MediaType == "" || request.Body == "" ||
+			!idempotencyPattern.MatchString(request.IdempotencyKey) || request.ExpiresAtUnix == 0 {
+			return errors.New("a direct reply needs source Event, message, expiry and idempotency")
+		}
+		if request.Recipient != "" || request.Limit != 0 || request.Code != "" || request.SessionID != "" ||
+			request.RecipientEndpointID != "" || request.RecipientAgentID != "" || request.ConversationID != "" ||
+			request.RoomID != "" || request.MembershipEpoch != 0 {
+			return errors.New("a direct reply cannot carry low-level routing authority")
+		}
+		return requireEmpty(request, "a direct reply", request.EventID, request.LeaseID)
 	case OpSendDirect:
 		if request.Recipient == "" || len(request.Recipient) > 255 || request.MediaType == "" || request.Body == "" ||
 			!idempotencyPattern.MatchString(request.IdempotencyKey) || request.ExpiresAtUnix == 0 {

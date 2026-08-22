@@ -278,6 +278,12 @@ func (s *fixedDirectMessageSender) SendDirectMessage(_ context.Context, input, m
 	return s.result, nil
 }
 
+func (s *fixedDirectMessageSender) ReplyDirectMessage(_ context.Context, eventID, mediaType, body,
+	idempotency string, expires uint64) (DirectMessageResult, error) {
+	s.input, s.mediaType, s.body, s.idempotency, s.expires = eventID, mediaType, body, idempotency, expires
+	return s.result, nil
+}
+
 func TestRuntimeSendsDirectIntentWithoutLowLevelAuthority(t *testing.T) {
 	h := newHarness(t)
 	eventID := "evt_" + strings.Repeat("d", 64)
@@ -302,6 +308,36 @@ func TestRuntimeSendsDirectIntentWithoutLowLevelAuthority(t *testing.T) {
 			mutate(&candidate)
 			if _, err := EncodeRequest(candidate); err == nil {
 				t.Fatal("model-selected routing authority was accepted")
+			}
+		})
+	}
+}
+
+func TestRuntimeRepliesFromAuthenticatedEventWithoutLowLevelAuthority(t *testing.T) {
+	h := newHarness(t)
+	sourceEvent := "evt_" + strings.Repeat("a", 64)
+	replyEvent := "evt_" + strings.Repeat("d", 64)
+	sender := &fixedDirectMessageSender{result: DirectMessageResult{AgentID: senderID,
+		ConversationID: convoID, EventID: replyEvent, Readiness: "queued"}}
+	h.server.config.DirectMessageSender = sender
+	request := Request{Op: OpReplyDirect, ReplyToEventID: sourceEvent,
+		MediaType: "text/plain; charset=utf-8", Body: "reply",
+		IdempotencyKey: "idem_" + strings.Repeat("e", 64), ExpiresAtUnix: baseUnix + 600}
+	response := h.call(t, request)
+	if !response.OK || response.EventID != replyEvent || sender.input != sourceEvent {
+		t.Fatalf("reply direct: response=%+v sender=%+v", response, sender)
+	}
+	for name, mutate := range map[string]func(*Request){
+		"recipient":    func(r *Request) { r.Recipient = senderID },
+		"session":      func(r *Request) { r.SessionID = sessionID },
+		"endpoint":     func(r *Request) { r.RecipientEndpointID = peerMEP },
+		"conversation": func(r *Request) { r.ConversationID = convoID },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := request
+			mutate(&candidate)
+			if _, err := EncodeRequest(candidate); err == nil {
+				t.Fatal("reply accepted caller-selected authority")
 			}
 		})
 	}

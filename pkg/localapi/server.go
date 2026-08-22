@@ -95,6 +95,7 @@ type DirectMessageResult struct {
 
 type DirectMessageSender interface {
 	SendDirectMessage(context.Context, string, string, string, string, uint64) (DirectMessageResult, error)
+	ReplyDirectMessage(context.Context, string, string, string, string, uint64) (DirectMessageResult, error)
 }
 
 type AttachmentAdmitter interface {
@@ -264,6 +265,8 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.ensureDirectConversation(ctx, request)
 	case OpSendDirect:
 		return s.sendDirect(ctx, request)
+	case OpReplyDirect:
+		return s.replyDirect(ctx, request)
 	case OpPendingAttachments:
 		return s.pendingAttachments(request, now)
 	case OpClaimAttachment:
@@ -333,6 +336,23 @@ func (s *Server) sendDirect(ctx context.Context, request Request) Response {
 	}
 	return Response{OK: true, AgentID: result.AgentID, CanonicalName: result.CanonicalName,
 		ConversationID: result.ConversationID, EventID: result.EventID, Readiness: result.Readiness}
+}
+
+func (s *Server) replyDirect(ctx context.Context, request Request) Response {
+	if s.config.DirectMessageSender == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("direct message sending is not configured"))
+	}
+	result, err := s.config.DirectMessageSender.ReplyDirectMessage(ctx, request.ReplyToEventID,
+		request.MediaType, request.Body, request.IdempotencyKey, request.ExpiresAtUnix)
+	if err != nil {
+		return refuse(fault.CodeNotAuthentic, err)
+	}
+	if !agentPattern.MatchString(result.AgentID) || !conversationPattern.MatchString(result.ConversationID) ||
+		!eventPattern.MatchString(result.EventID) || result.Readiness != "queued" {
+		return refuse(fault.CodeNotAuthentic, errors.New("direct reply result is not canonical"))
+	}
+	return Response{OK: true, AgentID: result.AgentID, ConversationID: result.ConversationID,
+		EventID: result.EventID, Readiness: result.Readiness}
 }
 
 func (s *Server) resolveContact(ctx context.Context, request Request) Response {

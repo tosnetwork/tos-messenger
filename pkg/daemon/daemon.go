@@ -92,11 +92,16 @@ func (f directConversationEnsureFunc) EnsureDirectConversation(
 	return f(ctx, input)
 }
 
-type directMessageSendFunc func(context.Context, string, string, string, string, uint64) (localapi.DirectMessageResult, error)
+type daemonDirectMessenger struct{ daemon *Daemon }
 
-func (f directMessageSendFunc) SendDirectMessage(ctx context.Context, recipient, mediaType, body,
+func (m daemonDirectMessenger) SendDirectMessage(ctx context.Context, recipient, mediaType, body,
 	idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
-	return f(ctx, recipient, mediaType, body, idempotencyKey, expiresAt)
+	return m.daemon.SendDirectMessage(ctx, recipient, mediaType, body, idempotencyKey, expiresAt)
+}
+
+func (m daemonDirectMessenger) ReplyDirectMessage(ctx context.Context, eventID, mediaType, body,
+	idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
+	return m.daemon.ReplyDirectMessage(ctx, eventID, mediaType, body, idempotencyKey, expiresAt)
 }
 
 // ResolveContact accepts a human contact input at the daemon boundary. A .tos
@@ -235,6 +240,95 @@ func (d *Daemon) SendDirectMessage(ctx context.Context, input, mediaType, body,
 	}
 	return localapi.DirectMessageResult{AgentID: resolved.AgentID, CanonicalName: resolved.CanonicalName,
 		ConversationID: record.ConversationID, EventID: event.EventID, Readiness: "queued"}, nil
+}
+
+// ReplyDirectMessage derives the counterparty and all routing authority from
+// one durably authenticated inbound Event and its verified device session.
+func (d *Daemon) ReplyDirectMessage(ctx context.Context, replyToEventID, mediaType, body,
+	idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
+	inbound, found, err := d.journal.Lookup(replyToEventID)
+	if err != nil || !found {
+		return localapi.DirectMessageResult{}, errors.New("direct reply source Event is not durable")
+	}
+	if inbound.Admission != eventlog.AdmissionAdmitted || inbound.Crypto != eventlog.CryptoCommitted ||
+		inbound.SessionID == "" {
+		return localapi.DirectMessageResult{}, errors.New("direct reply source Event is not authenticated and admitted")
+	}
+	raw, err := inbound.Payload()
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	source, err := envelope.DecodeEventJSON(raw)
+	if err != nil || source.RoomID != "" {
+		return localapi.DirectMessageResult{}, errors.New("direct reply source is not a direct Messenger Event")
+	}
+	session, found, err := d.journal.SessionState(inbound.SessionID)
+	if err != nil || !found || session.Authority == nil {
+		return localapi.DirectMessageResult{}, errors.New("direct reply source has no verified session authority")
+	}
+	authority := session.Authority
+	if authority.LocalAgentID != d.config.AgentID || authority.LocalEndpointID != d.config.EndpointID ||
+		authority.LocalDeviceID != d.config.DeviceID || authority.PeerAgentID != source.SenderAgentID ||
+		authority.PeerEndpointID != source.SenderEndpointID || authority.PeerDeviceID != source.SenderDeviceID {
+		return localapi.DirectMessageResult{}, errors.New("direct reply source conflicts with session authority")
+	}
+	now := time.Now()
+	if d.now != nil {
+		now = d.now()
+	}
+	if expiresAt <= uint64(now.Unix()) {
+		return localapi.DirectMessageResult{}, errors.New("direct reply expiry is not in the future")
+	}
+	resolved, err := d.discovery.contacts.Ensure(ctx, authority.PeerAgentID)
+	if err != nil || resolved.Delegation.AgentID != authority.PeerAgentID ||
+		resolved.Descriptor.EndpointID != authority.PeerEndpointID {
+		return localapi.DirectMessageResult{}, errors.New("direct reply peer Endpoint is no longer verified")
+	}
+	targets, err := d.ensureDirectSessions(contact.Result{AgentID: authority.PeerAgentID, Directory: resolved},
+		source.ConversationID, now)
+	if err != nil || len(targets) == 0 {
+		return localapi.DirectMessageResult{}, errors.New("direct reply has no verified device target")
+	}
+	content, err := payload.Encode(payload.Text{MediaType: mediaType, Body: body})
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	event, err := envelope.NewEvent(envelope.Event{Network: d.config.Network(),
+		ConversationID: source.ConversationID, SenderAgentID: d.config.AgentID,
+		SenderEndpointID: d.config.EndpointID, SenderDeviceID: d.config.DeviceID,
+		ReplyToEventID: source.EventID, CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: expiresAt,
+		Kind: "text", IdempotencyKey: strings.TrimPrefix(idempotencyKey, "idem_"), Content: content})
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	encoded, err := envelope.EncodeEventJSON(event)
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	intent := bytes.NewBufferString(canon.DomainOutboundIntent)
+	for _, value := range []string{d.config.AgentID, authority.PeerAgentID, source.ConversationID,
+		source.EventID, mediaType, body, idempotencyKey} {
+		canon.Text(intent, value)
+	}
+	canon.Uint64(intent, expiresAt)
+	chosen, _, err := d.journal.ClaimOutboundComposition(idempotencyKey, canon.Digest(intent.Bytes()),
+		eventlog.Outbound{EventID: event.EventID, SessionID: targets[0].SessionID,
+			RecipientEndpointID: targets[0].RecipientEndpointID, ConversationID: source.ConversationID,
+			Payload: encoded, CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: expiresAt})
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	if chosen.EventID != event.EventID {
+		event, err = envelope.DecodeEventJSON(chosen.Payload)
+		if err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+	}
+	if _, err := d.dispatch.QueueCopies(event, targets, chosen.ExpiresAtUnix); err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	return localapi.DirectMessageResult{AgentID: authority.PeerAgentID, ConversationID: source.ConversationID,
+		EventID: event.EventID, Readiness: "queued"}, nil
 }
 
 // ensureDirectSessions establishes every reachable recipient-device session
@@ -508,7 +602,7 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 			return instance.EnsureDirectConversation(ctx, input, contactDNS)
 		},
 	)
-	serverConfig.DirectMessageSender = directMessageSendFunc(instance.SendDirectMessage)
+	serverConfig.DirectMessageSender = daemonDirectMessenger{daemon: instance}
 	server, err := localapi.NewServer(serverConfig)
 	if err != nil {
 		_ = journal.Close()
