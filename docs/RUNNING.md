@@ -1,9 +1,9 @@
 # Running the daemon
 
 `tos-messengerd` owns one state directory, always serves separate runtime and
-owner sockets, and may serve a third public-only prekey device socket.
-It cannot carry a message yet, and it says so on startup rather than looking
-like a working installation that happens to be quiet.
+owner sockets, and may serve a third public-only prekey device socket. It can
+either queue without transport or run the descriptor-bound HTTPS bootstrap
+fallback described in [`HTTPS_BOOTSTRAP_TRANSPORT.md`](HTTPS_BOOTSTRAP_TRANSPORT.md).
 
 ```sh
 tos-messengerd -config /etc/tos-messengerd/config.json -check   # validate and exit
@@ -15,6 +15,15 @@ tos-messengerd -config /etc/tos-messengerd/config.json \
   -publication-operator-config /etc/tos-messengerd/publication.json -check
 tos-messengerd -config /etc/tos-messengerd/config.json \
   -publication-operator-config /etc/tos-messengerd/publication.json
+
+# Carry encrypted first-contact and established-session messages over the
+# bounded HTTPS fallback. The signed Descriptor URL must end in the exact path
+# /v1/tos-messenger/messages. TLS may terminate here or at an operator proxy.
+tos-messengerd -config /etc/tos-messengerd/config.json \
+  -publication-operator-config /etc/tos-messengerd/publication.json \
+  -https-listen :8443 \
+  -https-cert /etc/tos-messengerd/tls/fullchain.pem \
+  -https-key /etc/tos-messengerd/tls/private.key
 
 # Enable daemon-owned encrypted attachment emission. This document contains
 # only public/operator policy plus a narrow external signer socket, never the
@@ -197,7 +206,11 @@ nobody made:
   for what it reaches on its own initiative, and a tighter one for anything a
   received message drove. Neither may be raised to a key or to this
   installation's own configuration, whatever an operator writes; and
-- the **transport**, which today can only be `"none"`; and
+- the **transport**: `"none"` queues without sealing, while
+  `"https-bootstrap"` enables the bounded descriptor-bound fallback and
+  requires `tos-dht-https` discovery plus public prekey publication. This is a
+  deployable first-contact carrier, not a claim that M0-R selected the final
+  production route; and
 - an optional owner-private **Agent Packet receiver socket**. When configured,
   admitted `agent.packet` Events are re-verified against finalized Agent state,
   durably nonce-claimed, and sent to the independently verifying OpenFox
@@ -472,6 +485,12 @@ The local API still works: a runtime can drain the inbox and compose or submit e
 an owner can admit or refuse an inbound message that is waiting, and release or
 abandon a held outbound one. What is missing is the middle,
 and it stays missing until the reachability study picks a route.
+
+For a deliberately bounded real-network fallback, select
+`"transport": "https-bootstrap"` and follow
+[`HTTPS_BOOTSTRAP_TRANSPORT.md`](HTTPS_BOOTSTRAP_TRANSPORT.md). Existing
+AgentID, Endpoint delegation, device, prekey, session, admission and E2EE
+checks remain authoritative; HTTPS supplies availability only.
 
 ## State
 

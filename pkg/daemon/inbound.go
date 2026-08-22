@@ -11,12 +11,14 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
+	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
 type ReceiveResult struct {
 	Outcome admission.Outcome
+	Code    fault.Code
 	EventID string
 }
 
@@ -110,7 +112,7 @@ func (d *Daemon) receiveFirstContact(ctx context.Context, message dispatch.Messa
 	if err != nil {
 		return ReceiveResult{}, err
 	}
-	return ReceiveResult{Outcome: decision.Outcome, EventID: event.EventID}, nil
+	return ReceiveResult{Outcome: decision.Outcome, Code: decision.Code, EventID: event.EventID}, nil
 }
 
 func (d *Daemon) receiveEstablished(ctx context.Context, message dispatch.Message, record eventlog.SessionRecord,
@@ -171,7 +173,7 @@ func (d *Daemon) receiveEstablished(ctx context.Context, message dispatch.Messag
 	if err != nil {
 		return ReceiveResult{}, err
 	}
-	return ReceiveResult{Outcome: decision.Outcome, EventID: event.EventID}, nil
+	return ReceiveResult{Outcome: decision.Outcome, Code: decision.Code, EventID: event.EventID}, nil
 }
 
 func validateOpenedMessage(raw []byte, message dispatch.Message, binding e2ee.Binding) (envelope.Event, error) {

@@ -54,31 +54,30 @@ path` was not wired.
 ```text
 OpenFox message tool {channel: tos_messenger, recipient, content}
   -> bus.OutboundMessage.Recipient (no route fields)
-  -> tos_messenger contacts.resolve over owner-private runtime socket
+  -> tos_messenger messages.send-direct over owner-private runtime socket
   -> daemon ResolveContact / finalized directory chain
   -> canonical AgentID
-  -> operator route selected by RecipientAgentID
-  -> durable idempotency key derived with canonical AgentID (never alias)
-  -> outbox.compose with canonical RecipientAgentID assertion
-  -> daemon re-resolves that AgentID and checks the selected Endpoint
-  -> E2EE binding rechecks AgentID/Endpoint/conversation when transport exists
-  -> existing durable AgentID/session/endpoint delivery journal
+  -> daemon-owned AgentID conversation + verified device/prekey fan-out
+  -> daemon-owned pair session bootstrap and durable E2EE copies
+  -> configured carrier (none queues; https-bootstrap sends)
 ```
 
-`CanonicalName` is returned only for optional display and OpenFox does not pass
-it to compose. The model cannot submit conversation, EndpointID, DeviceID,
-SessionID, relay, ADNL or route fields. Routes remain explicit operator state
-and proactive routes store only canonical `recipient_agent_id`. AgentLoop emits
-an opaque runtime delivery-intent ID; after resolution, the Messenger adapter
-combines it with canonical AgentID and message content to derive the durable
-idempotency key, so the alias does not influence replay authority.
+`CanonicalName` is returned only for optional display. The model cannot submit
+conversation, EndpointID, DeviceID, SessionID, relay, ADNL or route fields.
+AgentLoop emits an opaque runtime delivery-intent ID; after resolution the
+daemon binds idempotency, conversation, sessions and copies to canonical
+AgentID and verified Messenger state, so the alias does not influence replay
+or routing authority.
 
-The path deliberately reuses an already established direct route/session. It
-does not invent session bootstrap or a transport before M0-R selects one.
-Consequently it can queue through `transport: none`, but real network delivery
-still requires the post-M0-R production transport.
+The generic AgentID-first path now creates missing device-pair sessions through
+the approved asynchronous first-contact construction. With `transport: none`
+it queues without sealing. With `transport: https-bootstrap` it uses the exact
+signed Descriptor URL and Endpoint-signed acknowledgement described in
+[`HTTPS_BOOTSTRAP_TRANSPORT.md`](HTTPS_BOOTSTRAP_TRANSPORT.md). This makes a
+bounded real-network fallback available without pretending M0-R selected the
+final native production route.
 
-Daemon local API v9 additionally exposes `conversations.ensure-direct`. It
+Daemon local API v10 retains `conversations.ensure-direct`. It
 accepts the same human recipient input, runs the same finalized resolution
 chain, and atomically creates or reloads a direct-conversation record keyed by
 the local and remote AgentIDs. The record pins the daemon-generated
@@ -109,13 +108,7 @@ also be present in the operator's verified discovery peers. Without
 `contact_dns`, explicit AgentID input still uses the same directory chain and
 `.tos` fails closed.
 
-OpenFox direct routes that permit proactive addressing add:
-
-```json
-"recipient_agent_id": "agent_<64 lowercase hex>"
-```
-
-The route's endpoint is checked again by the daemon against the current
-verified descriptor before composition. Alias transfer therefore selects a
-different route only on a new lookup; it cannot mutate the old conversation or
-session.
+OpenFox needs only its Messenger socket and proactive-lifetime settings. It
+does not configure recipient Endpoint, Device, Session or direct routes for
+proactive AgentID/alias sends. Alias transfer therefore affects only a new
+lookup; it cannot mutate an old AgentID-keyed conversation or session.

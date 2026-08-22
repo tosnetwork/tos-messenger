@@ -606,9 +606,16 @@ func TestConfigurationMustBeStated(t *testing.T) {
 		"registry code that does not hash to its pin": func(c *Config) {
 			c.Registries[0].CodeHash = "tvm-cell-sha256:" + strings.Repeat("a", 64)
 		},
-		"registry with no code":         func(c *Config) { c.Registries[0].CodeBOC = "" },
-		"no transport":                  func(c *Config) { c.Transport = "" },
-		"unknown transport":             func(c *Config) { c.Transport = "adnl" },
+		"registry with no code": func(c *Config) { c.Registries[0].CodeBOC = "" },
+		"no transport":          func(c *Config) { c.Transport = "" },
+		"unknown transport":     func(c *Config) { c.Transport = "adnl" },
+		"HTTPS bootstrap without discovery": func(c *Config) {
+			c.Transport = TransportHTTPSBootstrap
+		},
+		"HTTPS bootstrap without publication": func(c *Config) {
+			enableDiscovery(c)
+			c.Transport = TransportHTTPSBootstrap
+		},
 		"packet timeout without socket": func(c *Config) { c.AgentPacketReceiverTimeoutSeconds = 30 },
 		"relative packet receiver":      func(c *Config) { c.AgentPacketReceiverSocket = "run/provider.sock" },
 		"packet receiver in state": func(c *Config) {
@@ -661,6 +668,13 @@ func TestConfigurationMustBeStated(t *testing.T) {
 	}
 	if err := base.Validate(); err != nil {
 		t.Fatalf("a complete configuration was refused: %v", err)
+	}
+	https := testConfig(t)
+	enableDiscovery(&https)
+	enablePublication(&https)
+	https.Transport = TransportHTTPSBootstrap
+	if err := https.Validate(); err != nil {
+		t.Fatalf("a complete HTTPS bootstrap configuration was refused: %v", err)
 	}
 }
 

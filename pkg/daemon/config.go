@@ -60,9 +60,12 @@ const (
 	// never sealed, because no route has been chosen and sealing for a
 	// transport that does not exist would spend message keys on nothing.
 	TransportNone TransportMode = "none"
+	// TransportHTTPSBootstrap is the descriptor-bound HTTPS fallback. It is
+	// useful for real-network bootstrap but is not an M0-R route decision.
+	TransportHTTPSBootstrap TransportMode = "https-bootstrap"
 )
 
-var transports = map[TransportMode]struct{}{TransportNone: {}}
+var transports = map[TransportMode]struct{}{TransportNone: {}, TransportHTTPSBootstrap: {}}
 
 // DiscoveryMode names whether this installation refreshes provisioned peers.
 type DiscoveryMode string
@@ -844,6 +847,14 @@ func (c Config) Validate() error {
 	}
 	if _, known := transports[c.Transport]; !known {
 		return errors.New("transport must be stated explicitly")
+	}
+	if c.Transport == TransportHTTPSBootstrap {
+		if c.Discovery.Mode != DiscoveryTOSDHTHTTPS {
+			return errors.New("https-bootstrap requires verified TOS DHT/HTTPS discovery")
+		}
+		if c.Publication.Mode != PublicationPrekeys {
+			return errors.New("https-bootstrap requires public prekey publication")
+		}
 	}
 	if c.AgentPacketReceiverSocket == "" {
 		if c.AgentPacketReceiverTimeoutSeconds != 0 {

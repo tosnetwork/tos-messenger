@@ -241,6 +241,20 @@ func (d *Dispatcher) CanSend() bool {
 	return d != nil && d.config.Suite != nil && d.config.Sender != nil && d.config.Bindings != nil
 }
 
+// ConfigureTransport installs the complete carrier tuple during daemon
+// assembly. Partial installation and replacement are refused; callers must do
+// this before serving or sweeping.
+func (d *Dispatcher) ConfigureTransport(suite e2ee.Suite, sender Sender, bindings BindingResolver) error {
+	if d == nil || suite == nil || sender == nil || bindings == nil {
+		return errors.New("a sending dispatcher needs a suite, a sender, and a binding resolver")
+	}
+	if d.CanSend() {
+		return errors.New("dispatcher transport is already configured")
+	}
+	d.config.Suite, d.config.Sender, d.config.Bindings = suite, sender, bindings
+	return nil
+}
+
 // LocalIdentity returns the daemon-owned identity used for every composition.
 func (d *Dispatcher) LocalIdentity() Identity {
 	if d == nil {

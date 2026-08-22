@@ -706,6 +706,13 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		}
 	}
 	instance.prekeys = prekeys
+	if config.Transport == TransportHTTPSBootstrap {
+		if err := instance.configureHTTPSBootstrap(); err != nil {
+			_ = discovery.Close()
+			_ = journal.Close()
+			return nil, errors.New("configure HTTPS bootstrap transport: " + err.Error())
+		}
+	}
 
 	listener, err := localapi.Listen(config.SocketPath)
 	if err != nil {

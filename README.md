@@ -18,7 +18,8 @@ here is never a Receipt.
 ## Current scope
 
 The architecture makes the reachability study (M0-R) a prerequisite for freezing
-and starting M1, so no transport is implemented and no route order is assumed.
+and starting M1. A descriptor-bound HTTPS bootstrap carrier is implemented for
+real-network integration; no final M0-R production route order is assumed.
 What exists today is the part of the M0 protocol core that is independent of that
 decision:
 
@@ -84,9 +85,9 @@ Deliberately absent, with the reason:
 - **a frozen cryptographic wire suite** — the construction is approved and its
   vectors exist, but independent cryptographic review and second-language
   consumption are still required by [`docs/E2EE_SUITE_DECISION.md`](docs/E2EE_SUITE_DECISION.md);
-- **any transport** — direct, tunnel, Relay, and HTTPS ordering is frozen only
-  after the reachability study, which is why the study tooling is here and the
-  transport is not;
+- **a frozen native production transport order** — the descriptor-bound HTTPS
+  bootstrap fallback can carry E2EE messages now, but direct/tunnel/Relay
+  ordering is frozen only after the reachability study;
 - **a network-bound Mailbox Relay service, rooms, channels, clients** — the
   route-neutral Mailbox store, scoped authentication core, and redundancy
   contract exist, while the finalized-state adapter, listener, and transport

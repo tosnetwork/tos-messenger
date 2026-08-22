@@ -28,6 +28,8 @@ var (
 	Conversation = regexp.MustCompile(`^conv_[0-9a-f]{64}$`)
 	// Event matches a Messaging Event identifier.
 	Event = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
+	// Session matches an E2EE device-pair session identifier.
+	Session = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
 	// Room matches a room identifier.
 	Room = regexp.MustCompile(`^room_[0-9a-f]{64}$`)
 	// Thread matches a thread identifier.

@@ -6,7 +6,7 @@
   "endpoint_signer_socket": "/run/tos-endpoint-signer/sign.sock",
   "signer_timeout_seconds": 10,
   "publish_interval_seconds": 300,
-  "https_endpoint": "https://agent.example/messaging",
+  "https_endpoint": "https://agent.example/v1/tos-messenger/messages",
   "messaging_versions": [1],
   "a2a_versions": ["1.0"],
   "mcp_versions": ["2025-06-18"],

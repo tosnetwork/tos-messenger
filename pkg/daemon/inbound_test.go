@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/pkg/admission"
+	"github.com/tosnetwork/tos-messenger/pkg/directhttps"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
@@ -49,6 +51,12 @@ func (s phaseALoopSender) Send(ctx context.Context, message dispatch.Message) er
 		return errors.New("recipient rejected loopback message")
 	}
 	return nil
+}
+
+type phaseAHTTPSTarget struct{ target directhttps.Target }
+
+func (r phaseAHTTPSTarget) ResolveHTTPS(context.Context, string) (directhttps.Target, error) {
+	return r.target, nil
 }
 
 func TestTwoIndependentDaemonsExchangeEncryptedDirectMessages(t *testing.T) {
@@ -94,6 +102,40 @@ func TestTwoIndependentDaemonsExchangeEncryptedDirectMessages(t *testing.T) {
 	if due, err := a.journal.Due(now); err != nil || len(due) != 0 {
 		t.Fatalf("delivered retry returned to queue: due=%+v err=%v", due, err)
 	}
+}
+
+func TestTwoIndependentDaemonsExchangeDirectMessagesOverTLS(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0)
+	a := newPhaseADaemon(t, now, "2", "4")
+	b := newPhaseADaemon(t, now, "7", "9")
+	connectPhaseADirectories(a, b, now)
+	connectPhaseADirectories(b, a, now)
+	installPhaseAAdmission(t, now, a, b)
+	installPhaseAAdmission(t, now, b, a)
+	installPhaseAHTTPSTransport(t, now, a, b)
+	installPhaseAHTTPSTransport(t, now, b, a)
+
+	first, err := a.SendDirectMessage(context.Background(), b.config.AgentID,
+		"text/plain; charset=utf-8", "hello over real TLS", "idem_"+strings.Repeat("c", 64),
+		uint64(now.Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatalf("queue TLS message: %v", err)
+	}
+	if summary, err := a.dispatch.Sweep(context.Background(), 0); err != nil || summary.Sent != 1 {
+		t.Fatalf("deliver TLS message: summary=%+v err=%v", summary, err)
+	}
+	assertPhaseAPendingText(t, b, first.EventID, "hello over real TLS", now)
+
+	reply, err := b.ReplyDirectMessage(context.Background(), first.EventID,
+		"text/plain; charset=utf-8", "TLS reply", "idem_"+strings.Repeat("d", 64),
+		uint64(now.Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatalf("queue TLS reply: %v", err)
+	}
+	if summary, err := b.dispatch.Sweep(context.Background(), 0); err != nil || summary.Sent != 1 {
+		t.Fatalf("deliver TLS reply: summary=%+v err=%v", summary, err)
+	}
+	assertPhaseAPendingText(t, a, reply.EventID, "TLS reply", now)
 }
 
 func newPhaseADaemon(t *testing.T, now time.Time, agentDigit, deviceDigit string) *Daemon {
@@ -181,6 +223,33 @@ func installPhaseATransport(t *testing.T, now time.Time, sender, recipient *Daem
 		AllowedEventClasses: []string{"text"}})
 	if err != nil {
 		t.Fatalf("transport: %v", err)
+	}
+	sender.dispatch = dispatcher
+}
+
+func installPhaseAHTTPSTransport(t *testing.T, now time.Time, sender, recipient *Daemon) {
+	t.Helper()
+	handler, err := directhttps.NewHandler(directhttps.HandlerConfig{
+		Receiver: daemonHTTPSReceiver{daemon: recipient}, Signer: recipient.prekeys.signer,
+		EndpointID: recipient.config.EndpointID, DeviceID: recipient.config.DeviceID,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("HTTPS handler: %v", err)
+	}
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	target := directhttps.Target{URL: server.URL + directhttps.IngressPath,
+		EndpointPublicKey: append(ed25519.PublicKey(nil), recipient.prekeys.planner.delegation.IdentityPublicKey...)}
+	dispatcher, err := dispatch.New(dispatch.Config{Journal: sender.journal, Suite: e2ee.NewDefaultSuite(),
+		Sender: directhttps.Sender{Client: server.Client(), Targets: phaseAHTTPSTarget{target: target},
+			Now: func() time.Time { return now }},
+		Bindings: dispatch.SessionBindings{Journal: sender.journal, Identity: sender.config.Identity(),
+			Network: sender.config.Network()},
+		Now: func() time.Time { return now }, Identity: sender.config.Identity(), Network: sender.config.Network(),
+		AllowedEventClasses: []string{"text"}})
+	if err != nil {
+		t.Fatalf("HTTPS transport: %v", err)
 	}
 	sender.dispatch = dispatcher
 }

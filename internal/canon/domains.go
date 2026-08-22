@@ -202,6 +202,9 @@ const (
 	// DomainDeliveryCopy derives one durable target copy from a logical Event
 	// and daemon-verified recipient Endpoint/Device pair.
 	DomainDeliveryCopy = "tos.messaging.delivery-copy.v1\x00"
+	// DomainHTTPSDeliveryAck authenticates a recipient Endpoint's durable
+	// acceptance of one encrypted device copy.
+	DomainHTTPSDeliveryAck = "tos.messaging.https-delivery-ack.v1\x00"
 	// DomainOutboundAttachmentIntent binds exact plaintext evidence and the
 	// operator-selected route/storage policy before streaming encryption begins.
 	DomainOutboundAttachmentIntent = "tos.messaging.outbound-attachment-intent.v1\x00"
@@ -273,6 +276,7 @@ var Domains = []string{
 	DomainOpenFoxMLSAAD,
 	DomainOutboundIntent,
 	DomainDeliveryCopy,
+	DomainHTTPSDeliveryAck,
 	DomainOutboundAttachmentIntent,
 	DomainAttachmentCorpusManifest,
 	DomainAttachmentCorpusReport,

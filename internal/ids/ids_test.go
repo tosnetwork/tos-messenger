@@ -15,12 +15,13 @@ func TestKindsDoNotOverlap(t *testing.T) {
 	values := map[string]string{
 		"agent_": "agent_" + body, "cap_": "cap_" + body, "mep_": "mep_" + body,
 		"dev_": "dev_" + body, "conv_": "conv_" + body, "evt_": "evt_" + body,
+		"ses_":  "ses_" + body,
 		"room_": "room_" + body, "thr_": "thr_" + body, "mbx_": "mbx_" + body,
 		"msg_": "msg_" + body, "adnl:": "adnl:" + body,
 	}
 	patterns := map[string]*regexp.Regexp{
 		"agent_": Agent, "cap_": Capability, "mep_": Endpoint, "dev_": Device,
-		"conv_": Conversation, "evt_": Event, "room_": Room, "thr_": Thread,
+		"conv_": Conversation, "evt_": Event, "ses_": Session, "room_": Room, "thr_": Thread,
 		"mbx_": Mailbox, "msg_": RelayMessage, "adnl:": ADNL,
 	}
 	if len(values) != len(patterns) {
