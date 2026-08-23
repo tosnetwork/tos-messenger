@@ -95,6 +95,7 @@ type DirectMessageResult struct {
 
 type DirectMessageSender interface {
 	SendDirectMessage(context.Context, string, string, string, string, uint64) (DirectMessageResult, error)
+	SendDirectApplication(context.Context, string, string, []byte, string, uint64) (DirectMessageResult, error)
 	ReplyDirectMessage(context.Context, string, string, string, string, uint64) (DirectMessageResult, error)
 }
 
@@ -249,6 +250,10 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.pending(request, now)
 	case OpClaim:
 		return s.claim(request, now)
+	case OpPendingAgentGifts:
+		return s.pendingAgentGifts(request, now)
+	case OpClaimAgentGift:
+		return s.claimAgentGift(request, now)
 	case OpComplete:
 		return s.complete(request, now)
 	case OpReject:
@@ -265,6 +270,8 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.ensureDirectConversation(ctx, request)
 	case OpSendDirect:
 		return s.sendDirect(ctx, request)
+	case OpSendDirectApplication:
+		return s.sendDirectApplication(ctx, request)
 	case OpReplyDirect:
 		return s.replyDirect(ctx, request)
 	case OpPendingAttachments:
@@ -333,6 +340,23 @@ func (s *Server) sendDirect(ctx context.Context, request Request) Response {
 	if !agentPattern.MatchString(result.AgentID) || !conversationPattern.MatchString(result.ConversationID) ||
 		!eventPattern.MatchString(result.EventID) || result.Readiness != "queued" {
 		return refuse(fault.CodeNotAuthentic, errors.New("direct message result is not canonical"))
+	}
+	return Response{OK: true, AgentID: result.AgentID, CanonicalName: result.CanonicalName,
+		ConversationID: result.ConversationID, EventID: result.EventID, Readiness: result.Readiness}
+}
+
+func (s *Server) sendDirectApplication(ctx context.Context, request Request) Response {
+	if s.config.DirectMessageSender == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("direct application sending is not configured"))
+	}
+	result, err := s.config.DirectMessageSender.SendDirectApplication(ctx, request.Recipient,
+		request.ApplicationKind, request.ApplicationBody, request.IdempotencyKey, request.ExpiresAtUnix)
+	if err != nil {
+		return refuse(fault.CodeNotAuthentic, err)
+	}
+	if !agentPattern.MatchString(result.AgentID) || !conversationPattern.MatchString(result.ConversationID) ||
+		!eventPattern.MatchString(result.EventID) || result.Readiness != "queued" {
+		return refuse(fault.CodeNotAuthentic, errors.New("direct application result is not canonical"))
 	}
 	return Response{OK: true, AgentID: result.AgentID, CanonicalName: result.CanonicalName,
 		ConversationID: result.ConversationID, EventID: result.EventID, Readiness: result.Readiness}
@@ -512,7 +536,49 @@ func (s *Server) pending(request Request, now time.Time) Response {
 func (s *Server) claim(request Request, now time.Time) Response {
 	record, err := s.config.Journal.ClaimForApplicationExceptKinds(request.EventID, request.LeaseID, now,
 		time.Duration(request.LeaseSeconds)*time.Second,
-		[]string{"agent.packet", "device.history.segment", "artifact.encrypted", "a2a.message", "mcp.call", "mcp.result"})
+		[]string{"agent.packet", "device.history.segment", "artifact.encrypted", "a2a.message", "mcp.call", "mcp.result",
+			"agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer"})
+	if err != nil {
+		return refuse(claimCode(err), err)
+	}
+	event, err := pendingEvent(record)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, Event: &event}
+}
+
+func (s *Server) pendingAgentGifts(request Request, now time.Time) Response {
+	limit := request.Limit
+	if limit == 0 || limit > MaxEventsPerResponse {
+		limit = MaxEventsPerResponse
+	}
+	records, err := s.config.Journal.ListPending(now, 0)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	events := make([]PendingEvent, 0, limit)
+	for _, record := range records {
+		event, err := pendingEvent(record)
+		if err != nil {
+			continue
+		}
+		decoded, err := envelope.DecodeEventJSON(event.Event)
+		if err != nil || !agentGiftApplicationKind(decoded.Kind) {
+			continue
+		}
+		events = append(events, event)
+		if len(events) == limit {
+			break
+		}
+	}
+	return Response{OK: true, Events: events}
+}
+
+func (s *Server) claimAgentGift(request Request, now time.Time) Response {
+	record, err := s.config.Journal.ClaimForApplicationKinds(request.EventID, request.LeaseID, now,
+		time.Duration(request.LeaseSeconds)*time.Second,
+		[]string{"agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer"})
 	if err != nil {
 		return refuse(claimCode(err), err)
 	}
@@ -525,7 +591,11 @@ func (s *Server) claim(request Request, now time.Time) Response {
 
 func daemonApplicationKind(kind string) bool {
 	return kind == "agent.packet" || kind == "device.history.segment" || kind == "artifact.encrypted" ||
-		kind == "a2a.message" || kind == "mcp.call" || kind == "mcp.result"
+		kind == "a2a.message" || kind == "mcp.call" || kind == "mcp.result" || agentGiftApplicationKind(kind)
+}
+
+func agentGiftApplicationKind(kind string) bool {
+	return kind == "agent.gift.address-request" || kind == "agent.gift.address-response" || kind == "agent.gift.signed-boc-offer"
 }
 
 func (s *Server) pendingAttachments(request Request, now time.Time) Response {

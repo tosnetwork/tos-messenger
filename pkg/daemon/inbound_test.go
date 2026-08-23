@@ -104,6 +104,113 @@ func TestTwoIndependentDaemonsExchangeEncryptedDirectMessages(t *testing.T) {
 	}
 }
 
+func TestEstablishedDaemonsCarryExactGiftApplicationBytes(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0)
+	a := newPhaseADaemon(t, now, "2", "4")
+	b := newPhaseADaemon(t, now, "7", "9")
+	connectPhaseADirectories(a, b, now)
+	connectPhaseADirectories(b, a, now)
+	installPhaseAAdmission(t, now, a, b)
+	installPhaseAAdmission(t, now, b, a)
+	installPhaseATransport(t, now, a, b)
+	installPhaseATransport(t, now, b, a)
+
+	first, err := a.SendDirectMessage(context.Background(), b.config.AgentID,
+		"text/plain; charset=utf-8", "establish", "idem_"+strings.Repeat("1", 64), uint64(now.Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary, err := a.dispatch.Sweep(context.Background(), 0); err != nil || summary.Sent != 1 {
+		t.Fatalf("establish direct: %+v %v", summary, err)
+	}
+	assertPhaseAPendingText(t, b, first.EventID, "establish", now)
+
+	assertGift := func(d *Daemon, eventID, kind string, canonical []byte) {
+		t.Helper()
+		records, err := d.journal.ListPending(now, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range records {
+			if record.EventID != eventID {
+				continue
+			}
+			raw, _ := record.Payload()
+			event, decodeErr := envelope.DecodeEventJSON(raw)
+			decoded, payloadErr := payload.Decode(event.Kind, event.Content)
+			var got []byte
+			switch value := decoded.(type) {
+			case payload.GiftAddressRequest:
+				got = value.CanonicalRequest
+			case payload.GiftAddressResponse:
+				got = value.CanonicalResponse
+			case payload.GiftSignedBOCOffer:
+				got = value.CanonicalOffer
+			}
+			if decodeErr != nil || payloadErr != nil || event.Kind != kind || !bytes.Equal(got, canonical) || event.RoomID != "" || event.Rendering != "" {
+				t.Fatalf("wrong E2EE Gift event: %+v %+v %v %v", event, decoded, decodeErr, payloadErr)
+			}
+			return
+		}
+		t.Fatalf("Gift event %s was not durably received", eventID)
+	}
+
+	requestCanonical := []byte{0xa2, 0x01, 0x02, 0x03, 0x04}
+	gift, err := a.SendDirectApplication(context.Background(), b.config.AgentID,
+		"agent.gift.address-request", requestCanonical, "idem_"+strings.Repeat("2", 64), uint64(now.Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary, err := a.dispatch.Sweep(context.Background(), 0); err != nil || summary.Sent != 1 {
+		t.Fatalf("deliver Gift: %+v %v", summary, err)
+	}
+	assertGift(b, gift.EventID, "agent.gift.address-request", requestCanonical)
+
+	responseCanonical := []byte{0xa3, 0x01, 0x03, 0x02, 0x05, 0x03, 0x07}
+	response, err := b.SendDirectApplication(context.Background(), a.config.AgentID,
+		"agent.gift.address-response", responseCanonical, "idem_"+strings.Repeat("3", 64), uint64(now.Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary, err := b.dispatch.Sweep(context.Background(), 0); err != nil || summary.Sent != 1 {
+		t.Fatalf("deliver Gift response: %+v %v", summary, err)
+	}
+	assertGift(a, response.EventID, "agent.gift.address-response", responseCanonical)
+
+	offerCanonical := []byte{0xa3, 0x01, 0x04, 0x02, 0x58, 0x04, 0xb5, 0xee, 0x9c, 0x72, 0x03, 0x08}
+	offer, err := a.SendDirectApplication(context.Background(), b.config.AgentID,
+		"agent.gift.signed-boc-offer", offerCanonical, "idem_"+strings.Repeat("4", 64), uint64(now.Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary, err := a.dispatch.Sweep(context.Background(), 0); err != nil || summary.Sent != 1 {
+		t.Fatalf("deliver signed BOC offer: %+v %v", summary, err)
+	}
+	assertGift(b, offer.EventID, "agent.gift.signed-boc-offer", offerCanonical)
+}
+
+func TestFirstContactGiftIsRejectedBeforeRuntimeAdmission(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0)
+	a := newPhaseADaemon(t, now, "2", "4")
+	b := newPhaseADaemon(t, now, "7", "9")
+	connectPhaseADirectories(a, b, now)
+	connectPhaseADirectories(b, a, now)
+	installPhaseAAdmission(t, now, a, b)
+	installPhaseAAdmission(t, now, b, a)
+	installPhaseATransport(t, now, a, b)
+	if _, err := a.SendDirectApplication(context.Background(), b.config.AgentID,
+		"agent.gift.address-request", []byte{0xa1, 0x01, 0x02}, "idem_"+strings.Repeat("3", 64), uint64(now.Add(time.Hour).Unix())); err != nil {
+		t.Fatal(err)
+	}
+	summary, _ := a.dispatch.Sweep(context.Background(), 0)
+	if summary.Sent != 0 {
+		t.Fatalf("first-contact Gift was delivered: %+v", summary)
+	}
+	if pending, err := b.journal.ListPending(now, 10); err != nil || len(pending) != 0 {
+		t.Fatalf("first-contact Gift reached runtime admission: %+v %v", pending, err)
+	}
+}
+
 func TestTwoIndependentDaemonsExchangeDirectMessagesOverTLS(t *testing.T) {
 	now := time.Unix(1_900_000_000, 0)
 	a := newPhaseADaemon(t, now, "2", "4")
@@ -220,7 +327,7 @@ func installPhaseATransport(t *testing.T, now time.Time, sender, recipient *Daem
 		Sender: phaseALoopSender{recipient: recipient}, Bindings: dispatch.SessionBindings{Journal: sender.journal,
 			Identity: sender.config.Identity(), Network: sender.config.Network()},
 		Now: func() time.Time { return now }, Identity: sender.config.Identity(), Network: sender.config.Network(),
-		AllowedEventClasses: []string{"text"}})
+		AllowedEventClasses: []string{"agent.gift", "text"}})
 	if err != nil {
 		t.Fatalf("transport: %v", err)
 	}
@@ -247,7 +354,7 @@ func installPhaseAHTTPSTransport(t *testing.T, now time.Time, sender, recipient 
 		Bindings: dispatch.SessionBindings{Journal: sender.journal, Identity: sender.config.Identity(),
 			Network: sender.config.Network()},
 		Now: func() time.Time { return now }, Identity: sender.config.Identity(), Network: sender.config.Network(),
-		AllowedEventClasses: []string{"text"}})
+		AllowedEventClasses: []string{"agent.gift", "text"}})
 	if err != nil {
 		t.Fatalf("HTTPS transport: %v", err)
 	}

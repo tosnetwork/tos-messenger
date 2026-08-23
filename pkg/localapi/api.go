@@ -33,8 +33,10 @@ import (
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema = "tos.messaging.local-request.v10"
-	// RequestSchemaV6 through RequestSchemaV9 remain accepted for the operations
+	RequestSchema    = "tos.messaging.local-request.v12"
+	RequestSchemaV11 = "tos.messaging.local-request.v11"
+	RequestSchemaV10 = "tos.messaging.local-request.v10"
+	// RequestSchemaV6 through RequestSchemaV11 remain accepted for the operations
 	// they can express. Per-operation strict field validation prevents an older
 	// client from smuggling newer authority while allowing rolling upgrades.
 	RequestSchemaV6 = "tos.messaging.local-request.v6"
@@ -63,6 +65,12 @@ const (
 	OpPending Operation = "inbox.pending"
 	// OpClaim takes a lease on one event and returns it.
 	OpClaim Operation = "inbox.claim"
+	// OpPendingAgentGifts lists only the three Agent Gift application kinds.
+	// Its filtering occurs before pagination so unrelated traffic cannot starve
+	// the Gift reconciler.
+	OpPendingAgentGifts Operation = "agent-gifts.pending"
+	// OpClaimAgentGift atomically leases only an Agent Gift Event.
+	OpClaimAgentGift Operation = "agent-gifts.claim"
 	// OpComplete records that the runtime accepted an event.
 	OpComplete Operation = "inbox.complete"
 	// OpReject records that the runtime refused one.
@@ -86,6 +94,9 @@ const (
 	// OpSendDirect accepts recipient intent plus message semantics and delegates
 	// all identity, session, device fan-out and route authority to the daemon.
 	OpSendDirect Operation = "messages.send-direct"
+	// OpSendDirectApplication carries one daemon-wrapped, established-direct
+	// private application object. V1 restricts this surface to Agent Gifts.
+	OpSendDirectApplication Operation = "messages.send-direct-application"
 	// OpReplyDirect derives all addressing from an authenticated inbound Event.
 	OpReplyDirect Operation = "messages.reply-direct"
 	// OpPendingAttachments lists only opaque metadata for encrypted attachment
@@ -190,9 +201,9 @@ const (
 
 var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
-		OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
+		OpPending: {}, OpClaim: {}, OpPendingAgentGifts: {}, OpClaimAgentGift: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 		OpResolveContact: {}, OpEnsureDirectConversation: {},
-		OpSendDirect: {}, OpReplyDirect: {},
+		OpSendDirect: {}, OpSendDirectApplication: {}, OpReplyDirect: {},
 		OpPendingAttachments: {}, OpClaimAttachment: {},
 		OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
@@ -221,9 +232,9 @@ func Permits(principal Principal, operation Operation) bool {
 }
 
 var operations = map[Operation]struct{}{
-	OpPending: {}, OpClaim: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
+	OpPending: {}, OpClaim: {}, OpPendingAgentGifts: {}, OpClaimAgentGift: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 	OpResolveContact: {}, OpEnsureDirectConversation: {},
-	OpSendDirect: {}, OpReplyDirect: {},
+	OpSendDirect: {}, OpSendDirectApplication: {}, OpReplyDirect: {},
 	OpPendingAttachments: {}, OpClaimAttachment: {},
 	OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
@@ -293,6 +304,8 @@ type Request struct {
 	Protocol         string `json:"protocol,omitempty"`
 	ProtocolVersion  string `json:"protocol_version,omitempty"`
 	ProtocolBody     []byte `json:"protocol_body_base64,omitempty"`
+	ApplicationKind  string `json:"application_kind,omitempty"`
+	ApplicationBody  []byte `json:"application_body_base64,omitempty"`
 
 	// Action is one proposed action, for the firewall operations. It is the
 	// action itself rather than an identifier, because the identifier is
@@ -610,9 +623,15 @@ func DecodeRequest(raw []byte) (Request, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Request{}, errors.New("request has trailing JSON")
 	}
-	if request.Schema != RequestSchema && request.Schema != RequestSchemaV9 && request.Schema != RequestSchemaV8 &&
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV11 && request.Schema != RequestSchemaV10 && request.Schema != RequestSchemaV9 && request.Schema != RequestSchemaV8 &&
 		request.Schema != RequestSchemaV7 && request.Schema != RequestSchemaV6 {
 		return Request{}, errors.New("unsupported request schema")
+	}
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV11 && request.Op == OpSendDirectApplication {
+		return Request{}, errors.New("direct application sending requires local request v11")
+	}
+	if request.Schema != RequestSchema && (request.Op == OpPendingAgentGifts || request.Op == OpClaimAgentGift) {
+		return Request{}, errors.New("Agent Gift inbox operations require local request v12")
 	}
 	if err := ValidateRequest(request); err != nil {
 		return Request{}, err
@@ -694,7 +713,7 @@ func ValidateRequest(request Request) error {
 		(request.InvitedAgentID != "" || request.InviteExpiresAtUnix != 0) {
 		return errors.New("only admission invite creation carries invite terms")
 	}
-	if request.Op != OpResolveContact && request.Op != OpEnsureDirectConversation && request.Op != OpSendDirect && request.Recipient != "" {
+	if request.Op != OpResolveContact && request.Op != OpEnsureDirectConversation && request.Op != OpSendDirect && request.Op != OpSendDirectApplication && request.Recipient != "" {
 		return errors.New("only contact or direct-conversation resolution carries a recipient input")
 	}
 	if request.Op != OpCompose && request.RecipientAgentID != "" {
@@ -710,7 +729,7 @@ func ValidateRequest(request Request) error {
 	if request.Op != OpVerifyAcceptedQuote && request.ExpectedQuoteTerms != nil {
 		return errors.New("only Quote verification carries expected Quote terms")
 	}
-	if request.Op != OpCompose && request.Op != OpSendDirect && request.Op != OpReplyDirect && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
+	if request.Op != OpCompose && request.Op != OpSendDirect && request.Op != OpSendDirectApplication && request.Op != OpReplyDirect && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
 		(request.ConversationID != "" || request.IdempotencyKey != "") {
 		return errors.New("only outbound composition carries message semantics")
 	}
@@ -727,6 +746,9 @@ func ValidateRequest(request Request) error {
 	if request.Op != OpComposeProtocolResult && (request.ProtocolKind != "" || request.Protocol != "" ||
 		request.ProtocolVersion != "" || len(request.ProtocolBody) != 0) {
 		return errors.New("only protocol result composition carries protocol body semantics")
+	}
+	if request.Op != OpSendDirectApplication && (request.ApplicationKind != "" || len(request.ApplicationBody) != 0) {
+		return errors.New("only direct application sending carries an application object")
 	}
 	if request.Op != OpBeginOutboundAttachment && (request.Filename != "" || request.PlaintextDigest != "" || request.PlaintextBytes != 0) {
 		return errors.New("only outbound attachment begin carries plaintext metadata")
@@ -764,6 +786,21 @@ func ValidateRequest(request Request) error {
 			return errors.New("a direct send cannot carry low-level routing authority")
 		}
 		return requireEmpty(request, "a direct send", request.EventID, request.LeaseID)
+	case OpSendDirectApplication:
+		if request.Recipient == "" || len(request.Recipient) > 255 ||
+			!idempotencyPattern.MatchString(request.IdempotencyKey) || request.ExpiresAtUnix == 0 ||
+			len(request.ApplicationBody) == 0 || len(request.ApplicationBody) > payload.MaxGiftCanonicalBytes {
+			return errors.New("a direct application send needs recipient, bounded object, expiry and idempotency")
+		}
+		switch request.ApplicationKind {
+		case "agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer":
+		default:
+			return errors.New("unsupported direct application kind")
+		}
+		if request.MediaType != "" || request.Body != "" || request.RoomID != "" || request.ReplyToEventID != "" || request.ConversationID != "" || request.SessionID != "" || request.RecipientEndpointID != "" || request.RecipientAgentID != "" {
+			return errors.New("a direct application cannot carry text, room, or route authority")
+		}
+		return requireEmpty(request, "a direct application send", request.EventID, request.LeaseID)
 	case OpResolveContact, OpEnsureDirectConversation:
 		if request.Recipient == "" || len(request.Recipient) > 255 {
 			return errors.New("recipient resolution needs one bounded input")
@@ -774,12 +811,12 @@ func ValidateRequest(request Request) error {
 			return errors.New("recipient resolution cannot carry route or control fields")
 		}
 		return requireEmpty(request, "recipient resolution", request.EventID, request.LeaseID, request.SessionID)
-	case OpPending, OpAwaitingAdmission, OpPendingAttachments:
+	case OpPending, OpPendingAgentGifts, OpAwaitingAdmission, OpPendingAttachments:
 		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
 			return errors.New("invalid pending limit")
 		}
 		return requireEmpty(request, "a listing", request.EventID, request.LeaseID, request.SessionID)
-	case OpClaim, OpClaimAttachment:
+	case OpClaim, OpClaimAgentGift, OpClaimAttachment:
 		if !eventPattern.MatchString(request.EventID) || !leasePattern.MatchString(request.LeaseID) {
 			return errors.New("a claim needs an event and a lease")
 		}

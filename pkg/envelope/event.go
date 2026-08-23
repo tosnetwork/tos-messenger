@@ -66,6 +66,10 @@ var eventKinds = map[string]kindSpec{
 	"conversation.accept": {class: "conversation"},
 	"presence.hint":       {class: "presence"},
 
+	"agent.gift.address-request":  {class: "agent.gift"},
+	"agent.gift.address-response": {class: "agent.gift"},
+	"agent.gift.signed-boc-offer": {class: "agent.gift"},
+
 	"agent.task.request":        {class: "agent.task"},
 	"agent.task.progress":       {class: "agent.task"},
 	"agent.task.result":         {class: "agent.task"},
@@ -202,6 +206,18 @@ func PayloadSchemaOf(kind string) (string, bool) {
 // outright rather than evaluating it and deciding it is not allowed.
 func LocalOnly(kind string) bool {
 	return eventKinds[kind].localOnly
+}
+
+// RequiresEstablishedDirect identifies private application events that are
+// forbidden in first contact and rooms. Their authority comes from an already
+// authenticated direct E2EE conversation.
+func RequiresEstablishedDirect(kind string) bool {
+	switch kind {
+	case "agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer":
+		return true
+	default:
+		return false
+	}
 }
 
 // KnownKinds returns the recognised event kinds.
@@ -460,6 +476,9 @@ func validateEventFields(event Event) error {
 	if event.RoomID != "" && !roomPattern.MatchString(event.RoomID) {
 		return errors.New("invalid event room identifier")
 	}
+	if RequiresEstablishedDirect(event.Kind) && (event.RoomID != "" || event.Rendering != "" || len(event.AttachmentReferences) != 0 || event.ServiceBinding != "") {
+		return errors.New("Agent Gift events are opaque direct-only application data")
+	}
 	if event.ThreadID != "" && !threadPattern.MatchString(event.ThreadID) {
 		return errors.New("invalid event thread identifier")
 	}
@@ -529,7 +548,7 @@ func validateEventFields(event Event) error {
 	return nil
 }
 
-var eventKindPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$`)
+var eventKindPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$`)
 
 var payloadSchemaPattern = regexp.MustCompile(`^tos\.messaging\.payload\.[a-z0-9-]{1,48}\.v[0-9]{1,3}$`)
 

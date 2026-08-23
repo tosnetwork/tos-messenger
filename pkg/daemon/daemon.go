@@ -99,6 +99,11 @@ func (m daemonDirectMessenger) SendDirectMessage(ctx context.Context, recipient,
 	return m.daemon.SendDirectMessage(ctx, recipient, mediaType, body, idempotencyKey, expiresAt)
 }
 
+func (m daemonDirectMessenger) SendDirectApplication(ctx context.Context, recipient, kind string,
+	canonical []byte, idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
+	return m.daemon.SendDirectApplication(ctx, recipient, kind, canonical, idempotencyKey, expiresAt)
+}
+
 func (m daemonDirectMessenger) ReplyDirectMessage(ctx context.Context, eventID, mediaType, body,
 	idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
 	return m.daemon.ReplyDirectMessage(ctx, eventID, mediaType, body, idempotencyKey, expiresAt)
@@ -170,6 +175,39 @@ func (d *Daemon) EnsureDirectConversation(
 // Device, Session, relay or transport authority.
 func (d *Daemon) SendDirectMessage(ctx context.Context, input, mediaType, body,
 	idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
+	content, err := payload.Encode(payload.Text{MediaType: mediaType, Body: body})
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	return d.sendDirectApplication(ctx, input, "text", content, idempotencyKey, expiresAt)
+}
+
+// SendDirectApplication carries one already-canonical private application
+// object through daemon-owned contact resolution, established E2EE sessions,
+// durable Events and device fan-out. Only the three frozen Agent Gift kinds
+// are exposed; callers cannot supply an outer Event or route metadata.
+func (d *Daemon) SendDirectApplication(ctx context.Context, input, kind string, canonical []byte,
+	idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
+	var value payload.Payload
+	switch kind {
+	case "agent.gift.address-request":
+		value = payload.GiftAddressRequest{CanonicalRequest: canonical}
+	case "agent.gift.address-response":
+		value = payload.GiftAddressResponse{CanonicalResponse: canonical}
+	case "agent.gift.signed-boc-offer":
+		value = payload.GiftSignedBOCOffer{CanonicalOffer: canonical}
+	default:
+		return localapi.DirectMessageResult{}, errors.New("unsupported direct application kind")
+	}
+	content, err := payload.Encode(value)
+	if err != nil {
+		return localapi.DirectMessageResult{}, err
+	}
+	return d.sendDirectApplication(ctx, input, kind, content, idempotencyKey, expiresAt)
+}
+
+func (d *Daemon) sendDirectApplication(ctx context.Context, input, kind string, content []byte,
+	idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
 	resolved, err := d.ResolveContact(ctx, input, d.contactDNS)
 	if err != nil {
 		return localapi.DirectMessageResult{}, err
@@ -200,14 +238,10 @@ func (d *Daemon) SendDirectMessage(ctx context.Context, input, mediaType, body,
 	if len(targets) == 0 {
 		return localapi.DirectMessageResult{}, errors.New("direct message has no verified device target")
 	}
-	content, err := payload.Encode(payload.Text{MediaType: mediaType, Body: body})
-	if err != nil {
-		return localapi.DirectMessageResult{}, err
-	}
 	event, err := envelope.NewEvent(envelope.Event{Network: d.config.Network(),
 		ConversationID: record.ConversationID, SenderAgentID: d.config.AgentID,
 		SenderEndpointID: d.config.EndpointID, SenderDeviceID: d.config.DeviceID,
-		CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: expiresAt, Kind: "text",
+		CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: expiresAt, Kind: kind,
 		IdempotencyKey: strings.TrimPrefix(idempotencyKey, "idem_"), Content: content})
 	if err != nil {
 		return localapi.DirectMessageResult{}, err
@@ -218,9 +252,10 @@ func (d *Daemon) SendDirectMessage(ctx context.Context, input, mediaType, body,
 	}
 	intent := bytes.NewBufferString(canon.DomainOutboundIntent)
 	for _, value := range []string{d.config.AgentID, resolved.AgentID, record.ConversationID,
-		mediaType, body, idempotencyKey} {
+		kind, idempotencyKey} {
 		canon.Text(intent, value)
 	}
+	canon.Bytes(intent, content)
 	canon.Uint64(intent, expiresAt)
 	chosen, _, err := d.journal.ClaimOutboundComposition(idempotencyKey, canon.Digest(intent.Bytes()),
 		eventlog.Outbound{EventID: event.EventID, SessionID: targets[0].SessionID,

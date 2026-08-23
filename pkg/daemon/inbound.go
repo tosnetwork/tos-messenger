@@ -98,6 +98,9 @@ func (d *Daemon) receiveFirstContact(ctx context.Context, message dispatch.Messa
 	if err != nil {
 		return ReceiveResult{}, err
 	}
+	if envelope.RequiresEstablishedDirect(event.Kind) {
+		return ReceiveResult{}, errors.New("Agent Gift events are forbidden during first contact")
+	}
 	delegationJSON, err := identity.EncodeJSON(resolved.Delegation)
 	if err != nil {
 		return ReceiveResult{}, err
