@@ -25,6 +25,12 @@ func sample(kind string) Payload {
 		return ConversationAccept{InviteEventID: "evt_" + strings.Repeat("1", 64)}
 	case "presence.hint":
 		return PresenceHint{State: "available", StaleAfterUnix: 1_800_000_000}
+	case "agent.gift.address-request":
+		return GiftAddressRequest{CanonicalRequest: []byte{0xa1, 0x01}}
+	case "agent.gift.address-response":
+		return GiftAddressResponse{CanonicalResponse: []byte{0xa1, 0x02}}
+	case "agent.gift.signed-boc-offer":
+		return GiftSignedBOCOffer{CanonicalOffer: []byte{0xa1, 0x03}}
 	case "agent.task.request":
 		return TaskRequest{TaskID: "task-1", CapabilityID: "cap_" + strings.Repeat("2", 64),
 			InputDigest: "sha256:" + strings.Repeat("3", 64), DeadlineUnix: 1_800_000_000}

@@ -78,7 +78,7 @@ func (acceptingVerifier) Verify(config Config, _ time.Time) (identity.Delegation
 	}
 	return identity.Delegation{
 		AgentID: config.AgentID, EndpointID: config.EndpointID,
-		AllowedOutboundEventClasses: []string{"text"}, InboxAdmissionPolicyDigest: policy.Digest(),
+		AllowedOutboundEventClasses: []string{"text", "agent.gift"}, InboxAdmissionPolicyDigest: policy.Digest(),
 	}, nil
 }
 

@@ -571,7 +571,7 @@ func (j *Journal) ListPending(now time.Time, limit int) ([]Record, error) {
 // event under a live lease may not, which is what stops two attempts from
 // calling the same tool or asking for the same approval twice.
 func (j *Journal) ClaimForApplication(eventID, leaseID string, now time.Time, lease time.Duration) (Record, error) {
-	return j.claimForApplicationKind(eventID, leaseID, now, lease, "", nil)
+	return j.claimForApplicationKind(eventID, leaseID, now, lease, "", nil, nil)
 }
 
 // ClaimForApplicationKind atomically leases an event only when its decoded
@@ -581,7 +581,28 @@ func (j *Journal) ClaimForApplicationKind(eventID, leaseID string, now time.Time
 	if kind == "" {
 		return Record{}, errors.New("application event kind is required")
 	}
-	return j.claimForApplicationKind(eventID, leaseID, now, lease, kind, nil)
+	return j.claimForApplicationKind(eventID, leaseID, now, lease, kind, nil, nil)
+}
+
+// ClaimForApplicationKinds atomically leases an event only when its decoded
+// kind belongs to the bounded allow-list. It is used by typed runtime adapters
+// that own several related application kinds without exposing other inbox
+// traffic through their dedicated claim operation.
+func (j *Journal) ClaimForApplicationKinds(eventID, leaseID string, now time.Time, lease time.Duration, kinds []string) (Record, error) {
+	if len(kinds) == 0 || len(kinds) > 16 {
+		return Record{}, errors.New("allowed application event kinds are required and bounded")
+	}
+	allowed := make(map[string]struct{}, len(kinds))
+	for _, kind := range kinds {
+		if kind == "" {
+			return Record{}, errors.New("allowed application event kind is required")
+		}
+		if _, duplicate := allowed[kind]; duplicate {
+			return Record{}, errors.New("allowed application event kinds must be unique")
+		}
+		allowed[kind] = struct{}{}
+	}
+	return j.claimForApplicationKind(eventID, leaseID, now, lease, "", nil, allowed)
 }
 
 // ClaimForApplicationExceptKind atomically leases an event unless it carries
@@ -609,10 +630,10 @@ func (j *Journal) ClaimForApplicationExceptKinds(eventID, leaseID string, now ti
 		}
 		excluded[kind] = struct{}{}
 	}
-	return j.claimForApplicationKind(eventID, leaseID, now, lease, "", excluded)
+	return j.claimForApplicationKind(eventID, leaseID, now, lease, "", excluded, nil)
 }
 
-func (j *Journal) claimForApplicationKind(eventID, leaseID string, now time.Time, lease time.Duration, required string, excluded map[string]struct{}) (Record, error) {
+func (j *Journal) claimForApplicationKind(eventID, leaseID string, now time.Time, lease time.Duration, required string, excluded, allowed map[string]struct{}) (Record, error) {
 	if err := j.usable(); err != nil {
 		return Record{}, err
 	}
@@ -640,7 +661,7 @@ func (j *Journal) claimForApplicationKind(eventID, leaseID string, now time.Time
 		}
 		return Record{}, err
 	}
-	if required != "" || len(excluded) != 0 {
+	if required != "" || len(excluded) != 0 || len(allowed) != 0 {
 		payload, payloadErr := record.Payload()
 		if payloadErr != nil {
 			return Record{}, payloadErr
@@ -656,6 +677,11 @@ func (j *Journal) claimForApplicationKind(eventID, leaseID string, now time.Time
 		}
 		if _, blocked := excluded[document.Kind]; blocked {
 			return Record{}, ErrApplicationKind
+		}
+		if len(allowed) != 0 {
+			if _, accepted := allowed[document.Kind]; !accepted {
+				return Record{}, ErrApplicationKind
+			}
 		}
 	}
 	if record.Admission != AdmissionAdmitted {

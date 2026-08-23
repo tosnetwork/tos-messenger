@@ -278,6 +278,12 @@ func (s *fixedDirectMessageSender) SendDirectMessage(_ context.Context, input, m
 	return s.result, nil
 }
 
+func (s *fixedDirectMessageSender) SendDirectApplication(_ context.Context, input, kind string,
+	body []byte, idempotency string, expires uint64) (DirectMessageResult, error) {
+	s.input, s.mediaType, s.body, s.idempotency, s.expires = input, kind, string(body), idempotency, expires
+	return s.result, nil
+}
+
 func (s *fixedDirectMessageSender) ReplyDirectMessage(_ context.Context, eventID, mediaType, body,
 	idempotency string, expires uint64) (DirectMessageResult, error) {
 	s.input, s.mediaType, s.body, s.idempotency, s.expires = eventID, mediaType, body, idempotency, expires
@@ -308,6 +314,35 @@ func TestRuntimeSendsDirectIntentWithoutLowLevelAuthority(t *testing.T) {
 			mutate(&candidate)
 			if _, err := EncodeRequest(candidate); err == nil {
 				t.Fatal("model-selected routing authority was accepted")
+			}
+		})
+	}
+}
+
+func TestRuntimeSendsOnlyBoundedGiftApplicationWithoutRouteAuthority(t *testing.T) {
+	h := newHarness(t)
+	eventID := "evt_" + strings.Repeat("d", 64)
+	sender := &fixedDirectMessageSender{result: DirectMessageResult{AgentID: senderID,
+		ConversationID: convoID, EventID: eventID, Readiness: "queued"}}
+	h.server.config.DirectMessageSender = sender
+	request := Request{Op: OpSendDirectApplication, Recipient: senderID,
+		ApplicationKind: "agent.gift.address-request", ApplicationBody: []byte{0xa1, 0x01, 0x02},
+		IdempotencyKey: "idem_" + strings.Repeat("e", 64), ExpiresAtUnix: baseUnix + 600}
+	response := h.call(t, request)
+	if !response.OK || response.EventID != eventID || sender.mediaType != request.ApplicationKind || sender.body != string(request.ApplicationBody) {
+		t.Fatalf("send direct Gift: response=%+v sender=%+v", response, sender)
+	}
+	for name, mutate := range map[string]func(*Request){
+		"room":         func(r *Request) { r.RoomID = "room_" + strings.Repeat("1", 64) },
+		"session":      func(r *Request) { r.SessionID = sessionID },
+		"text":         func(r *Request) { r.Body = "address from model" },
+		"unknown kind": func(r *Request) { r.ApplicationKind = "agent.gift.magic" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := request
+			mutate(&candidate)
+			if _, err := EncodeRequest(candidate); err == nil {
+				t.Fatal("invalid Gift application authority was accepted")
 			}
 		})
 	}
@@ -344,7 +379,7 @@ func TestRuntimeRepliesFromAuthenticatedEventWithoutLowLevelAuthority(t *testing
 }
 
 func TestRequestDecoderKeepsRollingUpgradeCompatibility(t *testing.T) {
-	for _, schema := range []string{RequestSchemaV6, RequestSchemaV7, RequestSchemaV8, RequestSchemaV9, RequestSchema} {
+	for _, schema := range []string{RequestSchemaV6, RequestSchemaV7, RequestSchemaV8, RequestSchemaV9, RequestSchemaV10, RequestSchemaV11, RequestSchema} {
 		raw, err := json.Marshal(Request{Schema: schema, Op: OpPending, Limit: 1})
 		if err != nil {
 			t.Fatal(err)
@@ -356,6 +391,28 @@ func TestRequestDecoderKeepsRollingUpgradeCompatibility(t *testing.T) {
 	raw, _ := json.Marshal(Request{Schema: "tos.messaging.local-request.v5", Op: OpPending})
 	if _, err := DecodeRequest(raw); err == nil {
 		t.Fatal("unsupported request schema was accepted")
+	}
+}
+
+func TestAgentGiftInboxOperationsRequireRequestSchemaV12(t *testing.T) {
+	requests := []Request{
+		{Schema: RequestSchemaV11, Op: OpPendingAgentGifts, Limit: 1},
+		{Schema: RequestSchemaV11, Op: OpClaimAgentGift, EventID: "evt_" + strings.Repeat("1", 64),
+			LeaseID: "lease_" + strings.Repeat("2", 64), LeaseSeconds: 60},
+	}
+	for _, request := range requests {
+		raw, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeRequest(raw); err == nil {
+			t.Fatalf("pre-v12 schema accepted %s", request.Op)
+		}
+		request.Schema = RequestSchema
+		raw, _ = json.Marshal(request)
+		if _, err := DecodeRequest(raw); err != nil {
+			t.Fatalf("v12 rejected %s: %v", request.Op, err)
+		}
 	}
 }
 
@@ -617,6 +674,46 @@ func TestRuntimeCannotListOrClaimDaemonOwnedTypedAdapters(t *testing.T) {
 		if claimed.OK || claimed.Code != fault.CodeClassNotDelegated {
 			t.Fatalf("runtime claimed daemon-owned %s: %+v", event.Kind, claimed)
 		}
+	}
+}
+
+func TestAgentGiftInboxCannotBeStarvedAndClaimsOnlyGiftKinds(t *testing.T) {
+	h := newHarness(t)
+	for index := 0; index < MaxEventsPerResponse+1; index++ {
+		h.receive(t, h.event(t, "ordinary-"+strconv.Itoa(index)))
+	}
+	content, err := payload.Encode(payload.GiftAddressRequest{CanonicalRequest: []byte{0xa1, 0x01}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gift, err := envelope.NewEvent(envelope.Event{
+		Network: testNetwork(), ConversationID: convoID,
+		SenderAgentID: senderID, SenderEndpointID: senderMEP, SenderDeviceID: senderDev,
+		CreatedAtUnix: baseUnix + 1, Kind: "agent.gift.address-request", Content: content,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.receive(t, gift)
+
+	listing := h.call(t, Request{Op: OpPendingAgentGifts, Limit: 1})
+	if !listing.OK || len(listing.Events) != 1 || listing.Events[0].EventID != gift.EventID {
+		t.Fatalf("ordinary inbox traffic starved Agent Gift listing: %+v", listing)
+	}
+	if generic := h.call(t, Request{Op: OpClaim, EventID: gift.EventID,
+		LeaseID: "lease_" + strings.Repeat("7", 64), LeaseSeconds: 60}); generic.OK || generic.Code != fault.CodeClassNotDelegated {
+		t.Fatalf("generic runtime claimed reserved Agent Gift: %+v", generic)
+	}
+	ordinary := h.event(t, "not-a-gift")
+	h.receive(t, ordinary)
+	if typed := h.call(t, Request{Op: OpClaimAgentGift, EventID: ordinary.EventID,
+		LeaseID: "lease_" + strings.Repeat("8", 64), LeaseSeconds: 60}); typed.OK || typed.Code != fault.CodeClassNotDelegated {
+		t.Fatalf("Agent Gift adapter claimed ordinary event: %+v", typed)
+	}
+	claimed := h.call(t, Request{Op: OpClaimAgentGift, EventID: gift.EventID,
+		LeaseID: leaseID, LeaseSeconds: 60})
+	if !claimed.OK || claimed.Event == nil || claimed.Event.EventID != gift.EventID {
+		t.Fatalf("Agent Gift claim failed: %+v", claimed)
 	}
 }
 

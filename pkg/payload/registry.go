@@ -13,6 +13,10 @@ var codecs = map[string]codec{
 	"conversation.accept": {schema: ConversationAccept{}.Schema(), decode: decodeConversationAccept},
 	"presence.hint":       {schema: PresenceHint{}.Schema(), decode: decodePresenceHint},
 
+	"agent.gift.address-request":  {schema: GiftAddressRequest{}.Schema(), decode: decodeGiftAddressRequest},
+	"agent.gift.address-response": {schema: GiftAddressResponse{}.Schema(), decode: decodeGiftAddressResponse},
+	"agent.gift.signed-boc-offer": {schema: GiftSignedBOCOffer{}.Schema(), decode: decodeGiftSignedBOCOffer},
+
 	"agent.task.request":        {schema: TaskRequest{}.Schema(), decode: decodeTaskRequest},
 	"agent.task.progress":       {schema: TaskProgress{}.Schema(), decode: decodeTaskProgress},
 	"agent.task.result":         {schema: TaskResult{}.Schema(), decode: decodeTaskResult},
