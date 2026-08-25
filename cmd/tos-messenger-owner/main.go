@@ -16,8 +16,8 @@ import (
 	"io"
 	"os"
 	"strings"
-	"syscall"
 
+	"github.com/tosnetwork/tos-messenger/internal/osguard"
 	"github.com/tosnetwork/tos-messenger/internal/securefile"
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
 )
@@ -272,8 +272,7 @@ func readRegular(path string, maximum int64, secret bool) ([]byte, error) {
 		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("owner key must remain a regular file")
 		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || stat.Uid != uint32(os.Geteuid()) || info.Mode().Perm() != 0o600 {
+		if !osguard.CurrentUserOwns(info) || info.Mode().Perm() != 0o600 {
 			return nil, errors.New("owner key must be owned by this user with mode 0600")
 		}
 	}

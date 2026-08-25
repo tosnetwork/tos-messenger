@@ -45,7 +45,7 @@ func publicationFixture(t *testing.T, config *Config, now time.Time) (identity.D
 	delegation := identity.Delegation{
 		Network: config.Network(), AgentID: config.AgentID, EndpointID: endpointID,
 		IdentityPublicKey: key.Public().(ed25519.PublicKey), AllowedProtocolVersions: []uint32{1},
-		AllowedOutboundEventClasses: []string{"agent.gift", "text"}, NotBeforeUnix: uint64(now.Add(-time.Minute).Unix()),
+		AllowedOutboundEventClasses: []string{"agent.gift", "negotiation", "text"}, NotBeforeUnix: uint64(now.Add(-time.Minute).Unix()),
 		ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()), MaximumSessionLifetimeSeconds: 3600,
 		ContactDescriptorPolicyDigest: policyDigest,
 		InboxAdmissionPolicyDigest:    inboxPolicy.Digest(),

@@ -24,6 +24,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
+	"github.com/tosnetwork/tos-messenger/pkg/economicaction"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
@@ -32,6 +33,8 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
 	"github.com/tosnetwork/tos-messenger/pkg/protocolbridge"
+	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
+	protocolcodec "github.com/tosnetwork/tos-service-protocol/pkg/codec"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativeclient"
 )
 
@@ -184,8 +187,8 @@ func (d *Daemon) SendDirectMessage(ctx context.Context, input, mediaType, body,
 
 // SendDirectApplication carries one already-canonical private application
 // object through daemon-owned contact resolution, established E2EE sessions,
-// durable Events and device fan-out. Only the three frozen Agent Gift kinds
-// are exposed; callers cannot supply an outer Event or route metadata.
+// durable Events and device fan-out. Only frozen typed application kinds are
+// exposed; callers cannot supply an outer Event or route metadata.
 func (d *Daemon) SendDirectApplication(ctx context.Context, input, kind string, canonical []byte,
 	idempotencyKey string, expiresAt uint64) (localapi.DirectMessageResult, error) {
 	var value payload.Payload
@@ -196,6 +199,88 @@ func (d *Daemon) SendDirectApplication(ctx context.Context, input, kind string, 
 		value = payload.GiftAddressResponse{CanonicalResponse: canonical}
 	case "agent.gift.signed-boc-offer":
 		value = payload.GiftSignedBOCOffer{CanonicalOffer: canonical}
+	case "intent.application":
+		application, err := commerce.DecodeIntentApplication(canonical)
+		if err != nil || application.ApplicantAgentID != d.config.AgentID {
+			return localapi.DirectMessageResult{}, errors.New("Intent application does not match the sending Agent")
+		}
+		value = payload.IntentApplication{CanonicalApplication: canonical}
+	case "agreement.propose":
+		var body commerce.AgentAgreementBody
+		if err := protocolcodec.Unmarshal(canonical, &body); err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		digest, err := commerce.AgreementBodyDigest(body)
+		if err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		value = payload.AgreementPropose{AgreementBodyDigest: digest, CanonicalBody: canonical}
+	case "agreement.accept":
+		acceptance, err := commerce.DecodeSignedAgreementAcceptance(canonical)
+		if err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		value = payload.AgreementAccept{AgreementBodyDigest: acceptance.Body.AgreementBodyDigest, CanonicalAcceptance: canonical}
+	case "agreement.evidence":
+		var evidence commerce.AgreementAuthorizationEvidence
+		if err := protocolcodec.Unmarshal(canonical, &evidence); err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		digest, err := protocolcodec.Digest("tos.agreement-authorization-evidence.v1", evidence)
+		if err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		value = payload.AgreementEvidence{AgreementBodyDigest: evidence.AgreementBodyDigest,
+			EvidenceDigest: digest, CanonicalEvidence: canonical}
+	case "agreement.provider-offer":
+		var offer commerce.SignedProviderOffer
+		if err := protocolcodec.Unmarshal(canonical, &offer); err != nil || offer.Binding.ProviderAgentID != d.config.AgentID {
+			return localapi.DirectMessageResult{}, errors.New("Provider Offer does not match the sending Agent")
+		}
+		digest, err := commerce.ProviderOfferDigest(offer)
+		if err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		value = payload.PaidDemandProviderOffer{AgreementBodyDigest: offer.Binding.AgreementBodyDigest,
+			ProviderOfferDigest: digest, CanonicalOffer: canonical}
+	case "agreement.withdraw", "agreement.delivery", "private.handoff.status", "private.handoff.delete":
+		decoded, err := payload.Decode(kind, canonical)
+		if err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		value = decoded
+	case "private.handoff.challenge":
+		var challenge commerce.SignedPrivateHandoffChallenge
+		if err := protocolcodec.Unmarshal(canonical, &challenge); err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		digest, err := commerce.PrivateHandoffChallengeDigest(challenge.Body)
+		if err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		value = payload.PrivateHandoffChallenge{ChallengeDigest: digest, CanonicalChallenge: canonical}
+	case "private.handoff.authorization":
+		var authorization commerce.SignedPrivateHandoffAuthorization
+		if err := protocolcodec.Unmarshal(canonical, &authorization); err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		digest, err := commerce.PrivateHandoffAuthorizationDigest(authorization.Body)
+		if err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		value = payload.PrivateHandoffAuthorization{ChallengeDigest: authorization.Body.ChallengeDigest,
+			AuthorizationDigest: digest, CanonicalAuthorization: canonical}
+	case "private.handoff.acknowledgement":
+		var acknowledgement commerce.SignedPrivateHandoffAcknowledgement
+		if err := protocolcodec.Unmarshal(canonical, &acknowledgement); err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		digest, err := commerce.PrivateHandoffAcknowledgementDigest(acknowledgement)
+		if err != nil {
+			return localapi.DirectMessageResult{}, err
+		}
+		value = payload.PrivateHandoffAcknowledgement{ChallengeDigest: acknowledgement.Record.ChallengeDigest,
+			AcknowledgementDigest: digest, CanonicalAcknowledgement: canonical}
 	default:
 		return localapi.DirectMessageResult{}, errors.New("unsupported direct application kind")
 	}
@@ -638,6 +723,19 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		},
 	)
 	serverConfig.DirectMessageSender = daemonDirectMessenger{daemon: instance}
+	economicKeys, err := config.EconomicAuthorityKeys()
+	if err != nil {
+		_ = journal.Close()
+		return nil, err
+	}
+	if len(economicKeys) != 0 {
+		economicStore, storeErr := economicaction.Open(config.StateDir, economicKeys)
+		if storeErr != nil {
+			_ = journal.Close()
+			return nil, errors.New("open economic action store: " + storeErr.Error())
+		}
+		serverConfig.EconomicActionAdmitter = economicStore
+	}
 	server, err := localapi.NewServer(serverConfig)
 	if err != nil {
 		_ = journal.Close()

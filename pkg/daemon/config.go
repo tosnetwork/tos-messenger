@@ -172,6 +172,11 @@ type Config struct {
 	// separate user's keyring, another machine -- or this check is theatre.
 	OwnerPublicKeyHex string `json:"owner_public_key"`
 
+	// EconomicAuthorities pins the independent keys allowed to issue OpenFox
+	// writer fences. Empty disables autonomous economic messaging; the ordinary
+	// human messaging API remains available.
+	EconomicAuthorities []EconomicAuthorityConfig `json:"economic_authorities,omitempty"`
+
 	// Admission is the recipient's explicit first-contact policy. Its public
 	// document must hash to the digest in the finalized local delegation; the
 	// private rosters remain local and never enter that digest.
@@ -209,6 +214,26 @@ type Config struct {
 	SweepIntervalSeconds       uint64 `json:"sweep_interval_seconds,omitempty"`
 	MaintenanceIntervalSeconds uint64 `json:"maintenance_interval_seconds,omitempty"`
 	RetentionSeconds           uint64 `json:"retention_seconds,omitempty"`
+}
+
+type EconomicAuthorityConfig struct {
+	AuthorityID  string `json:"authority_id"`
+	PublicKeyHex string `json:"public_key_hex"`
+}
+
+func (c Config) EconomicAuthorityKeys() (map[string]ed25519.PublicKey, error) {
+	keys := make(map[string]ed25519.PublicKey, len(c.EconomicAuthorities))
+	last := ""
+	for _, authority := range c.EconomicAuthorities {
+		raw, err := hex.DecodeString(authority.PublicKeyHex)
+		if authority.AuthorityID == "" || len(authority.AuthorityID) > 256 || authority.AuthorityID <= last ||
+			err != nil || len(raw) != ed25519.PublicKeySize || canon.IsZero(raw) {
+			return nil, errors.New("economic_authorities must be strictly sorted and contain valid ed25519 keys")
+		}
+		keys[authority.AuthorityID] = ed25519.PublicKey(raw)
+		last = authority.AuthorityID
+	}
+	return keys, nil
 }
 
 // ContactDNSConfig authenticates the daemon to a TOS Native DNS gateway.
@@ -843,6 +868,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if _, err := c.OwnerKey(); err != nil {
+		return err
+	}
+	if _, err := c.EconomicAuthorityKeys(); err != nil {
 		return err
 	}
 	if _, known := transports[c.Transport]; !known {

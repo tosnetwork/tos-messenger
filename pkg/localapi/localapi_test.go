@@ -717,6 +717,38 @@ func TestAgentGiftInboxCannotBeStarvedAndClaimsOnlyGiftKinds(t *testing.T) {
 	}
 }
 
+func TestPrivateHandoffInboxCannotBeStarvedOrEnterGenericChat(t *testing.T) {
+	h := newHarness(t)
+	for index := 0; index < MaxEventsPerResponse+1; index++ {
+		h.receive(t, h.event(t, "ordinary-handoff-"+strconv.Itoa(index)))
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	content, err := payload.Encode(payload.PrivateHandoffStatus{HandoffID: "handoff:test", ActionID: digest,
+		State: "accepted", EvidenceDigest: "sha256:" + strings.Repeat("b", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := envelope.NewEvent(envelope.Event{Network: testNetwork(), ConversationID: convoID,
+		SenderAgentID: senderID, SenderEndpointID: senderMEP, SenderDeviceID: senderDev, CreatedAtUnix: baseUnix + 2,
+		Kind: "private.handoff.status", IdempotencyKey: strings.TrimPrefix(digest, "sha256:"), Content: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.receive(t, event)
+	listing := h.call(t, Request{Op: OpPendingPrivateHandoffs, Limit: 1})
+	if !listing.OK || len(listing.Events) != 1 || listing.Events[0].EventID != event.EventID {
+		t.Fatalf("ordinary traffic starved private handoff listing: %+v", listing)
+	}
+	if generic := h.call(t, Request{Op: OpClaim, EventID: event.EventID,
+		LeaseID: "lease_" + strings.Repeat("7", 64), LeaseSeconds: 60}); generic.OK || generic.Code != fault.CodeClassNotDelegated {
+		t.Fatalf("generic runtime claimed private handoff control: %+v", generic)
+	}
+	claimed := h.call(t, Request{Op: OpClaimPrivateHandoff, EventID: event.EventID, LeaseID: leaseID, LeaseSeconds: 60})
+	if !claimed.OK || claimed.Event == nil || claimed.Event.EventID != event.EventID {
+		t.Fatalf("private handoff claim failed: %+v", claimed)
+	}
+}
+
 func TestRejectedEventIsNotOfferedAgain(t *testing.T) {
 	h := newHarness(t)
 	event := h.event(t, "hello")

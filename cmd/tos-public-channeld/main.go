@@ -211,8 +211,7 @@ func sitesPublisher(options options) (*publicchannel.StorageCLIPublisher, error)
 		}
 	}
 	keyInfo, _ := os.Lstat(options.storageKey)
-	keyStat, owned := keyInfoSys(keyInfo)
-	if !owned || keyStat.Uid != uint32(os.Geteuid()) || keyInfo.Mode().Perm() != 0o600 {
+	if !transportKeyFileIsPrivate(keyInfo) {
 		return nil, errors.New("storage-client-key must be owned by this user with mode 0600")
 	}
 	return &publicchannel.StorageCLIPublisher{Command: options.storageCLI, ServerAddress: options.storageAddr,
@@ -251,8 +250,7 @@ func sitesDownloader(options options) (*publicchannel.StorageCLIDownloader, erro
 		}
 	}
 	keyInfo, _ := os.Lstat(options.storageKey)
-	keyStat, owned := keyInfoSys(keyInfo)
-	if !owned || keyStat.Uid != uint32(os.Geteuid()) || keyInfo.Mode().Perm() != 0o600 {
+	if !transportKeyFileIsPrivate(keyInfo) {
 		return nil, errors.New("storage-client-key must be owned by this user with mode 0600")
 	}
 	return &publicchannel.StorageCLIDownloader{Command: options.storageCLI, ServerAddress: options.storageAddr,
@@ -328,9 +326,7 @@ func loadOptions(options options) (publicchannel.Profile, identity.Delegation,
 		return bad(err)
 	}
 	keyInfo, err := os.Lstat(options.keyPath)
-	keyStat, owned := keyInfoSys(keyInfo)
-	if err != nil || keyInfo == nil || !keyInfo.Mode().IsRegular() || !owned ||
-		keyStat.Uid != uint32(os.Geteuid()) || keyInfo.Mode().Perm() != 0o600 {
+	if err != nil || !transportKeyFileIsPrivate(keyInfo) {
 		return bad(errors.New("transport-key must be owned by this user with mode 0600"))
 	}
 	keyText := strings.TrimSuffix(string(keyRaw), "\n")
@@ -349,14 +345,6 @@ func loadOptions(options options) (publicchannel.Profile, identity.Delegation,
 		return bad(err)
 	}
 	return profile, authority, delegations, key, advertised, nil
-}
-
-func keyInfoSys(info os.FileInfo) (*syscall.Stat_t, bool) {
-	if info == nil {
-		return nil, false
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return stat, ok
 }
 
 func advertisedAddress(listen, advertised string) (address.Address, error) {

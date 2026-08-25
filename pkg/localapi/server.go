@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
@@ -26,6 +27,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 )
 
 // DefaultRequestTimeout bounds how long one call may hold a connection.
@@ -72,6 +74,16 @@ type Config struct {
 	// DirectMessageSender accepts only human recipient intent and message
 	// semantics. It never accepts Endpoint, Device, Session or route authority.
 	DirectMessageSender DirectMessageSender
+	// EconomicActionAdmitter is a daemon-owned durable writer-generation and
+	// exact-action boundary. When absent, autonomous economic sends fail closed.
+	EconomicActionAdmitter EconomicActionAdmitter
+}
+
+type EconomicActionAdmitter interface {
+	Admit(commerce.AuthorizedAction, commerce.WriterFence, map[string]commerce.SemanticValue, []byte, time.Time) (commerce.ActionResolution, error)
+	Submit(string, string) (commerce.ActionResolution, error)
+	Resolve(string, string) (commerce.ActionResolution, error)
+	Accept(string, string, string) (commerce.ActionResolution, error)
 }
 
 type ContactResolver interface {
@@ -254,6 +266,14 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.pendingAgentGifts(request, now)
 	case OpClaimAgentGift:
 		return s.claimAgentGift(request, now)
+	case OpPendingAgreements:
+		return s.pendingAgreements(request, now)
+	case OpClaimAgreement:
+		return s.claimAgreement(request, now)
+	case OpPendingPrivateHandoffs:
+		return s.pendingPrivateHandoffs(request, now)
+	case OpClaimPrivateHandoff:
+		return s.claimPrivateHandoff(request, now)
 	case OpComplete:
 		return s.complete(request, now)
 	case OpReject:
@@ -272,6 +292,10 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.sendDirect(ctx, request)
 	case OpSendDirectApplication:
 		return s.sendDirectApplication(ctx, request)
+	case OpEconomicSendDirect:
+		return s.economicSendDirect(ctx, request, now)
+	case OpEconomicActionStatus:
+		return s.economicActionStatus(request)
 	case OpReplyDirect:
 		return s.replyDirect(ctx, request)
 	case OpPendingAttachments:
@@ -326,6 +350,96 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.listDeviceHistory(request)
 	}
 	return refuse(fault.CodeInternal, errors.New("unknown local operation"))
+}
+
+func (s *Server) economicSendDirect(ctx context.Context, request Request, now time.Time) Response {
+	if s.config.EconomicActionAdmitter == nil || s.config.DirectMessageSender == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("economic messaging is not configured"))
+	}
+	effect, err := commerce.DecodeMessengerEffectRequest(request.ExactEconomicRequest)
+	if err != nil {
+		return refuse(fault.CodeNotAuthentic, err)
+	}
+	fields, err := commerce.ImportSemanticFields(request.EconomicAction.ActionKind, request.EconomicFields)
+	if err != nil || !economicKindMatchesEffect(request.EconomicAction.ActionKind, effect.EventKind) {
+		return refuse(fault.CodeNotAuthentic, errors.New("economic action kind does not authorize the Messenger effect"))
+	}
+	resolution, err := s.config.EconomicActionAdmitter.Admit(*request.EconomicAction, *request.EconomicWriterFence,
+		fields, request.ExactEconomicRequest, now)
+	if err != nil || resolution.State == commerce.ActionConflict {
+		return refuse(fault.CodeNotAuthentic, errors.New("economic action admission failed"))
+	}
+	if resolution.State == commerce.ActionAccepted {
+		return Response{OK: true, AgentID: effect.RecipientAgentIDs[0], EventID: resolution.SinkReference,
+			Readiness: "queued", EconomicResolution: &resolution}
+	}
+	if resolution.State != commerce.ActionPrepared && resolution.State != commerce.ActionSubmitted {
+		return refuse(fault.CodeNotAuthentic, errors.New("economic action is not sendable"))
+	}
+	if resolution.State == commerce.ActionPrepared {
+		resolution, err = s.config.EconomicActionAdmitter.Submit(request.EconomicAction.StableActionID, request.EconomicAction.ExactRequestDigest)
+		if err != nil || resolution.State != commerce.ActionSubmitted {
+			return refuse(fault.CodeInternal, errors.New("economic action could not enter durable submitted state"))
+		}
+	}
+	idempotency := "idem_" + strings.TrimPrefix(request.EconomicAction.StableActionID, "sha256:")
+	var sent DirectMessageResult
+	if effect.EventKind == "text" {
+		sent, err = s.config.DirectMessageSender.SendDirectMessage(ctx, effect.RecipientAgentIDs[0], effect.ContentType,
+			string(effect.Payload), idempotency, request.EconomicAction.ExpiresAtUnix)
+	} else {
+		sent, err = s.config.DirectMessageSender.SendDirectApplication(ctx, effect.RecipientAgentIDs[0], effect.EventKind,
+			effect.Payload, idempotency, request.EconomicAction.ExpiresAtUnix)
+	}
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	resolution, err = s.config.EconomicActionAdmitter.Accept(request.EconomicAction.StableActionID,
+		request.EconomicAction.ExactRequestDigest, sent.EventID)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, AgentID: sent.AgentID, CanonicalName: sent.CanonicalName,
+		ConversationID: sent.ConversationID, EventID: sent.EventID, Readiness: sent.Readiness, EconomicResolution: &resolution}
+}
+
+func (s *Server) economicActionStatus(request Request) Response {
+	if s.config.EconomicActionAdmitter == nil {
+		return refuse(fault.CodeClassNotDelegated, errors.New("economic messaging is not configured"))
+	}
+	resolution, err := s.config.EconomicActionAdmitter.Resolve(request.EconomicStableID, request.EconomicRequestDigest)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, EconomicResolution: &resolution}
+}
+
+func economicKindMatchesEffect(actionKind, eventKind string) bool {
+	switch actionKind {
+	case "messenger.contact":
+		return eventKind == "text" || eventKind == "intent.application"
+	case "messenger.send":
+		return eventKind == "text" || eventKind == "private.handoff.challenge" ||
+			eventKind == "private.handoff.acknowledgement" || eventKind == "private.handoff.status" || eventKind == "private.handoff.delete"
+	case "agreement.propose":
+		return eventKind == "agreement.propose"
+	case "agreement.authorize":
+		return eventKind == "agreement.accept" || eventKind == "agreement.evidence"
+	case "provider.offer":
+		return eventKind == "agreement.provider-offer"
+	case "agreement.withdraw":
+		return eventKind == "agreement.withdraw"
+	case "disclosure.release":
+		return eventKind == "private.handoff.authorization"
+	case "content.upload":
+		return eventKind == "private.handoff.acknowledgement" || eventKind == "private.handoff.status"
+	case "content.delete":
+		return eventKind == "private.handoff.delete" || eventKind == "private.handoff.status"
+	case "delivery.release":
+		return eventKind == "agreement.delivery"
+	default:
+		return false
+	}
 }
 
 func (s *Server) sendDirect(ctx context.Context, request Request) Response {
@@ -537,7 +651,10 @@ func (s *Server) claim(request Request, now time.Time) Response {
 	record, err := s.config.Journal.ClaimForApplicationExceptKinds(request.EventID, request.LeaseID, now,
 		time.Duration(request.LeaseSeconds)*time.Second,
 		[]string{"agent.packet", "device.history.segment", "artifact.encrypted", "a2a.message", "mcp.call", "mcp.result",
-			"agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer"})
+			"agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer",
+			"intent.application", "agreement.propose", "agreement.accept", "agreement.evidence", "agreement.withdraw", "agreement.delivery",
+			"agreement.provider-offer",
+			"private.handoff.challenge", "private.handoff.authorization", "private.handoff.acknowledgement", "private.handoff.status", "private.handoff.delete"})
 	if err != nil {
 		return refuse(claimCode(err), err)
 	}
@@ -589,13 +706,105 @@ func (s *Server) claimAgentGift(request Request, now time.Time) Response {
 	return Response{OK: true, Event: &event}
 }
 
+func (s *Server) pendingAgreements(request Request, now time.Time) Response {
+	limit := request.Limit
+	if limit == 0 || limit > MaxEventsPerResponse {
+		limit = MaxEventsPerResponse
+	}
+	records, err := s.config.Journal.ListPending(now, 0)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	events := make([]PendingEvent, 0, limit)
+	for _, record := range records {
+		event, err := pendingEvent(record)
+		if err != nil {
+			continue
+		}
+		decoded, err := envelope.DecodeEventJSON(event.Event)
+		if err != nil || !agreementApplicationKind(decoded.Kind) {
+			continue
+		}
+		events = append(events, event)
+		if len(events) == limit {
+			break
+		}
+	}
+	return Response{OK: true, Events: events}
+}
+
+func (s *Server) claimAgreement(request Request, now time.Time) Response {
+	record, err := s.config.Journal.ClaimForApplicationKinds(request.EventID, request.LeaseID, now,
+		time.Duration(request.LeaseSeconds)*time.Second,
+		[]string{"intent.application", "agreement.propose", "agreement.accept", "agreement.evidence", "agreement.withdraw", "agreement.delivery", "agreement.provider-offer"})
+	if err != nil {
+		return refuse(claimCode(err), err)
+	}
+	event, err := pendingEvent(record)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, Event: &event}
+}
+
+func (s *Server) pendingPrivateHandoffs(request Request, now time.Time) Response {
+	limit := request.Limit
+	if limit == 0 || limit > MaxEventsPerResponse {
+		limit = MaxEventsPerResponse
+	}
+	records, err := s.config.Journal.ListPending(now, 0)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	events := make([]PendingEvent, 0, limit)
+	for _, record := range records {
+		event, eventErr := pendingEvent(record)
+		if eventErr != nil {
+			continue
+		}
+		decoded, decodeErr := envelope.DecodeEventJSON(event.Event)
+		if decodeErr != nil || !privateHandoffApplicationKind(decoded.Kind) {
+			continue
+		}
+		events = append(events, event)
+		if len(events) == limit {
+			break
+		}
+	}
+	return Response{OK: true, Events: events}
+}
+
+func (s *Server) claimPrivateHandoff(request Request, now time.Time) Response {
+	record, err := s.config.Journal.ClaimForApplicationKinds(request.EventID, request.LeaseID, now,
+		time.Duration(request.LeaseSeconds)*time.Second,
+		[]string{"private.handoff.challenge", "private.handoff.authorization", "private.handoff.acknowledgement", "private.handoff.status", "private.handoff.delete"})
+	if err != nil {
+		return refuse(claimCode(err), err)
+	}
+	event, err := pendingEvent(record)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, Event: &event}
+}
+
 func daemonApplicationKind(kind string) bool {
 	return kind == "agent.packet" || kind == "device.history.segment" || kind == "artifact.encrypted" ||
-		kind == "a2a.message" || kind == "mcp.call" || kind == "mcp.result" || agentGiftApplicationKind(kind)
+		kind == "a2a.message" || kind == "mcp.call" || kind == "mcp.result" || agentGiftApplicationKind(kind) || agreementApplicationKind(kind) || privateHandoffApplicationKind(kind)
 }
 
 func agentGiftApplicationKind(kind string) bool {
 	return kind == "agent.gift.address-request" || kind == "agent.gift.address-response" || kind == "agent.gift.signed-boc-offer"
+}
+
+func agreementApplicationKind(kind string) bool {
+	return kind == "intent.application" || kind == "agreement.propose" || kind == "agreement.accept" || kind == "agreement.evidence" ||
+		kind == "agreement.withdraw" || kind == "agreement.delivery" || kind == "agreement.provider-offer"
+}
+
+func privateHandoffApplicationKind(kind string) bool {
+	return kind == "private.handoff.challenge" || kind == "private.handoff.authorization" ||
+		kind == "private.handoff.acknowledgement" || kind == "private.handoff.status" || kind == "private.handoff.delete"
 }
 
 func (s *Server) pendingAttachments(request Request, now time.Time) Response {

@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -648,10 +647,7 @@ func TestSandboxScannerHelperProcess(t *testing.T) {
 	}
 	reason := ""
 	if mode == "cgroup-proof" {
-		membership, err := os.ReadFile("/proc/self/cgroup")
-		var core syscall.Rlimit
-		coreErr := syscall.Getrlimit(syscall.RLIMIT_CORE, &core)
-		if err != nil || coreErr != nil || !bytes.Contains(membership, []byte("/tos-attachment-scan-")) || core.Cur != 0 {
+		if !scannerCgroupHardLimitsPresent() {
 			decision = ScanDeny
 		} else {
 			reason = "cgroup_hard_limits"

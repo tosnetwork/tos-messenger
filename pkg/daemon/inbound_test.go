@@ -20,6 +20,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 )
 
 type phaseAResolver struct {
@@ -211,6 +212,51 @@ func TestFirstContactGiftIsRejectedBeforeRuntimeAdmission(t *testing.T) {
 	}
 }
 
+func TestFirstContactIntentApplicationRemainsTypedAndNonAuthorizing(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0)
+	a := newPhaseADaemon(t, now, "2", "4")
+	b := newPhaseADaemon(t, now, "7", "9")
+	connectPhaseADirectories(a, b, now)
+	connectPhaseADirectories(b, a, now)
+	installPhaseAAdmission(t, now, a, b)
+	installPhaseAAdmission(t, now, b, a)
+	installPhaseATransport(t, now, a, b)
+	canonical, err := commerce.CanonicalIntentApplication(commerce.IntentApplication{SchemaVersion: 1,
+		IntentDigest: "sha256:" + strings.Repeat("8", 64), IntentIssuerAgentID: b.config.AgentID, ApplicantAgentID: a.config.AgentID,
+		Message: "I can perform this signed request.", ExpiresAtUnix: uint64(now.Add(time.Hour).Unix())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent, err := a.SendDirectApplication(context.Background(), b.config.AgentID, "intent.application", canonical,
+		"idem_"+strings.Repeat("6", 64), uint64(now.Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary, err := a.dispatch.Sweep(context.Background(), 0); err != nil || summary.Sent != 1 {
+		t.Fatalf("deliver application: %+v %v", summary, err)
+	}
+	records, err := b.journal.ListPending(now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.EventID != sent.EventID {
+			continue
+		}
+		raw, _ := record.Payload()
+		event, decodeErr := envelope.DecodeEventJSON(raw)
+		decoded, payloadErr := payload.Decode(event.Kind, event.Content)
+		applicationPayload, ok := decoded.(payload.IntentApplication)
+		application, applicationErr := commerce.DecodeIntentApplication(applicationPayload.CanonicalApplication)
+		if decodeErr != nil || payloadErr != nil || applicationErr != nil || !ok || event.Kind != "intent.application" ||
+			application.IntentDigest != "sha256:"+strings.Repeat("8", 64) {
+			t.Fatalf("typed application=%+v event=%+v errors=%v/%v/%v", application, event, decodeErr, payloadErr, applicationErr)
+		}
+		return
+	}
+	t.Fatal("typed Intent application was not durably received")
+}
+
 func TestTwoIndependentDaemonsExchangeDirectMessagesOverTLS(t *testing.T) {
 	now := time.Unix(1_900_000_000, 0)
 	a := newPhaseADaemon(t, now, "2", "4")
@@ -327,7 +373,7 @@ func installPhaseATransport(t *testing.T, now time.Time, sender, recipient *Daem
 		Sender: phaseALoopSender{recipient: recipient}, Bindings: dispatch.SessionBindings{Journal: sender.journal,
 			Identity: sender.config.Identity(), Network: sender.config.Network()},
 		Now: func() time.Time { return now }, Identity: sender.config.Identity(), Network: sender.config.Network(),
-		AllowedEventClasses: []string{"agent.gift", "text"}})
+		AllowedEventClasses: []string{"agent.gift", "negotiation", "text"}})
 	if err != nil {
 		t.Fatalf("transport: %v", err)
 	}
@@ -354,7 +400,7 @@ func installPhaseAHTTPSTransport(t *testing.T, now time.Time, sender, recipient 
 		Bindings: dispatch.SessionBindings{Journal: sender.journal, Identity: sender.config.Identity(),
 			Network: sender.config.Network()},
 		Now: func() time.Time { return now }, Identity: sender.config.Identity(), Network: sender.config.Network(),
-		AllowedEventClasses: []string{"agent.gift", "text"}})
+		AllowedEventClasses: []string{"agent.gift", "negotiation", "text"}})
 	if err != nil {
 		t.Fatalf("HTTPS transport: %v", err)
 	}

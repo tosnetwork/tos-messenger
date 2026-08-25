@@ -29,11 +29,14 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
+	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 )
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema    = "tos.messaging.local-request.v12"
+	RequestSchema    = "tos.messaging.local-request.v14"
+	RequestSchemaV13 = "tos.messaging.local-request.v13"
+	RequestSchemaV12 = "tos.messaging.local-request.v12"
 	RequestSchemaV11 = "tos.messaging.local-request.v11"
 	RequestSchemaV10 = "tos.messaging.local-request.v10"
 	// RequestSchemaV6 through RequestSchemaV11 remain accepted for the operations
@@ -71,6 +74,16 @@ const (
 	OpPendingAgentGifts Operation = "agent-gifts.pending"
 	// OpClaimAgentGift atomically leases only an Agent Gift Event.
 	OpClaimAgentGift Operation = "agent-gifts.claim"
+	// OpPendingAgreements lists only typed Agreement promotion events so they
+	// never enter the ordinary chat/model inbox.
+	OpPendingAgreements Operation = "agreements.pending"
+	// OpClaimAgreement atomically leases one typed Agreement event.
+	OpClaimAgreement Operation = "agreements.claim"
+	// OpPendingPrivateHandoffs lists only typed private-handoff control events;
+	// they never enter the ordinary chat/model inbox.
+	OpPendingPrivateHandoffs Operation = "private-handoffs.pending"
+	// OpClaimPrivateHandoff atomically leases one private-handoff control event.
+	OpClaimPrivateHandoff Operation = "private-handoffs.claim"
 	// OpComplete records that the runtime accepted an event.
 	OpComplete Operation = "inbox.complete"
 	// OpReject records that the runtime refused one.
@@ -97,6 +110,13 @@ const (
 	// OpSendDirectApplication carries one daemon-wrapped, established-direct
 	// private application object. V1 restricts this surface to Agent Gifts.
 	OpSendDirectApplication Operation = "messages.send-direct-application"
+	// OpEconomicSendDirect is the only autonomous economic messaging surface.
+	// It carries an independently verifiable action/fence envelope and the
+	// exact canonical Messenger effect rather than route or session authority.
+	OpEconomicSendDirect Operation = "economic.messages.send-direct"
+	// OpEconomicActionStatus recovers a prior ambiguous send by the same stable
+	// semantic ID and exact request digest; it never creates a new action.
+	OpEconomicActionStatus Operation = "economic.actions.status"
 	// OpReplyDirect derives all addressing from an authenticated inbound Event.
 	OpReplyDirect Operation = "messages.reply-direct"
 	// OpPendingAttachments lists only opaque metadata for encrypted attachment
@@ -201,9 +221,9 @@ const (
 
 var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
-		OpPending: {}, OpClaim: {}, OpPendingAgentGifts: {}, OpClaimAgentGift: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
+		OpPending: {}, OpClaim: {}, OpPendingAgentGifts: {}, OpClaimAgentGift: {}, OpPendingAgreements: {}, OpClaimAgreement: {}, OpPendingPrivateHandoffs: {}, OpClaimPrivateHandoff: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 		OpResolveContact: {}, OpEnsureDirectConversation: {},
-		OpSendDirect: {}, OpSendDirectApplication: {}, OpReplyDirect: {},
+		OpSendDirect: {}, OpSendDirectApplication: {}, OpEconomicSendDirect: {}, OpEconomicActionStatus: {}, OpReplyDirect: {},
 		OpPendingAttachments: {}, OpClaimAttachment: {},
 		OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
@@ -232,9 +252,9 @@ func Permits(principal Principal, operation Operation) bool {
 }
 
 var operations = map[Operation]struct{}{
-	OpPending: {}, OpClaim: {}, OpPendingAgentGifts: {}, OpClaimAgentGift: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
+	OpPending: {}, OpClaim: {}, OpPendingAgentGifts: {}, OpClaimAgentGift: {}, OpPendingAgreements: {}, OpClaimAgreement: {}, OpPendingPrivateHandoffs: {}, OpClaimPrivateHandoff: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 	OpResolveContact: {}, OpEnsureDirectConversation: {},
-	OpSendDirect: {}, OpSendDirectApplication: {}, OpReplyDirect: {},
+	OpSendDirect: {}, OpSendDirectApplication: {}, OpEconomicSendDirect: {}, OpEconomicActionStatus: {}, OpReplyDirect: {},
 	OpPendingAttachments: {}, OpClaimAttachment: {},
 	OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 	OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
@@ -250,22 +270,23 @@ var operations = map[Operation]struct{}{
 }
 
 var (
-	eventPattern        = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
-	leasePattern        = regexp.MustCompile(`^lease_[0-9a-f]{64}$`)
-	sessionPattern      = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
-	endpointPattern     = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
-	actionPattern       = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
-	idempotencyPattern  = regexp.MustCompile(`^idem_[0-9a-f]{64}$`)
-	conversationPattern = regexp.MustCompile(`^conv_[0-9a-f]{64}$`)
-	roomPattern         = regexp.MustCompile(`^room_[0-9a-f]{64}$`)
-	mandatePattern      = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
-	agentPattern        = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
-	devicePattern       = regexp.MustCompile(`^dev_[0-9a-f]{64}$`)
-	challengePattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	quotePattern        = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
-	uploadPattern       = regexp.MustCompile(`^attup_[0-9a-f]{64}$`)
-	capabilityPattern   = regexp.MustCompile(`^cap_[0-9a-f]{64}$`)
-	physicalNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+	eventPattern           = regexp.MustCompile(`^evt_[0-9a-f]{64}$`)
+	leasePattern           = regexp.MustCompile(`^lease_[0-9a-f]{64}$`)
+	sessionPattern         = regexp.MustCompile(`^ses_[0-9a-f]{64}$`)
+	endpointPattern        = regexp.MustCompile(`^mep_[0-9a-f]{64}$`)
+	actionPattern          = regexp.MustCompile(`^act_[0-9a-f]{64}$`)
+	idempotencyPattern     = regexp.MustCompile(`^idem_[0-9a-f]{64}$`)
+	conversationPattern    = regexp.MustCompile(`^conv_[0-9a-f]{64}$`)
+	roomPattern            = regexp.MustCompile(`^room_[0-9a-f]{64}$`)
+	mandatePattern         = regexp.MustCompile(`^mdt_[0-9a-f]{64}$`)
+	agentPattern           = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
+	devicePattern          = regexp.MustCompile(`^dev_[0-9a-f]{64}$`)
+	challengePattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	quotePattern           = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
+	uploadPattern          = regexp.MustCompile(`^attup_[0-9a-f]{64}$`)
+	capabilityPattern      = regexp.MustCompile(`^cap_[0-9a-f]{64}$`)
+	physicalNamePattern    = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+	canonicalDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 // Request is one call over the local socket.
@@ -306,6 +327,16 @@ type Request struct {
 	ProtocolBody     []byte `json:"protocol_body_base64,omitempty"`
 	ApplicationKind  string `json:"application_kind,omitempty"`
 	ApplicationBody  []byte `json:"application_body_base64,omitempty"`
+
+	// Economic fields exist only on the v13 economic operations. The daemon
+	// derives the stable ID again and decodes ExactEconomicRequest to obtain the
+	// actual message; none of these bytes are trusted as routing authority.
+	EconomicAction        *commerce.AuthorizedAction    `json:"economic_action,omitempty"`
+	EconomicWriterFence   *commerce.WriterFence         `json:"economic_writer_fence,omitempty"`
+	EconomicFields        []commerce.SemanticFieldValue `json:"economic_semantic_fields,omitempty"`
+	ExactEconomicRequest  []byte                        `json:"exact_economic_request_base64,omitempty"`
+	EconomicStableID      string                        `json:"economic_stable_action_id,omitempty"`
+	EconomicRequestDigest string                        `json:"economic_request_digest,omitempty"`
 
 	// Action is one proposed action, for the firewall operations. It is the
 	// action itself rather than an identifier, because the identifier is
@@ -536,8 +567,9 @@ type Response struct {
 	CanonicalName string `json:"canonical_name,omitempty"`
 	// ConversationID and Readiness are returned only by the daemon-owned direct
 	// conversation ensure operation. Readiness is not delivery confirmation.
-	ConversationID string `json:"conversation_id,omitempty"`
-	Readiness      string `json:"readiness,omitempty"`
+	ConversationID     string                     `json:"conversation_id,omitempty"`
+	Readiness          string                     `json:"readiness,omitempty"`
+	EconomicResolution *commerce.ActionResolution `json:"economic_resolution,omitempty"`
 
 	// Actions lists decisions waiting for the owner.
 	Actions []WaitingAction `json:"actions,omitempty"`
@@ -623,15 +655,21 @@ func DecodeRequest(raw []byte) (Request, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Request{}, errors.New("request has trailing JSON")
 	}
-	if request.Schema != RequestSchema && request.Schema != RequestSchemaV11 && request.Schema != RequestSchemaV10 && request.Schema != RequestSchemaV9 && request.Schema != RequestSchemaV8 &&
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV13 && request.Schema != RequestSchemaV12 && request.Schema != RequestSchemaV11 && request.Schema != RequestSchemaV10 && request.Schema != RequestSchemaV9 && request.Schema != RequestSchemaV8 &&
 		request.Schema != RequestSchemaV7 && request.Schema != RequestSchemaV6 {
 		return Request{}, errors.New("unsupported request schema")
 	}
-	if request.Schema != RequestSchema && request.Schema != RequestSchemaV11 && request.Op == OpSendDirectApplication {
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV13 && request.Schema != RequestSchemaV12 && request.Schema != RequestSchemaV11 && request.Op == OpSendDirectApplication {
 		return Request{}, errors.New("direct application sending requires local request v11")
 	}
-	if request.Schema != RequestSchema && (request.Op == OpPendingAgentGifts || request.Op == OpClaimAgentGift) {
-		return Request{}, errors.New("Agent Gift inbox operations require local request v12")
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV13 && request.Schema != RequestSchemaV12 && (request.Op == OpPendingAgentGifts || request.Op == OpClaimAgentGift || request.Op == OpPendingAgreements || request.Op == OpClaimAgreement) {
+		return Request{}, errors.New("typed economic inbox operations require local request v12")
+	}
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV13 && (request.Op == OpEconomicSendDirect || request.Op == OpEconomicActionStatus) {
+		return Request{}, errors.New("economic side-effect operations require local request v13")
+	}
+	if request.Schema != RequestSchema && (request.Op == OpPendingPrivateHandoffs || request.Op == OpClaimPrivateHandoff) {
+		return Request{}, errors.New("private handoff inbox operations require local request v14")
 	}
 	if err := ValidateRequest(request); err != nil {
 		return Request{}, err
@@ -709,6 +747,11 @@ func ValidateRequest(request Request) error {
 	} else if request.Challenge != "" || request.OwnerSignature != "" {
 		return errors.New("only an owner decision carries a challenge and a signature")
 	}
+	if request.Op != OpEconomicSendDirect && request.Op != OpEconomicActionStatus &&
+		(request.EconomicAction != nil || request.EconomicWriterFence != nil || len(request.EconomicFields) != 0 ||
+			len(request.ExactEconomicRequest) != 0 || request.EconomicStableID != "" || request.EconomicRequestDigest != "") {
+		return errors.New("only economic operations carry economic authorization")
+	}
 	if request.Op != OpCreateAdmissionInvite &&
 		(request.InvitedAgentID != "" || request.InviteExpiresAtUnix != 0) {
 		return errors.New("only admission invite creation carries invite terms")
@@ -764,6 +807,27 @@ func ValidateRequest(request Request) error {
 		return errors.New("only device-history export carries history terms")
 	}
 	switch request.Op {
+	case OpEconomicSendDirect:
+		if request.EconomicAction == nil || request.EconomicWriterFence == nil || len(request.EconomicFields) == 0 ||
+			len(request.ExactEconomicRequest) == 0 || len(request.ExactEconomicRequest) > commerce.MaxActionRequestBytes ||
+			request.EconomicStableID != "" || request.EconomicRequestDigest != "" {
+			return errors.New("an economic send needs one complete authorization envelope")
+		}
+		if _, err := commerce.ImportSemanticFields(request.EconomicAction.ActionKind, request.EconomicFields); err != nil {
+			return err
+		}
+		if _, err := commerce.DecodeMessengerEffectRequest(request.ExactEconomicRequest); err != nil {
+			return err
+		}
+		return requireEmpty(request, "an economic send", request.EventID, request.LeaseID, request.SessionID,
+			request.Recipient, request.MediaType, request.Body, request.ApplicationKind, request.IdempotencyKey)
+	case OpEconomicActionStatus:
+		if request.EconomicAction != nil || request.EconomicWriterFence != nil || len(request.EconomicFields) != 0 ||
+			len(request.ExactEconomicRequest) != 0 || !canonicalDigestPattern.MatchString(request.EconomicStableID) ||
+			!canonicalDigestPattern.MatchString(request.EconomicRequestDigest) {
+			return errors.New("economic action status needs one stable ID and exact request digest")
+		}
+		return requireEmpty(request, "an economic action status", request.EventID, request.LeaseID, request.SessionID)
 	case OpReplyDirect:
 		if !eventPattern.MatchString(request.ReplyToEventID) || request.MediaType == "" || request.Body == "" ||
 			!idempotencyPattern.MatchString(request.IdempotencyKey) || request.ExpiresAtUnix == 0 {
@@ -789,11 +853,14 @@ func ValidateRequest(request Request) error {
 	case OpSendDirectApplication:
 		if request.Recipient == "" || len(request.Recipient) > 255 ||
 			!idempotencyPattern.MatchString(request.IdempotencyKey) || request.ExpiresAtUnix == 0 ||
-			len(request.ApplicationBody) == 0 || len(request.ApplicationBody) > payload.MaxGiftCanonicalBytes {
+			len(request.ApplicationBody) == 0 || len(request.ApplicationBody) > payload.MaxAgreementPromotionBytes {
 			return errors.New("a direct application send needs recipient, bounded object, expiry and idempotency")
 		}
 		switch request.ApplicationKind {
 		case "agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer":
+			if len(request.ApplicationBody) > payload.MaxGiftCanonicalBytes {
+				return errors.New("Agent Gift application is oversized")
+			}
 		default:
 			return errors.New("unsupported direct application kind")
 		}
@@ -811,12 +878,12 @@ func ValidateRequest(request Request) error {
 			return errors.New("recipient resolution cannot carry route or control fields")
 		}
 		return requireEmpty(request, "recipient resolution", request.EventID, request.LeaseID, request.SessionID)
-	case OpPending, OpPendingAgentGifts, OpAwaitingAdmission, OpPendingAttachments:
+	case OpPending, OpPendingAgentGifts, OpPendingAgreements, OpPendingPrivateHandoffs, OpAwaitingAdmission, OpPendingAttachments:
 		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
 			return errors.New("invalid pending limit")
 		}
 		return requireEmpty(request, "a listing", request.EventID, request.LeaseID, request.SessionID)
-	case OpClaim, OpClaimAgentGift, OpClaimAttachment:
+	case OpClaim, OpClaimAgentGift, OpClaimAgreement, OpClaimPrivateHandoff, OpClaimAttachment:
 		if !eventPattern.MatchString(request.EventID) || !leasePattern.MatchString(request.LeaseID) {
 			return errors.New("a claim needs an event and a lease")
 		}

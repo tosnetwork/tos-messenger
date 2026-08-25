@@ -2,7 +2,10 @@ package payload
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"strings"
 	"testing"
@@ -10,6 +13,8 @@ import (
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/pkg/attachments"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
+	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
+	protocolcodec "github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 // sample is a valid body for every kind, so the round trip is exercised over
@@ -51,6 +56,79 @@ func sample(kind string) Payload {
 		return NegotiationIntentAccept{NegotiationID: "neg-1", Terms: sampleTerms()}
 	case "negotiation.intent.reject":
 		return NegotiationIntentReject{NegotiationID: "neg-1", Reason: "above budget"}
+	case "intent.application":
+		canonical, _ := commerce.CanonicalIntentApplication(commerce.IntentApplication{SchemaVersion: 1,
+			IntentDigest: "sha256:" + strings.Repeat("9", 64), IntentIssuerAgentID: "agent:issuer", ApplicantAgentID: "agent:applicant",
+			Message: "I can perform this bounded task.", ExpiresAtUnix: 1_800_000_000})
+		return IntentApplication{CanonicalApplication: canonical}
+	case "agreement.propose":
+		body, canonical := sampleAgreementBody()
+		digest, _ := commerce.AgreementBodyDigest(body)
+		return AgreementPropose{AgreementBodyDigest: digest, CanonicalBody: canonical}
+	case "agreement.accept":
+		body, _ := sampleAgreementBody()
+		digest, _ := commerce.AgreementBodyDigest(body)
+		acceptance, _ := commerce.SignAgreementAcceptance(commerce.AgreementAcceptanceBody{AgreementID: body.AgreementID,
+			AgreementVersion: body.Version, AgreementBodyDigest: digest, AcceptingSubject: body.AuthorizationPredicates[0].AuthoritySubject,
+			AcceptedRoles: []string{"provider"}, PredicateIDs: []string{"predicate:provider"},
+			EvidenceTargetProjectionDigests: []string{body.AuthorizationPredicates[0].EvidenceTargetProjectionDigest}, ExpiresAtUnix: body.ExpiresAtUnix},
+			ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x61}, ed25519.SeedSize)))
+		canonical, _ := commerce.EncodeSignedAgreementAcceptance(acceptance)
+		return AgreementAccept{AgreementBodyDigest: digest, CanonicalAcceptance: canonical}
+	case "agreement.evidence":
+		body, _ := sampleAgreementBody()
+		digest, _ := commerce.AgreementBodyDigest(body)
+		acceptance, _ := commerce.SignAgreementAcceptance(commerce.AgreementAcceptanceBody{AgreementID: body.AgreementID,
+			AgreementVersion: body.Version, AgreementBodyDigest: digest, AcceptingSubject: body.AuthorizationPredicates[0].AuthoritySubject,
+			AcceptedRoles: []string{"provider"}, PredicateIDs: []string{"predicate:provider"},
+			EvidenceTargetProjectionDigests: []string{body.AuthorizationPredicates[0].EvidenceTargetProjectionDigest}, ExpiresAtUnix: body.ExpiresAtUnix},
+			ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x61}, ed25519.SeedSize)))
+		evidence, _ := commerce.AgentSignatureEvidence(body, acceptance)
+		canonical, _ := protocolcodec.Marshal(evidence)
+		evidenceDigest, _ := protocolcodec.Digest("tos.agreement-authorization-evidence.v1", evidence)
+		return AgreementEvidence{AgreementBodyDigest: digest, EvidenceDigest: evidenceDigest, CanonicalEvidence: canonical}
+	case "agreement.provider-offer":
+		offer := samplePaidDemandProviderOffer()
+		canonical, _ := protocolcodec.Marshal(offer)
+		digest, _ := commerce.ProviderOfferDigest(offer)
+		return PaidDemandProviderOffer{AgreementBodyDigest: offer.Binding.AgreementBodyDigest,
+			ProviderOfferDigest: digest, CanonicalOffer: canonical}
+	case "agreement.withdraw":
+		return AgreementWithdraw{AgreementBodyDigest: "sha256:" + strings.Repeat("a", 64), ProposalActionID: "sha256:" + strings.Repeat("b", 64), Reason: "terms changed"}
+	case "agreement.delivery":
+		return AgreementDelivery{AgreementBodyDigest: "sha256:" + strings.Repeat("a", 64), ObligationID: "deliverable:report",
+			DeliverableManifestDigest: "sha256:" + strings.Repeat("c", 64)}
+	case "private.handoff.challenge":
+		challenge, _, _ := samplePrivateHandoff()
+		canonical, _ := protocolcodec.Marshal(challenge)
+		digest, _ := commerce.PrivateHandoffChallengeDigest(challenge.Body)
+		return PrivateHandoffChallenge{ChallengeDigest: digest, CanonicalChallenge: canonical}
+	case "private.handoff.authorization":
+		challenge, authorization, _ := samplePrivateHandoff()
+		canonical, _ := protocolcodec.Marshal(authorization)
+		challengeDigest, _ := commerce.PrivateHandoffChallengeDigest(challenge.Body)
+		authorizationDigest, _ := commerce.PrivateHandoffAuthorizationDigest(authorization.Body)
+		return PrivateHandoffAuthorization{ChallengeDigest: challengeDigest, AuthorizationDigest: authorizationDigest, CanonicalAuthorization: canonical}
+	case "private.handoff.acknowledgement":
+		challenge, authorization, receiverKey := samplePrivateHandoff()
+		challengeDigest, _ := commerce.PrivateHandoffChallengeDigest(challenge.Body)
+		authorizationDigest, _ := commerce.PrivateHandoffAuthorizationDigest(authorization.Body)
+		manifestDigest, _ := protocolcodec.Digest("tos.private-content-manifest.v1", authorization.Body.Manifest)
+		record := commerce.AcceptedPrivateContentRecord{SchemaVersion: 1, HandoffID: challenge.Body.HandoffID, ChallengeDigest: challengeDigest,
+			AuthorizationDigest: authorizationDigest, UploadActionID: "sha256:" + strings.Repeat("d", 64),
+			SenderDisclosureActionID: authorization.Body.SenderDisclosureActionID, ContentDigest: authorization.Body.Manifest.ContentDigest,
+			ContentManifestDigest: manifestDigest,
+			PlaintextBytes:        authorization.Body.Manifest.PlaintextBytes, ImmutableObjectDigest: authorization.Body.Manifest.ContentDigest,
+			RetentionPolicyDigest: challenge.Body.RetentionPolicyDigest, AcceptedAtUnix: challenge.Body.IssuedAtUnix, DeleteNotAfterUnix: challenge.Body.ExpiresAtUnix}
+		ack, _ := commerce.SignPrivateHandoffAcknowledgement(record, challenge.Body.ReceiverAgentID, receiverKey)
+		canonical, _ := protocolcodec.Marshal(ack)
+		digest, _ := commerce.PrivateHandoffAcknowledgementDigest(ack)
+		return PrivateHandoffAcknowledgement{ChallengeDigest: challengeDigest, AcknowledgementDigest: digest, CanonicalAcknowledgement: canonical}
+	case "private.handoff.status":
+		return PrivateHandoffStatus{HandoffID: "handoff:test", ActionID: "sha256:" + strings.Repeat("a", 64), State: "accepted", EvidenceDigest: "sha256:" + strings.Repeat("b", 64)}
+	case "private.handoff.delete":
+		return PrivateHandoffDelete{HandoffID: "handoff:test", ContentManifestDigest: "sha256:" + strings.Repeat("a", 64),
+			RetentionPolicyDigest: "sha256:" + strings.Repeat("b", 64), DeleteActionID: "sha256:" + strings.Repeat("c", 64)}
 	case "counterparty.approval.request":
 		return CounterpartyApprovalRequest{ApprovalID: "ap-1", Subject: "spend"}
 	case "counterparty.approval.granted":
@@ -150,6 +228,86 @@ func sample(kind string) Payload {
 			DecisionRevision: 1, Action: "hide", Reason: "off topic"}
 	}
 	return nil
+}
+
+func samplePaidDemandProviderOffer() commerce.SignedProviderOffer {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x72}, ed25519.SeedSize))
+	digest := func(octet string) string { return "sha256:" + strings.Repeat(octet, 64) }
+	binding := commerce.PaidDemandQuoteBindingBody{SchemaVersion: 1, NetworkContext: "tos:test",
+		AgreementBodyDigest: digest("1"), AgreementObligationIDs: []string{"pay", "work"},
+		AgreementAuthorizationPredicateIDs:  []string{"buyer", "provider"},
+		AgreementAuthorizationTargetDigests: []string{digest("2"), digest("3")},
+		EvidenceProfileURI:                  commerce.EvidenceProfilePaidDemandQuote, EvidenceProfileVersion: 1,
+		EvidenceProfileDigest: commerce.PaidDemandQuoteProfileDigest(), DemandMutationDigest: digest("4"),
+		ProviderOfferID: "offer:test", ProviderAgentID: "agent:provider", BuyerAgentID: "agent:buyer",
+		BuyerWallet: "0:" + strings.Repeat("5", 64), ProviderWallet: "0:" + strings.Repeat("6", 64),
+		NativeQuoteTermsProjectionDigest: "tvm-cell-sha256:" + strings.Repeat("7", 64), AcceptByUnix: 1_800_000_000}
+	context := commerce.ProviderProofContext{SchemaVersion: 1, NetworkContext: binding.NetworkContext,
+		ProviderAgentID: binding.ProviderAgentID, Purpose: "provider-offer.sign",
+		PublicKey: "ed25519:" + hex.EncodeToString(key.Public().(ed25519.PublicKey)), AgentGeneration: 1,
+		ControllerPolicyDigest: digest("8"), DelegationDigest: digest("9"), ScopeBoundsDigest: digest("a"),
+		OwnerMandateDigest: digest("b"), IssuanceAuthorityReferenceDigest: digest("c"),
+		ValidFromUnix: 1_700_000_000, ExpiresAtUnix: binding.AcceptByUnix}
+	offer, _ := commerce.SignProviderOffer(binding, context, key)
+	return offer
+}
+
+func samplePrivateHandoff() (commerce.SignedPrivateHandoffChallenge, commerce.SignedPrivateHandoffAuthorization, ed25519.PrivateKey) {
+	digest := func(value string) string {
+		hash := sha256.Sum256([]byte(value))
+		return "sha256:" + hex.EncodeToString(hash[:])
+	}
+	receiverSigning := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x31}, ed25519.SeedSize))
+	senderSigning := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x32}, ed25519.SeedSize))
+	receiverEncryption, err := ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{0x33}, 32))
+	if err != nil {
+		panic(err)
+	}
+	challenge, err := commerce.SignPrivateHandoffChallenge(commerce.PrivateHandoffChallengeBody{SchemaVersion: 1,
+		HandoffID: "handoff:test", AgreementBodyDigest: digest("agreement"), ObligationID: "obligation:input", SenderAgentID: "agent:sender",
+		ReceiverAgentID: "agent:receiver", Direction: "input", PurposeDigest: digest("purpose"), IngressProfileURI: "tos.private-ingress.v1",
+		IngressInstanceID: "ingress:test", ReceiverEncryptionPublicKey: base64.RawURLEncoding.EncodeToString(receiverEncryption.PublicKey().Bytes()),
+		MaximumPlaintextBytes: 1024, MaximumCiphertextBytes: 1040, MaximumFiles: 1, AcceptedMediaTypes: []string{"application/octet-stream"},
+		RetentionPolicyDigest: digest("retention"), IssuedAtUnix: 1_700_000_000, ExpiresAtUnix: 1_700_003_600,
+		DeleteNotAfterUnix: 1_700_086_400}, receiverSigning)
+	if err != nil {
+		panic(err)
+	}
+	plaintext := []byte("private input")
+	plainHash := sha256.Sum256(plaintext)
+	manifest := commerce.PrivateContentManifest{ContentDigest: "sha256:" + hex.EncodeToString(plainHash[:]), MediaType: "application/octet-stream",
+		FileCount: 1, CanonicalPaths: []string{"input.bin"}, PlaintextBytes: uint64(len(plaintext)), MaximumExpandedBytes: uint64(len(plaintext)),
+		CompressionProfileURI: "tos.compression.none.v1"}
+	authorizationID := digest("content-upload-action")
+	_, authorization, err := commerce.SealPrivateContent(challenge, manifest, plaintext, authorizationID, senderSigning)
+	if err != nil {
+		panic(err)
+	}
+	return challenge, authorization, receiverSigning
+}
+
+func sampleAgreementBody() (commerce.AgentAgreementBody, []byte) {
+	profileDigest := commerce.AgentSignatureProfileDigest()
+	body := commerce.AgentAgreementBody{SchemaVersion: 1, AgreementID: "agreement:test", Version: 1, NetworkContext: "tos:testnet",
+		Participants: []commerce.AgreementParticipant{{AgentID: "agent:buyer", Roles: []string{"buyer"}}, {AgentID: "agent:test", Roles: []string{"provider"}}}, TermsContentType: "text/plain",
+		Terms: []byte("perform a bounded task"), Obligations: []commerce.AgreementObligation{{ObligationID: "deliverable:1", Kind: "deliverable",
+			ObligorAgentID: "agent:test", SubjectContentType: "text/plain", Subject: []byte("result"), ConfidentialityPolicy: "participants",
+			CancellationPolicy: "before-start", DisputePolicy: "manual", AuthorizationPredicateIDs: []string{"predicate:provider"}}},
+		AuthorizationPredicates: []commerce.AgreementAuthorizationPredicate{{PredicateID: "predicate:provider",
+			AuthoritySubject: commerce.AgreementAuthoritySubject{SubjectKind: "agent", SubjectNamespace: "tos.agent", SubjectIdentifier: "agent:test"},
+			RoleScope:        []string{"provider"}, ObligationIDs: []string{"deliverable:1"}, EvidenceProfileURI: commerce.EvidenceProfileAgentSignature,
+			EvidenceProfileVersion: 1, EvidenceProfileDigest: profileDigest, ExpiresAtUnix: 1_800_000_000}},
+		ValidFromUnix: 1_700_000_000, ExpiresAtUnix: 1_800_000_000}
+	var err error
+	body, err = commerce.PrepareAgreementTargets(body)
+	if err != nil {
+		panic(err)
+	}
+	canonical, err := protocolcodec.Marshal(body)
+	if err != nil {
+		panic(err)
+	}
+	return body, canonical
 }
 
 func sampleTerms() negotiation.Terms {

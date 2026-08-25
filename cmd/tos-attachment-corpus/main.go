@@ -18,10 +18,10 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
+	"github.com/tosnetwork/tos-messenger/internal/osguard"
 	"github.com/tosnetwork/tos-messenger/internal/securefile"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentcorpus"
 	"github.com/tosnetwork/tos-messenger/pkg/attachments"
@@ -463,22 +463,10 @@ func protectedMode(info os.FileInfo, secret bool) bool {
 	if info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return false
 	}
-	stat, ok := infoSys(info)
-	if !ok {
-		return false
-	}
 	if secret {
-		return stat.Uid == uint32(os.Geteuid()) && info.Mode().Perm() == 0o600
+		return osguard.CurrentUserOwns(info) && info.Mode().Perm() == 0o600
 	}
 	return info.Mode().Perm()&0o022 == 0
-}
-
-func infoSys(info os.FileInfo) (*syscall.Stat_t, bool) {
-	if info == nil {
-		return nil, false
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return stat, ok
 }
 
 func clear(value []byte) {

@@ -83,6 +83,22 @@ var eventKinds = map[string]kindSpec{
 	"negotiation.intent.accept":   {class: "negotiation"},
 	"negotiation.intent.reject":   {class: "negotiation"},
 
+	// Agreement promotion is explicit and typed. Ordinary negotiation or text
+	// events never inherit this class and cannot create authorization evidence.
+	"agreement.propose":        {class: "agreement"},
+	"intent.application":       {class: "negotiation"},
+	"agreement.accept":         {class: "agreement"},
+	"agreement.evidence":       {class: "agreement"},
+	"agreement.withdraw":       {class: "agreement"},
+	"agreement.delivery":       {class: "agreement.delivery"},
+	"agreement.provider-offer": {class: "agreement"},
+
+	"private.handoff.challenge":       {class: "private.handoff"},
+	"private.handoff.authorization":   {class: "private.handoff"},
+	"private.handoff.acknowledgement": {class: "private.handoff"},
+	"private.handoff.status":          {class: "private.handoff"},
+	"private.handoff.delete":          {class: "private.handoff"},
+
 	// What the other party says it decided.
 	"counterparty.approval.request": {class: "counterparty.approval"},
 	"counterparty.approval.granted": {class: "counterparty.approval"},
@@ -213,7 +229,11 @@ func LocalOnly(kind string) bool {
 // authenticated direct E2EE conversation.
 func RequiresEstablishedDirect(kind string) bool {
 	switch kind {
-	case "agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer":
+	case "agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer",
+		"agreement.propose", "agreement.accept", "agreement.evidence", "agreement.withdraw", "agreement.delivery",
+		"agreement.provider-offer",
+		"private.handoff.challenge", "private.handoff.authorization", "private.handoff.acknowledgement",
+		"private.handoff.status", "private.handoff.delete":
 		return true
 	default:
 		return false

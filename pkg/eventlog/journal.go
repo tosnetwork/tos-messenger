@@ -589,7 +589,7 @@ func (j *Journal) ClaimForApplicationKind(eventID, leaseID string, now time.Time
 // that own several related application kinds without exposing other inbox
 // traffic through their dedicated claim operation.
 func (j *Journal) ClaimForApplicationKinds(eventID, leaseID string, now time.Time, lease time.Duration, kinds []string) (Record, error) {
-	if len(kinds) == 0 || len(kinds) > 16 {
+	if len(kinds) == 0 || len(kinds) > 32 {
 		return Record{}, errors.New("allowed application event kinds are required and bounded")
 	}
 	allowed := make(map[string]struct{}, len(kinds))
@@ -617,7 +617,7 @@ func (j *Journal) ClaimForApplicationExceptKind(eventID, leaseID string, now tim
 // ClaimForApplicationExceptKinds atomically excludes every daemon-owned typed
 // adapter from the general runtime claim path.
 func (j *Journal) ClaimForApplicationExceptKinds(eventID, leaseID string, now time.Time, lease time.Duration, kinds []string) (Record, error) {
-	if len(kinds) == 0 || len(kinds) > 16 {
+	if len(kinds) == 0 || len(kinds) > 32 {
 		return Record{}, errors.New("excluded application event kinds are required and bounded")
 	}
 	excluded := make(map[string]struct{}, len(kinds))
