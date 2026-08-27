@@ -274,6 +274,10 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.pendingPrivateHandoffs(request, now)
 	case OpClaimPrivateHandoff:
 		return s.claimPrivateHandoff(request, now)
+	case OpPendingCommerceProfileEvents:
+		return s.pendingCommerceProfileEvents(request, now)
+	case OpClaimCommerceProfileEvent:
+		return s.claimCommerceProfileEvent(request, now)
 	case OpComplete:
 		return s.complete(request, now)
 	case OpReject:
@@ -420,7 +424,8 @@ func economicKindMatchesEffect(actionKind, eventKind string) bool {
 		return eventKind == "text" || eventKind == "intent.application"
 	case "messenger.send":
 		return eventKind == "text" || eventKind == "private.handoff.challenge" ||
-			eventKind == "private.handoff.acknowledgement" || eventKind == "private.handoff.status" || eventKind == "private.handoff.delete"
+			eventKind == "private.handoff.acknowledgement" || eventKind == "private.handoff.status" ||
+			eventKind == "private.handoff.delete" || eventKind == "commerce.profile-event"
 	case "agreement.propose":
 		return eventKind == "agreement.propose"
 	case "agreement.authorize":
@@ -653,7 +658,7 @@ func (s *Server) claim(request Request, now time.Time) Response {
 		[]string{"agent.packet", "device.history.segment", "artifact.encrypted", "a2a.message", "mcp.call", "mcp.result",
 			"agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer",
 			"intent.application", "agreement.propose", "agreement.accept", "agreement.evidence", "agreement.withdraw", "agreement.delivery",
-			"agreement.provider-offer",
+			"agreement.provider-offer", "commerce.profile-event",
 			"private.handoff.challenge", "private.handoff.authorization", "private.handoff.acknowledgement", "private.handoff.status", "private.handoff.delete"})
 	if err != nil {
 		return refuse(claimCode(err), err)
@@ -788,9 +793,50 @@ func (s *Server) claimPrivateHandoff(request Request, now time.Time) Response {
 	return Response{OK: true, Event: &event}
 }
 
+func (s *Server) pendingCommerceProfileEvents(request Request, now time.Time) Response {
+	limit := request.Limit
+	if limit == 0 || limit > MaxEventsPerResponse {
+		limit = MaxEventsPerResponse
+	}
+	records, err := s.config.Journal.ListPending(now, 0)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	events := make([]PendingEvent, 0, limit)
+	for _, record := range records {
+		event, eventErr := pendingEvent(record)
+		if eventErr != nil {
+			continue
+		}
+		decoded, decodeErr := envelope.DecodeEventJSON(event.Event)
+		if decodeErr != nil || decoded.Kind != "commerce.profile-event" {
+			continue
+		}
+		events = append(events, event)
+		if len(events) == limit {
+			break
+		}
+	}
+	return Response{OK: true, Events: events}
+}
+
+func (s *Server) claimCommerceProfileEvent(request Request, now time.Time) Response {
+	record, err := s.config.Journal.ClaimForApplicationKind(request.EventID, request.LeaseID, now,
+		time.Duration(request.LeaseSeconds)*time.Second, "commerce.profile-event")
+	if err != nil {
+		return refuse(claimCode(err), err)
+	}
+	event, err := pendingEvent(record)
+	if err != nil {
+		return refuse(fault.CodeInternal, err)
+	}
+	return Response{OK: true, Event: &event}
+}
+
 func daemonApplicationKind(kind string) bool {
 	return kind == "agent.packet" || kind == "device.history.segment" || kind == "artifact.encrypted" ||
-		kind == "a2a.message" || kind == "mcp.call" || kind == "mcp.result" || agentGiftApplicationKind(kind) || agreementApplicationKind(kind) || privateHandoffApplicationKind(kind)
+		kind == "a2a.message" || kind == "mcp.call" || kind == "mcp.result" || kind == "commerce.profile-event" ||
+		agentGiftApplicationKind(kind) || agreementApplicationKind(kind) || privateHandoffApplicationKind(kind)
 }
 
 func agentGiftApplicationKind(kind string) bool {

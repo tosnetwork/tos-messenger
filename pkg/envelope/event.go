@@ -93,6 +93,9 @@ var eventKinds = map[string]kindSpec{
 	"agreement.delivery":       {class: "agreement.delivery"},
 	"agreement.provider-offer": {class: "agreement"},
 
+	// Profile-qualified economic objects are data, not model text or authority.
+	"commerce.profile-event": {class: "commerce.profile"},
+
 	"private.handoff.challenge":       {class: "private.handoff"},
 	"private.handoff.authorization":   {class: "private.handoff"},
 	"private.handoff.acknowledgement": {class: "private.handoff"},

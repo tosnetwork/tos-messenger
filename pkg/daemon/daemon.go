@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -243,6 +244,18 @@ func (d *Daemon) SendDirectApplication(ctx context.Context, input, kind string, 
 		}
 		value = payload.PaidDemandProviderOffer{AgreementBodyDigest: offer.Binding.AgreementBodyDigest,
 			ProviderOfferDigest: digest, CanonicalOffer: canonical}
+	case "commerce.profile-event":
+		var event commerce.CommerceProfileEventV1
+		if err := protocolcodec.Unmarshal(canonical, &event); err != nil || event.CreatedAtUnix == 0 ||
+			event.CreatedAtUnix > math.MaxInt64 {
+			return localapi.DirectMessageResult{}, errors.New("invalid commerce profile event")
+		}
+		canonicalEvent, err := commerce.CanonicalCommerceProfileEventV1(event,
+			time.Unix(int64(event.CreatedAtUnix), 0).UTC())
+		if err != nil || !bytes.Equal(canonicalEvent, canonical) {
+			return localapi.DirectMessageResult{}, errors.New("commerce profile event is not canonical")
+		}
+		value = payload.CommerceProfileEvent{ObjectDigest: event.ObjectDigest, CanonicalEvent: canonical}
 	case "agreement.withdraw", "agreement.delivery", "private.handoff.status", "private.handoff.delete":
 		decoded, err := payload.Decode(kind, canonical)
 		if err != nil {

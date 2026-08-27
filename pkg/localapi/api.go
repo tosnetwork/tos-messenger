@@ -34,7 +34,8 @@ import (
 
 const (
 	// RequestSchema is the strict wire schema of a request.
-	RequestSchema    = "tos.messaging.local-request.v14"
+	RequestSchema    = "tos.messaging.local-request.v15"
+	RequestSchemaV14 = "tos.messaging.local-request.v14"
 	RequestSchemaV13 = "tos.messaging.local-request.v13"
 	RequestSchemaV12 = "tos.messaging.local-request.v12"
 	RequestSchemaV11 = "tos.messaging.local-request.v11"
@@ -84,6 +85,11 @@ const (
 	OpPendingPrivateHandoffs Operation = "private-handoffs.pending"
 	// OpClaimPrivateHandoff atomically leases one private-handoff control event.
 	OpClaimPrivateHandoff Operation = "private-handoffs.claim"
+	// OpPendingCommerceProfileEvents lists generic profile-qualified economic
+	// events. They are isolated from ordinary chat and model ingestion.
+	OpPendingCommerceProfileEvents Operation = "commerce-profile-events.pending"
+	// OpClaimCommerceProfileEvent atomically leases one such typed event.
+	OpClaimCommerceProfileEvent Operation = "commerce-profile-events.claim"
 	// OpComplete records that the runtime accepted an event.
 	OpComplete Operation = "inbox.complete"
 	// OpReject records that the runtime refused one.
@@ -221,7 +227,7 @@ const (
 
 var permitted = map[Principal]map[Operation]struct{}{
 	PrincipalRuntime: {
-		OpPending: {}, OpClaim: {}, OpPendingAgentGifts: {}, OpClaimAgentGift: {}, OpPendingAgreements: {}, OpClaimAgreement: {}, OpPendingPrivateHandoffs: {}, OpClaimPrivateHandoff: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
+		OpPending: {}, OpClaim: {}, OpPendingAgentGifts: {}, OpClaimAgentGift: {}, OpPendingAgreements: {}, OpClaimAgreement: {}, OpPendingPrivateHandoffs: {}, OpClaimPrivateHandoff: {}, OpPendingCommerceProfileEvents: {}, OpClaimCommerceProfileEvent: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 		OpResolveContact: {}, OpEnsureDirectConversation: {},
 		OpSendDirect: {}, OpSendDirectApplication: {}, OpEconomicSendDirect: {}, OpEconomicActionStatus: {}, OpReplyDirect: {},
 		OpPendingAttachments: {}, OpClaimAttachment: {},
@@ -252,7 +258,7 @@ func Permits(principal Principal, operation Operation) bool {
 }
 
 var operations = map[Operation]struct{}{
-	OpPending: {}, OpClaim: {}, OpPendingAgentGifts: {}, OpClaimAgentGift: {}, OpPendingAgreements: {}, OpClaimAgreement: {}, OpPendingPrivateHandoffs: {}, OpClaimPrivateHandoff: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
+	OpPending: {}, OpClaim: {}, OpPendingAgentGifts: {}, OpClaimAgentGift: {}, OpPendingAgreements: {}, OpClaimAgreement: {}, OpPendingPrivateHandoffs: {}, OpClaimPrivateHandoff: {}, OpPendingCommerceProfileEvents: {}, OpClaimCommerceProfileEvent: {}, OpComplete: {}, OpReject: {}, OpQueue: {}, OpCompose: {}, OpComposeProtocolResult: {},
 	OpResolveContact: {}, OpEnsureDirectConversation: {},
 	OpSendDirect: {}, OpSendDirectApplication: {}, OpEconomicSendDirect: {}, OpEconomicActionStatus: {}, OpReplyDirect: {},
 	OpPendingAttachments: {}, OpClaimAttachment: {},
@@ -655,21 +661,24 @@ func DecodeRequest(raw []byte) (Request, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Request{}, errors.New("request has trailing JSON")
 	}
-	if request.Schema != RequestSchema && request.Schema != RequestSchemaV13 && request.Schema != RequestSchemaV12 && request.Schema != RequestSchemaV11 && request.Schema != RequestSchemaV10 && request.Schema != RequestSchemaV9 && request.Schema != RequestSchemaV8 &&
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV14 && request.Schema != RequestSchemaV13 && request.Schema != RequestSchemaV12 && request.Schema != RequestSchemaV11 && request.Schema != RequestSchemaV10 && request.Schema != RequestSchemaV9 && request.Schema != RequestSchemaV8 &&
 		request.Schema != RequestSchemaV7 && request.Schema != RequestSchemaV6 {
 		return Request{}, errors.New("unsupported request schema")
 	}
-	if request.Schema != RequestSchema && request.Schema != RequestSchemaV13 && request.Schema != RequestSchemaV12 && request.Schema != RequestSchemaV11 && request.Op == OpSendDirectApplication {
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV14 && request.Schema != RequestSchemaV13 && request.Schema != RequestSchemaV12 && request.Schema != RequestSchemaV11 && request.Op == OpSendDirectApplication {
 		return Request{}, errors.New("direct application sending requires local request v11")
 	}
-	if request.Schema != RequestSchema && request.Schema != RequestSchemaV13 && request.Schema != RequestSchemaV12 && (request.Op == OpPendingAgentGifts || request.Op == OpClaimAgentGift || request.Op == OpPendingAgreements || request.Op == OpClaimAgreement) {
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV14 && request.Schema != RequestSchemaV13 && request.Schema != RequestSchemaV12 && (request.Op == OpPendingAgentGifts || request.Op == OpClaimAgentGift || request.Op == OpPendingAgreements || request.Op == OpClaimAgreement) {
 		return Request{}, errors.New("typed economic inbox operations require local request v12")
 	}
-	if request.Schema != RequestSchema && request.Schema != RequestSchemaV13 && (request.Op == OpEconomicSendDirect || request.Op == OpEconomicActionStatus) {
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV14 && request.Schema != RequestSchemaV13 && (request.Op == OpEconomicSendDirect || request.Op == OpEconomicActionStatus) {
 		return Request{}, errors.New("economic side-effect operations require local request v13")
 	}
-	if request.Schema != RequestSchema && (request.Op == OpPendingPrivateHandoffs || request.Op == OpClaimPrivateHandoff) {
+	if request.Schema != RequestSchema && request.Schema != RequestSchemaV14 && (request.Op == OpPendingPrivateHandoffs || request.Op == OpClaimPrivateHandoff) {
 		return Request{}, errors.New("private handoff inbox operations require local request v14")
+	}
+	if request.Schema != RequestSchema && (request.Op == OpPendingCommerceProfileEvents || request.Op == OpClaimCommerceProfileEvent) {
+		return Request{}, errors.New("commerce profile inbox operations require local request v15")
 	}
 	if err := ValidateRequest(request); err != nil {
 		return Request{}, err
@@ -878,12 +887,12 @@ func ValidateRequest(request Request) error {
 			return errors.New("recipient resolution cannot carry route or control fields")
 		}
 		return requireEmpty(request, "recipient resolution", request.EventID, request.LeaseID, request.SessionID)
-	case OpPending, OpPendingAgentGifts, OpPendingAgreements, OpPendingPrivateHandoffs, OpAwaitingAdmission, OpPendingAttachments:
+	case OpPending, OpPendingAgentGifts, OpPendingAgreements, OpPendingPrivateHandoffs, OpPendingCommerceProfileEvents, OpAwaitingAdmission, OpPendingAttachments:
 		if request.Limit < 0 || request.Limit > MaxEventsPerResponse {
 			return errors.New("invalid pending limit")
 		}
 		return requireEmpty(request, "a listing", request.EventID, request.LeaseID, request.SessionID)
-	case OpClaim, OpClaimAgentGift, OpClaimAgreement, OpClaimPrivateHandoff, OpClaimAttachment:
+	case OpClaim, OpClaimAgentGift, OpClaimAgreement, OpClaimPrivateHandoff, OpClaimCommerceProfileEvent, OpClaimAttachment:
 		if !eventPattern.MatchString(request.EventID) || !leasePattern.MatchString(request.LeaseID) {
 			return errors.New("a claim needs an event and a lease")
 		}

@@ -27,6 +27,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -746,6 +747,45 @@ func TestPrivateHandoffInboxCannotBeStarvedOrEnterGenericChat(t *testing.T) {
 	claimed := h.call(t, Request{Op: OpClaimPrivateHandoff, EventID: event.EventID, LeaseID: leaseID, LeaseSeconds: 60})
 	if !claimed.OK || claimed.Event == nil || claimed.Event.EventID != event.EventID {
 		t.Fatalf("private handoff claim failed: %+v", claimed)
+	}
+}
+
+func TestCommerceProfileInboxCannotBeStarvedOrEnterGenericChat(t *testing.T) {
+	h := newHarness(t)
+	for index := 0; index < MaxEventsPerResponse+1; index++ {
+		h.receive(t, h.event(t, "ordinary-profile-"+strconv.Itoa(index)))
+	}
+	object := []byte{0xa1, 0x01, 0x02}
+	eventBody := commerce.CommerceProfileEventV1{SchemaVersion: 1, ProfileURI: "tos.test.profile.v1", ProfileVersion: 1,
+		ObjectKind: "test.object", ObjectContentType: "application/vnd.tos.test+cbor",
+		ObjectDigest: "sha256:" + strings.Repeat("c", 64), ObjectSizeBytes: uint64(len(object)), CarriageKind: "inline",
+		CanonicalObjectBytes: object, CreatedAtUnix: baseUnix, ExpiresAtUnix: baseUnix + 600}
+	canonical, err := commerce.CanonicalCommerceProfileEventV1(eventBody, time.Unix(int64(baseUnix), 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := payload.Encode(payload.CommerceProfileEvent{ObjectDigest: eventBody.ObjectDigest, CanonicalEvent: canonical})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := envelope.NewEvent(envelope.Event{Network: testNetwork(), ConversationID: convoID,
+		SenderAgentID: senderID, SenderEndpointID: senderMEP, SenderDeviceID: senderDev, CreatedAtUnix: baseUnix,
+		Kind: "commerce.profile-event", IdempotencyKey: strings.Repeat("c", 64), Content: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.receive(t, event)
+	listing := h.call(t, Request{Op: OpPendingCommerceProfileEvents, Limit: 1})
+	if !listing.OK || len(listing.Events) != 1 || listing.Events[0].EventID != event.EventID {
+		t.Fatalf("ordinary traffic starved commerce profile listing: %+v", listing)
+	}
+	if generic := h.call(t, Request{Op: OpClaim, EventID: event.EventID,
+		LeaseID: "lease_" + strings.Repeat("7", 64), LeaseSeconds: 60}); generic.OK || generic.Code != fault.CodeClassNotDelegated {
+		t.Fatalf("generic runtime claimed commerce profile event: %+v", generic)
+	}
+	claimed := h.call(t, Request{Op: OpClaimCommerceProfileEvent, EventID: event.EventID, LeaseID: leaseID, LeaseSeconds: 60})
+	if !claimed.OK || claimed.Event == nil || claimed.Event.EventID != event.EventID {
+		t.Fatalf("commerce profile claim failed: %+v", claimed)
 	}
 }
 

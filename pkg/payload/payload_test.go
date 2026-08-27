@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tosnetwork/tos-messenger/internal/canon"
 	"github.com/tosnetwork/tos-messenger/pkg/attachments"
@@ -98,6 +99,13 @@ func sample(kind string) Payload {
 	case "agreement.delivery":
 		return AgreementDelivery{AgreementBodyDigest: "sha256:" + strings.Repeat("a", 64), ObligationID: "deliverable:report",
 			DeliverableManifestDigest: "sha256:" + strings.Repeat("c", 64)}
+	case "commerce.profile-event":
+		event := commerce.CommerceProfileEventV1{SchemaVersion: 1, ProfileURI: "tos.test.profile.v1", ProfileVersion: 1,
+			ObjectKind: "test.object", ObjectContentType: "application/vnd.tos.test+cbor",
+			ObjectDigest: "sha256:" + strings.Repeat("d", 64), ObjectSizeBytes: 1, CarriageKind: "inline",
+			CanonicalObjectBytes: []byte{0x01}, CreatedAtUnix: 1_700_000_000, ExpiresAtUnix: 1_700_003_600}
+		canonical, _ := commerce.CanonicalCommerceProfileEventV1(event, time.Unix(1_700_000_000, 0))
+		return CommerceProfileEvent{ObjectDigest: event.ObjectDigest, CanonicalEvent: canonical}
 	case "private.handoff.challenge":
 		challenge, _, _ := samplePrivateHandoff()
 		canonical, _ := protocolcodec.Marshal(challenge)
