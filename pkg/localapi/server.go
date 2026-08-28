@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
+	protocolcodec "github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 // DefaultRequestTimeout bounds how long one call may hold a connection.
@@ -368,6 +370,11 @@ func (s *Server) economicSendDirect(ctx context.Context, request Request, now ti
 	if err != nil || !economicKindMatchesEffect(request.EconomicAction.ActionKind, effect.EventKind) {
 		return refuse(fault.CodeNotAuthentic, errors.New("economic action kind does not authorize the Messenger effect"))
 	}
+	if request.EconomicAction.ActionKind == "operation.private-send" {
+		if err := validateOperationPrivateSendEffect(*request.EconomicAction, effect, fields); err != nil {
+			return refuse(fault.CodeNotAuthentic, err)
+		}
+	}
 	resolution, err := s.config.EconomicActionAdmitter.Admit(*request.EconomicAction, *request.EconomicWriterFence,
 		fields, request.ExactEconomicRequest, now)
 	if err != nil || resolution.State == commerce.ActionConflict {
@@ -407,6 +414,29 @@ func (s *Server) economicSendDirect(ctx context.Context, request Request, now ti
 		ConversationID: sent.ConversationID, EventID: sent.EventID, Readiness: sent.Readiness, EconomicResolution: &resolution}
 }
 
+func validateOperationPrivateSendEffect(action commerce.AuthorizedAction, effect commerce.MessengerEffectRequestV1,
+	fields map[string]commerce.SemanticValue) error {
+	if effect.EventKind != "operation.outcome" || effect.ContentType != "application/vnd.tos.operation-outcome-private+cbor" ||
+		len(effect.RecipientAgentIDs) != 1 {
+		return errors.New("operation private-send Messenger effect is invalid")
+	}
+	var outcome commerce.OperationPrivateRequestV1
+	if protocolcodec.Unmarshal(effect.Payload, &outcome) != nil || commerce.ValidateOperationPrivateRequestV1(outcome) != nil ||
+		len(outcome.RecipientAgentIDs) != 1 || outcome.RecipientAgentIDs[0] != effect.RecipientAgentIDs[0] {
+		return errors.New("operation private-send payload does not bind its recipient")
+	}
+	expected, err := commerce.OperationPrivateSendSemanticFieldsV1(action.OwnerID, action.AgentID, outcome)
+	if err != nil {
+		return err
+	}
+	expectedOrdered, expectedErr := commerce.ExportSemanticFields(action.ActionKind, expected)
+	actualOrdered, actualErr := commerce.ExportSemanticFields(action.ActionKind, fields)
+	if expectedErr != nil || actualErr != nil || !reflect.DeepEqual(expectedOrdered, actualOrdered) {
+		return errors.New("operation private-send semantic fields do not bind its payload")
+	}
+	return nil
+}
+
 func (s *Server) economicActionStatus(request Request) Response {
 	if s.config.EconomicActionAdmitter == nil {
 		return refuse(fault.CodeClassNotDelegated, errors.New("economic messaging is not configured"))
@@ -426,6 +456,8 @@ func economicKindMatchesEffect(actionKind, eventKind string) bool {
 		return eventKind == "text" || eventKind == "private.handoff.challenge" ||
 			eventKind == "private.handoff.acknowledgement" || eventKind == "private.handoff.status" ||
 			eventKind == "private.handoff.delete" || eventKind == "commerce.profile-event"
+	case "operation.private-send":
+		return eventKind == "operation.outcome"
 	case "agreement.propose":
 		return eventKind == "agreement.propose"
 	case "agreement.authorize":
@@ -658,7 +690,7 @@ func (s *Server) claim(request Request, now time.Time) Response {
 		[]string{"agent.packet", "device.history.segment", "artifact.encrypted", "a2a.message", "mcp.call", "mcp.result",
 			"agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer",
 			"intent.application", "agreement.propose", "agreement.accept", "agreement.evidence", "agreement.withdraw", "agreement.delivery",
-			"agreement.provider-offer", "commerce.profile-event",
+			"agreement.provider-offer", "commerce.profile-event", "operation.outcome",
 			"private.handoff.challenge", "private.handoff.authorization", "private.handoff.acknowledgement", "private.handoff.status", "private.handoff.delete"})
 	if err != nil {
 		return refuse(claimCode(err), err)
@@ -809,7 +841,7 @@ func (s *Server) pendingCommerceProfileEvents(request Request, now time.Time) Re
 			continue
 		}
 		decoded, decodeErr := envelope.DecodeEventJSON(event.Event)
-		if decodeErr != nil || decoded.Kind != "commerce.profile-event" {
+		if decodeErr != nil || (decoded.Kind != "commerce.profile-event" && decoded.Kind != "operation.outcome") {
 			continue
 		}
 		events = append(events, event)
@@ -821,8 +853,8 @@ func (s *Server) pendingCommerceProfileEvents(request Request, now time.Time) Re
 }
 
 func (s *Server) claimCommerceProfileEvent(request Request, now time.Time) Response {
-	record, err := s.config.Journal.ClaimForApplicationKind(request.EventID, request.LeaseID, now,
-		time.Duration(request.LeaseSeconds)*time.Second, "commerce.profile-event")
+	record, err := s.config.Journal.ClaimForApplicationKinds(request.EventID, request.LeaseID, now,
+		time.Duration(request.LeaseSeconds)*time.Second, []string{"commerce.profile-event", "operation.outcome"})
 	if err != nil {
 		return refuse(claimCode(err), err)
 	}
@@ -835,7 +867,7 @@ func (s *Server) claimCommerceProfileEvent(request Request, now time.Time) Respo
 
 func daemonApplicationKind(kind string) bool {
 	return kind == "agent.packet" || kind == "device.history.segment" || kind == "artifact.encrypted" ||
-		kind == "a2a.message" || kind == "mcp.call" || kind == "mcp.result" || kind == "commerce.profile-event" ||
+		kind == "a2a.message" || kind == "mcp.call" || kind == "mcp.result" || kind == "commerce.profile-event" || kind == "operation.outcome" ||
 		agentGiftApplicationKind(kind) || agreementApplicationKind(kind) || privateHandoffApplicationKind(kind)
 }
 

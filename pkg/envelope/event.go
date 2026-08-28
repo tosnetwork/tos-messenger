@@ -95,6 +95,7 @@ var eventKinds = map[string]kindSpec{
 
 	// Profile-qualified economic objects are data, not model text or authority.
 	"commerce.profile-event": {class: "commerce.profile"},
+	"operation.outcome":      {class: "operation.outcome"},
 
 	"private.handoff.challenge":       {class: "private.handoff"},
 	"private.handoff.authorization":   {class: "private.handoff"},

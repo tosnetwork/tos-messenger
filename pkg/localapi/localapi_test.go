@@ -28,6 +28,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
+	protocolcodec "github.com/tosnetwork/tos-service-protocol/pkg/codec"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -786,6 +787,81 @@ func TestCommerceProfileInboxCannotBeStarvedOrEnterGenericChat(t *testing.T) {
 	claimed := h.call(t, Request{Op: OpClaimCommerceProfileEvent, EventID: event.EventID, LeaseID: leaseID, LeaseSeconds: 60})
 	if !claimed.OK || claimed.Event == nil || claimed.Event.EventID != event.EventID {
 		t.Fatalf("commerce profile claim failed: %+v", claimed)
+	}
+}
+
+func TestOperationOutcomeInboxCannotEnterOrdinaryChatOrModelInput(t *testing.T) {
+	h := newHarness(t)
+	assertion, err := protocolcodec.Marshal(commerce.ActionResolutionReferencePayloadV1{StableActionID: "sha256:" + strings.Repeat("1", 64),
+		ExactRequestDigest: "sha256:" + strings.Repeat("2", 64), AuthorizedActionDigest: "sha256:" + strings.Repeat("3", 64),
+		ActionResolutionDigest: "sha256:" + strings.Repeat("4", 64), ResolutionState: commerce.ActionRejected, ResolutionStateRevision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventBody, err := commerce.BuildOperationOutcomeEventV1(commerce.OutcomeObservation,
+		commerce.OutcomeSubjectRefV1{SubjectProfileURI: "tos.subject.semantic-action.v1", SubjectID: "sha256:" + strings.Repeat("1", 64)}, nil,
+		commerce.OutcomeProfileActionResolutionReference, assertion, commerce.EmptyOutcomeEvidenceManifestV1("unverified_reference"),
+		commerce.EmptyOutcomeExtensionSetV1())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentID, eventPayload, err := commerce.OperationOutcomeEventContentIDV1(eventBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x53}, ed25519.SeedSize))
+	body := commerce.AgentOperationBodyV1{SchemaVersion: 1, NetworkID: "tos:test", OpcodeNamespace: "OPERATION", OpcodeName: "OUTCOME", OpcodeVersion: 1,
+		ActorAgentID: senderID, AuthorizationRef: commerce.ProfileRefV1{ProfileURI: "tos.identity.agent-key.v1", ProfileVersion: 1,
+			ProfileDigest: "sha256:" + strings.Repeat("5", 64)}, AudienceDescriptor: "named-recipients", ObjectID: contentID,
+		OrderingDomain: "outcome:test", Sequence: 1, Epoch: 1, CreatedAtUnix: baseUnix, PayloadProfile: commerce.OperationOutcomeProfileRefV1(),
+		PayloadDigest: contentID, PayloadSize: uint64(len(eventPayload))}
+	body.OperationID, err = commerce.DeriveAgentOperationIDV1(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := commerce.SignAgentOperationV1(body, senderID, key, []byte("historical-proof"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelopeBytes, envelopeDigest, err := commerce.MarshalAgentOperationEnvelopeV1(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipients := []string{"agent:recipient"}
+	recipientDigest, _ := protocolcodec.Digest("tos.messenger-recipient-set.v1", recipients)
+	privateRequest := commerce.OperationPrivateRequestV1{SchemaVersion: 1, RecipientSetDigest: recipientDigest, RecipientAgentIDs: recipients,
+		MembershipEpoch: 1, AudiencePolicyDigest: "sha256:" + strings.Repeat("6", 64), OperationID: body.OperationID,
+		OperationEnvelopeDigest: envelopeDigest, ConversationScopeDigest: "sha256:" + strings.Repeat("7", 64),
+		TransportProfile: commerce.ProfileRefV1{ProfileURI: "tos.messenger.operation-outcome.v1", ProfileVersion: 1,
+			ProfileDigest: "sha256:" + strings.Repeat("8", 64)}, OperationEnvelope: envelopeBytes, EventPayload: eventPayload,
+		Artifacts: commerce.OperationOutcomeArtifactBundleV1{AssertionPayload: assertion,
+			EvidenceManifest: commerce.EmptyOutcomeEvidenceManifestV1("unverified_reference"), ExtensionSet: commerce.EmptyOutcomeExtensionSetV1(),
+			AuthorityProofs: []commerce.OutcomeAuthorityProofMaterialV1{}}}
+	canonical, err := protocolcodec.Marshal(privateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := payload.Encode(payload.OperationOutcome{OperationID: body.OperationID,
+		OperationEnvelopeDigest: envelopeDigest, CanonicalRequest: canonical})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := envelope.NewEvent(envelope.Event{Network: testNetwork(), ConversationID: convoID, SenderAgentID: senderID,
+		SenderEndpointID: senderMEP, SenderDeviceID: senderDev, CreatedAtUnix: baseUnix, Kind: "operation.outcome",
+		IdempotencyKey: strings.Repeat("8", 64), Content: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.receive(t, event)
+	if ordinary := h.call(t, Request{Op: OpPending}); !ordinary.OK || len(ordinary.Events) != 0 {
+		t.Fatalf("operation outcome entered ordinary chat/model input: %+v", ordinary)
+	}
+	listing := h.call(t, Request{Op: OpPendingCommerceProfileEvents, Limit: 1})
+	if !listing.OK || len(listing.Events) != 1 || listing.Events[0].EventID != event.EventID {
+		t.Fatalf("operation outcome was not routed to its typed application queue: %+v", listing)
+	}
+	if generic := h.call(t, Request{Op: OpClaim, EventID: event.EventID, LeaseID: "lease_" + strings.Repeat("7", 64), LeaseSeconds: 60}); generic.OK || generic.Code != fault.CodeClassNotDelegated {
+		t.Fatalf("generic runtime claimed an operation outcome: %+v", generic)
 	}
 }
 

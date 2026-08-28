@@ -106,6 +106,35 @@ func sample(kind string) Payload {
 			CanonicalObjectBytes: []byte{0x01}, CreatedAtUnix: 1_700_000_000, ExpiresAtUnix: 1_700_003_600}
 		canonical, _ := commerce.CanonicalCommerceProfileEventV1(event, time.Unix(1_700_000_000, 0))
 		return CommerceProfileEvent{ObjectDigest: event.ObjectDigest, CanonicalEvent: canonical}
+	case "operation.outcome":
+		assertion, _ := protocolcodec.Marshal(commerce.ActionResolutionReferencePayloadV1{
+			StableActionID: "sha256:" + strings.Repeat("1", 64), ExactRequestDigest: "sha256:" + strings.Repeat("2", 64),
+			AuthorizedActionDigest: "sha256:" + strings.Repeat("3", 64), ActionResolutionDigest: "sha256:" + strings.Repeat("4", 64),
+			ResolutionState: commerce.ActionTerminal, ResolutionStateRevision: 1})
+		event, _ := commerce.BuildOperationOutcomeEventV1(commerce.OutcomeObservation,
+			commerce.OutcomeSubjectRefV1{SubjectProfileURI: "tos.subject.test.v1", SubjectID: "subject:test"}, nil,
+			commerce.OutcomeProfileActionResolutionReference, assertion,
+			commerce.EmptyOutcomeEvidenceManifestV1("unverified_reference"), commerce.EmptyOutcomeExtensionSetV1())
+		contentID, eventPayload, _ := commerce.OperationOutcomeEventContentIDV1(event)
+		body := commerce.AgentOperationBodyV1{SchemaVersion: 1, NetworkID: "tos:test", OpcodeNamespace: "OPERATION", OpcodeName: "OUTCOME", OpcodeVersion: 1,
+			ActorAgentID: "agent:test", AuthorizationRef: commerce.ProfileRefV1{ProfileURI: "tos.identity.agent-key.v1", ProfileVersion: 1, ProfileDigest: "sha256:" + strings.Repeat("a", 64)},
+			AudienceDescriptor: "named-recipients", ObjectID: contentID, OrderingDomain: "outcome:test", Epoch: 1, Sequence: 1, CreatedAtUnix: 1_700_000_000,
+			PayloadProfile: commerce.OperationOutcomeProfileRefV1(), PayloadDigest: contentID, PayloadSize: uint64(len(eventPayload))}
+		body.OperationID, _ = commerce.DeriveAgentOperationIDV1(body)
+		key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x72}, ed25519.SeedSize))
+		envelope, _ := commerce.SignAgentOperationV1(body, body.ActorAgentID, key, []byte("proof"))
+		envelopeBytes, envelopeDigest, _ := commerce.MarshalAgentOperationEnvelopeV1(envelope)
+		recipients := []string{"agent:recipient"}
+		recipientDigest, _ := protocolcodec.Digest("tos.messenger-recipient-set.v1", recipients)
+		request := commerce.OperationPrivateRequestV1{SchemaVersion: 1, RecipientSetDigest: recipientDigest, RecipientAgentIDs: recipients, MembershipEpoch: 1,
+			AudiencePolicyDigest: "sha256:" + strings.Repeat("c", 64), OperationID: body.OperationID, OperationEnvelopeDigest: envelopeDigest,
+			ConversationScopeDigest: "sha256:" + strings.Repeat("d", 64), TransportProfile: commerce.ProfileRefV1{ProfileURI: "tos.messenger.operation-outcome.v1", ProfileVersion: 1, ProfileDigest: "sha256:" + strings.Repeat("e", 64)},
+			OperationEnvelope: envelopeBytes, EventPayload: eventPayload,
+			Artifacts: commerce.OperationOutcomeArtifactBundleV1{AssertionPayload: assertion,
+				EvidenceManifest: commerce.EmptyOutcomeEvidenceManifestV1("unverified_reference"), ExtensionSet: commerce.EmptyOutcomeExtensionSetV1(),
+				AuthorityProofs: []commerce.OutcomeAuthorityProofMaterialV1{}}}
+		canonical, _ := protocolcodec.Marshal(request)
+		return OperationOutcome{OperationID: body.OperationID, OperationEnvelopeDigest: envelopeDigest, CanonicalRequest: canonical}
 	case "private.handoff.challenge":
 		challenge, _, _ := samplePrivateHandoff()
 		canonical, _ := protocolcodec.Marshal(challenge)

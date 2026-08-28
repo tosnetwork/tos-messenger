@@ -256,6 +256,13 @@ func (d *Daemon) SendDirectApplication(ctx context.Context, input, kind string, 
 			return localapi.DirectMessageResult{}, errors.New("commerce profile event is not canonical")
 		}
 		value = payload.CommerceProfileEvent{ObjectDigest: event.ObjectDigest, CanonicalEvent: canonical}
+	case "operation.outcome":
+		var request commerce.OperationPrivateRequestV1
+		if err := protocolcodec.Unmarshal(canonical, &request); err != nil || commerce.ValidateOperationPrivateRequestV1(request) != nil {
+			return localapi.DirectMessageResult{}, errors.New("invalid operation outcome private request")
+		}
+		value = payload.OperationOutcome{OperationID: request.OperationID,
+			OperationEnvelopeDigest: request.OperationEnvelopeDigest, CanonicalRequest: canonical}
 	case "agreement.withdraw", "agreement.delivery", "private.handoff.status", "private.handoff.delete":
 		decoded, err := payload.Decode(kind, canonical)
 		if err != nil {

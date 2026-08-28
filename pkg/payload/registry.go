@@ -35,6 +35,7 @@ var codecs = map[string]codec{
 	"agreement.delivery":              {schema: AgreementDelivery{}.Schema(), decode: decodeAgreementDelivery},
 	"agreement.provider-offer":        {schema: PaidDemandProviderOffer{}.Schema(), decode: decodePaidDemandProviderOffer},
 	"commerce.profile-event":          {schema: CommerceProfileEvent{}.Schema(), decode: decodeCommerceProfileEvent},
+	"operation.outcome":               {schema: OperationOutcome{}.Schema(), decode: decodeOperationOutcome},
 	"private.handoff.challenge":       {schema: PrivateHandoffChallenge{}.Schema(), decode: decodePrivateHandoffChallenge},
 	"private.handoff.authorization":   {schema: PrivateHandoffAuthorization{}.Schema(), decode: decodePrivateHandoffAuthorization},
 	"private.handoff.acknowledgement": {schema: PrivateHandoffAcknowledgement{}.Schema(), decode: decodePrivateHandoffAcknowledgement},

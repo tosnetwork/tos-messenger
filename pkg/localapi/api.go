@@ -86,7 +86,8 @@ const (
 	// OpClaimPrivateHandoff atomically leases one private-handoff control event.
 	OpClaimPrivateHandoff Operation = "private-handoffs.claim"
 	// OpPendingCommerceProfileEvents lists generic profile-qualified economic
-	// events. They are isolated from ordinary chat and model ingestion.
+	// objects and immutable operation-outcome events. They are isolated from
+	// ordinary chat and model ingestion.
 	OpPendingCommerceProfileEvents Operation = "commerce-profile-events.pending"
 	// OpClaimCommerceProfileEvent atomically leases one such typed event.
 	OpClaimCommerceProfileEvent Operation = "commerce-profile-events.claim"
