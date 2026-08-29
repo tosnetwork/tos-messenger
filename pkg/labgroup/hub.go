@@ -38,9 +38,10 @@ const (
 )
 
 var (
-	agentPattern  = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
-	roomPattern   = regexp.MustCompile(`^room_[0-9a-f]{64}$`)
-	clientPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]{1,128}$`)
+	agentPattern     = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
+	roomPattern      = regexp.MustCompile(`^room_[0-9a-f]{64}$`)
+	messageIDPattern = regexp.MustCompile(`^msg_[0-9a-f]{64}$`)
+	clientPattern    = regexp.MustCompile(`^[A-Za-z0-9._~-]{1,128}$`)
 )
 
 type Credential struct {
@@ -57,13 +58,14 @@ type Room struct {
 }
 
 type Message struct {
-	Sequence      uint64 `json:"sequence"`
-	MessageID     string `json:"message_id"`
-	ClientID      string `json:"client_id"`
-	RoomID        string `json:"room_id"`
-	SenderAgentID string `json:"sender_agent_id"`
-	Content       string `json:"content"`
-	CreatedAtUnix uint64 `json:"created_at_unix"`
+	Sequence       uint64 `json:"sequence"`
+	MessageID      string `json:"message_id"`
+	ClientID       string `json:"client_id"`
+	RoomID         string `json:"room_id"`
+	SenderAgentID  string `json:"sender_agent_id"`
+	ReplyToEventID string `json:"reply_to_event_id,omitempty"`
+	Content        string `json:"content"`
+	CreatedAtUnix  uint64 `json:"created_at_unix"`
 }
 
 type state struct {
@@ -194,9 +196,10 @@ func (h *Hub) listRooms(w http.ResponseWriter, r *http.Request) {
 }
 
 type sendRequest struct {
-	RoomID   string `json:"room_id"`
-	ClientID string `json:"client_id"`
-	Content  string `json:"content"`
+	RoomID         string `json:"room_id"`
+	ClientID       string `json:"client_id"`
+	Content        string `json:"content"`
+	ReplyToEventID string `json:"reply_to_event_id,omitempty"`
 }
 
 func (h *Hub) sendMessage(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +211,9 @@ func (h *Hub) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &request) {
 		return
 	}
-	if !roomPattern.MatchString(request.RoomID) || !clientPattern.MatchString(request.ClientID) || len(request.Content) == 0 || len(request.Content) > MaxContentBytes {
+	if !roomPattern.MatchString(request.RoomID) || !clientPattern.MatchString(request.ClientID) ||
+		(request.ReplyToEventID != "" && !messageIDPattern.MatchString(request.ReplyToEventID)) ||
+		len(request.Content) == 0 || len(request.Content) > MaxContentBytes {
 		writeError(w, http.StatusBadRequest, "invalid message")
 		return
 	}
@@ -223,7 +228,11 @@ func (h *Hub) sendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "agent is not a room member")
 		return
 	}
-	messageID := deriveMessageID(request.RoomID, agentID, request.ClientID, request.Content)
+	if request.ReplyToEventID != "" && !h.hasMessage(request.RoomID, request.ReplyToEventID) {
+		writeError(w, http.StatusBadRequest, "reply target is not in this room")
+		return
+	}
+	messageID := deriveMessageIDWithReply(request.RoomID, agentID, request.ClientID, request.ReplyToEventID, request.Content)
 	for _, existing := range h.state.Messages {
 		if existing.SenderAgentID == agentID && existing.ClientID == request.ClientID {
 			if existing.MessageID != messageID {
@@ -243,7 +252,7 @@ func (h *Hub) sendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "invalid clock")
 		return
 	}
-	message := Message{Sequence: h.state.NextSequence, MessageID: messageID, ClientID: request.ClientID, RoomID: request.RoomID, SenderAgentID: agentID, Content: request.Content, CreatedAtUnix: uint64(now.Unix())}
+	message := Message{Sequence: h.state.NextSequence, MessageID: messageID, ClientID: request.ClientID, RoomID: request.RoomID, SenderAgentID: agentID, ReplyToEventID: request.ReplyToEventID, Content: request.Content, CreatedAtUnix: uint64(now.Unix())}
 	h.state.NextSequence++
 	h.state.Messages = append(h.state.Messages, message)
 	if replaced, err := h.persist(); err != nil {
@@ -255,6 +264,15 @@ func (h *Hub) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, message)
+}
+
+func (h *Hub) hasMessage(roomID, messageID string) bool {
+	for _, candidate := range h.state.Messages {
+		if candidate.RoomID == roomID && candidate.MessageID == messageID {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Hub) listMessages(w http.ResponseWriter, r *http.Request) {
@@ -364,6 +382,18 @@ func deriveMessageID(roomID, sender, clientID, content string) string {
 	return "msg_" + hex.EncodeToString(sum[:])
 }
 
+func deriveMessageIDWithReply(roomID, sender, clientID, replyToEventID, content string) string {
+	if replyToEventID == "" {
+		return deriveMessageID(roomID, sender, clientID, content)
+	}
+	buffer := bytes.NewBufferString(canon.DomainLabMessage + ".reply.v1")
+	for _, value := range []string{roomID, sender, clientID, replyToEventID, content} {
+		canon.Text(buffer, value)
+	}
+	sum := sha256.Sum256(buffer.Bytes())
+	return "msg_" + hex.EncodeToString(sum[:])
+}
+
 // DeriveMessageID binds the opaque Relay record to its room, sender,
 // idempotency key, and exact ciphertext content.
 func DeriveMessageID(roomID, sender, clientID, content string) string {
@@ -457,12 +487,26 @@ func validateState(s state) error {
 		room, found := s.Rooms[message.RoomID]
 		if message.Sequence <= prior || message.Sequence >= s.NextSequence || !found || !clientPattern.MatchString(message.ClientID) ||
 			len(message.Content) == 0 || len(message.Content) > MaxContentBytes || message.CreatedAtUnix == 0 ||
-			!contains(room.Members, message.SenderAgentID) || deriveMessageID(message.RoomID, message.SenderAgentID, message.ClientID, message.Content) != message.MessageID {
+			!contains(room.Members, message.SenderAgentID) ||
+			(message.ReplyToEventID != "" && (!messageIDPattern.MatchString(message.ReplyToEventID) || !messageExistsEarlier(s.Messages, message.RoomID, message.ReplyToEventID, message.Sequence))) ||
+			deriveMessageIDWithReply(message.RoomID, message.SenderAgentID, message.ClientID, message.ReplyToEventID, message.Content) != message.MessageID {
 			return errors.New("invalid lab message state")
 		}
 		prior = message.Sequence
 	}
 	return nil
+}
+
+func messageExistsEarlier(messages []Message, roomID, messageID string, beforeSequence uint64) bool {
+	for _, candidate := range messages {
+		if candidate.Sequence >= beforeSequence {
+			return false
+		}
+		if candidate.RoomID == roomID && candidate.MessageID == messageID {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, target any) bool {

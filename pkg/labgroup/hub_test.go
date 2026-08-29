@@ -76,6 +76,36 @@ func TestHubRejectsCredentialAndIdempotencyConflicts(t *testing.T) {
 	call[map[string]any](t, server, alice, "alice-token-0001", http.MethodPost, "/v1/messages", sendRequest{RoomID: room.RoomID, ClientID: "same", Content: "two"}, http.StatusConflict)
 }
 
+func TestHubBindsReplyToAnEarlierMessageInTheSameRoom(t *testing.T) {
+	hub, err := Open(filepath.Join(t.TempDir(), "hub.json"), []Credential{
+		{AgentID: alice, Token: "alice-token-0001"},
+		{AgentID: bob, Token: "bob-token-0000002"},
+		{AgentID: eve, Token: "eve-token-00000003"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(hub.Handler())
+	defer server.Close()
+	room := call[Room](t, server, alice, "alice-token-0001", http.MethodPost, "/v1/rooms",
+		createRoomRequest{Label: "builders", Members: []string{alice, bob}}, http.StatusCreated)
+	otherRoom := call[Room](t, server, alice, "alice-token-0001", http.MethodPost, "/v1/rooms",
+		createRoomRequest{Label: "auditors", Members: []string{alice, eve}}, http.StatusCreated)
+	parent := call[Message](t, server, alice, "alice-token-0001", http.MethodPost, "/v1/messages",
+		sendRequest{RoomID: room.RoomID, ClientID: "parent", Content: "request"}, http.StatusCreated)
+	other := call[Message](t, server, eve, "eve-token-00000003", http.MethodPost, "/v1/messages",
+		sendRequest{RoomID: otherRoom.RoomID, ClientID: "other", Content: "unrelated"}, http.StatusCreated)
+	reply := call[Message](t, server, bob, "bob-token-0000002", http.MethodPost, "/v1/messages",
+		sendRequest{RoomID: room.RoomID, ClientID: "reply", ReplyToEventID: parent.MessageID, Content: "accepted"},
+		http.StatusCreated)
+	if reply.ReplyToEventID != parent.MessageID || reply.MessageID == deriveMessageID(room.RoomID, bob, "reply", "accepted") {
+		t.Fatalf("reply was not bound into the durable message: %+v", reply)
+	}
+	call[map[string]any](t, server, bob, "bob-token-0000002", http.MethodPost, "/v1/messages",
+		sendRequest{RoomID: room.RoomID, ClientID: "cross-room", ReplyToEventID: other.MessageID, Content: "invalid"},
+		http.StatusBadRequest)
+}
+
 func TestHubFailsClosedOnDurableMessageTampering(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.json")
 	credentials := []Credential{{AgentID: alice, Token: "alice-token-0001"}, {AgentID: bob, Token: "bob-token-0000002"}}
