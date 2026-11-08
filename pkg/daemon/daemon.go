@@ -31,7 +31,6 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
-	"github.com/tosnetwork/tos-messenger/pkg/protocolbridge"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	protocolcodec "github.com/tosnetwork/tos-service-protocol/pkg/codec"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativeclient"
@@ -53,10 +52,6 @@ type Observer interface {
 	Failed(stage string, err error)
 }
 
-type protocolEventReceiver interface {
-	Receive(context.Context, envelope.Event) error
-}
-
 // Daemon is one running installation.
 type Daemon struct {
 	config       Config
@@ -71,8 +66,6 @@ type Daemon struct {
 	prekeys      *prekeyRuntime
 	admission    *admission.Gate
 	agentPackets *agentpacketbridge.Bridge
-	a2aReceiver  protocolEventReceiver
-	mcpReceiver  protocolEventReceiver
 	contactDNS   *nativeclient.Client
 	now          func() time.Time
 
@@ -760,24 +753,6 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		}
 		instance.agentPackets = bridge
 	}
-	if config.A2AReceiverSocket != "" {
-		receiver, receiverErr := protocolbridge.NewUnixReceiver(
-			config.A2AReceiverSocket, protocolbridge.ProfileA2A, config.ProtocolReceiverTimeout())
-		if receiverErr != nil {
-			_ = journal.Close()
-			return nil, receiverErr
-		}
-		instance.a2aReceiver = receiver
-	}
-	if config.MCPReceiverSocket != "" {
-		receiver, receiverErr := protocolbridge.NewUnixReceiver(
-			config.MCPReceiverSocket, protocolbridge.ProfileMCP, config.ProtocolReceiverTimeout())
-		if receiverErr != nil {
-			_ = journal.Close()
-			return nil, receiverErr
-		}
-		instance.mcpReceiver = receiver
-	}
 	discovery, err := builder.Build(config, journal, observer)
 	if err != nil {
 		_ = journal.Close()
@@ -970,13 +945,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.runAgentPackets(ctx)
 		}()
 	}
-	if d.a2aReceiver != nil || d.mcpReceiver != nil {
-		group.Add(1)
-		go func() {
-			defer group.Done()
-			d.runProtocolEvents(ctx)
-		}()
-	}
 	group.Add(1)
 	go func() {
 		defer group.Done()
@@ -1155,91 +1123,6 @@ func (d *Daemon) sweepAgentPackets(ctx context.Context) {
 		if _, err := d.journal.CompleteApplication(record.EventID, leaseID, nowFn()); err != nil {
 			d.report("complete Agent Packet", err)
 		}
-	}
-}
-
-func (d *Daemon) runProtocolEvents(ctx context.Context) {
-	ticker := time.NewTicker(d.config.SweepInterval())
-	defer ticker.Stop()
-	for {
-		d.sweepProtocolEvents(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
-// sweepProtocolEvents owns A2A and MCP application leases. These events are
-// reserved even when no receiver is configured, so they can never silently
-// degrade into untrusted model text.
-func (d *Daemon) sweepProtocolEvents(ctx context.Context) {
-	nowFn := d.now
-	if nowFn == nil {
-		nowFn = time.Now
-	}
-	records, err := d.journal.ListPending(nowFn(), 0)
-	if err != nil {
-		d.report("list protocol events", err)
-		return
-	}
-	for _, record := range records {
-		if ctx.Err() != nil {
-			return
-		}
-		raw, err := record.Payload()
-		if err != nil {
-			continue
-		}
-		event, err := envelope.DecodeEventJSON(raw)
-		if err != nil {
-			continue
-		}
-		receiver := d.protocolReceiver(event.Kind)
-		if receiver == nil {
-			continue
-		}
-		if _, err := payload.Decode(event.Kind, event.Content); err != nil {
-			d.report("decode protocol event", err)
-			continue
-		}
-		var entropy [32]byte
-		if _, err := rand.Read(entropy[:]); err != nil {
-			d.report("claim protocol event", err)
-			return
-		}
-		leaseID, err := eventlog.NewLeaseID(entropy[:])
-		if err != nil {
-			d.report("claim protocol event", err)
-			return
-		}
-		now := nowFn()
-		lease := d.config.ProtocolReceiverTimeout() + 5*time.Second
-		if _, err := d.journal.ClaimForApplicationKind(record.EventID, leaseID, now, lease, event.Kind); err != nil {
-			if !errors.Is(err, eventlog.ErrLeaseMismatch) && !errors.Is(err, eventlog.ErrNotPending) {
-				d.report("claim protocol event", err)
-			}
-			continue
-		}
-		if err := receiver.Receive(ctx, event); err != nil {
-			d.report("deliver protocol event", err)
-			continue
-		}
-		if _, err := d.journal.CompleteApplication(record.EventID, leaseID, nowFn()); err != nil {
-			d.report("complete protocol event", err)
-		}
-	}
-}
-
-func (d *Daemon) protocolReceiver(kind string) protocolEventReceiver {
-	switch kind {
-	case "a2a.message":
-		return d.a2aReceiver
-	case "mcp.call", "mcp.result":
-		return d.mcpReceiver
-	default:
-		return nil
 	}
 }
 
