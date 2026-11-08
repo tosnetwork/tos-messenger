@@ -191,15 +191,6 @@ const (
 	// bearer. It is an owner decision because it grants an unknown sender the
 	// ability to place exactly one authenticated event in this inbox.
 	OpCreateAdmissionInvite Operation = "invites.create"
-	// OpRecordEscrowLocation lets the owner-side funding/wallet workflow bind
-	// the finalized Quote commitment it funded to the exact escrow account the
-	// chain resolver must read. A runtime may not create this authority map.
-	OpRecordEscrowLocation Operation = "escrow-locations.record"
-	// OpVerifyAcceptedQuote resolves one commitment from finalized state and
-	// accepts the supplied escrow address only when that finalized account holds
-	// the commitment and every expected purchase term plus this installation's
-	// complete network identity matches.
-	OpVerifyAcceptedQuote Operation = "quotes.verify"
 	// OpExportDeviceHistory is an explicit owner decision to disclose one
 	// bounded direct-conversation history page to another current device of
 	// this Endpoint. The Agent runtime may neither request nor receive it.
@@ -234,7 +225,6 @@ var permitted = map[Principal]map[Operation]struct{}{
 		OpPendingAttachments: {}, OpClaimAttachment: {},
 		OpBeginOutboundAttachment: {}, OpAppendOutboundAttachment: {}, OpCommitOutboundAttachment: {},
 		OpRequestAction: {}, OpActionStatus: {}, OpClaimAction: {}, OpListMandates: {},
-		OpVerifyAcceptedQuote: {},
 	},
 	PrincipalOwner: {
 		OpAwaitingAdmission: {}, OpAdmit: {}, OpRefuse: {},
@@ -242,7 +232,6 @@ var permitted = map[Principal]map[Operation]struct{}{
 		OpPendingActions: {}, OpGrantAction: {}, OpDenyAction: {},
 		OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {}, OpChallenge: {},
 		OpCreateAdmissionInvite: {},
-		OpRecordEscrowLocation:  {},
 		OpExportDeviceHistory:   {},
 		OpListDeviceHistory:     {},
 	},
@@ -270,8 +259,6 @@ var operations = map[Operation]struct{}{
 	OpGrantAction: {}, OpDenyAction: {},
 	OpPlaceMandate: {}, OpRevokeMandate: {}, OpListMandates: {}, OpChallenge: {},
 	OpCreateAdmissionInvite: {},
-	OpRecordEscrowLocation:  {},
-	OpVerifyAcceptedQuote:   {},
 	OpExportDeviceHistory:   {},
 	OpListDeviceHistory:     {},
 }
@@ -289,7 +276,6 @@ var (
 	agentPattern           = regexp.MustCompile(`^agent_[0-9a-f]{64}$`)
 	devicePattern          = regexp.MustCompile(`^dev_[0-9a-f]{64}$`)
 	challengePattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	quotePattern           = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
 	uploadPattern          = regexp.MustCompile(`^attup_[0-9a-f]{64}$`)
 	capabilityPattern      = regexp.MustCompile(`^cap_[0-9a-f]{64}$`)
 	physicalNamePattern    = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
@@ -372,11 +358,6 @@ type Request struct {
 	// InviteExpiresAtUnix is always explicit and owner-signed.
 	InvitedAgentID      string `json:"invited_agent_id,omitempty"`
 	InviteExpiresAtUnix uint64 `json:"invite_expires_at_unix,omitempty"`
-
-	QuoteCommitment    string         `json:"quote_commitment,omitempty"`
-	EscrowAddress      string         `json:"escrow_address,omitempty"`
-	CapabilityClass    string         `json:"capability_class,omitempty"`
-	ExpectedQuoteTerms *PurchaseTerms `json:"expected_quote_terms,omitempty"`
 
 	// Device-history export terms are all owner-signed. The source device,
 	// recipient Endpoint and pair-session identifier are daemon-derived.
@@ -597,23 +578,11 @@ type Response struct {
 	Challenge string `json:"challenge,omitempty"`
 	// AdmissionToken is returned exactly once when an owner creates an invite.
 	AdmissionToken string `json:"admission_token,omitempty"`
-	// FinalizedQuote is present only after the daemon resolved and exactly
-	// matched a finalized Accepted Quote to the submitted terms and network.
-	FinalizedQuote *FinalizedQuoteEvidence `json:"finalized_quote,omitempty"`
 	// History export returns the committed page cursor and digest needed to
 	// authorize the next segment without exposing the page body on this API.
 	HistorySegmentDigest string `json:"history_segment_digest,omitempty"`
 	LastEventCreatedAt   uint64 `json:"last_event_created_at_unix,omitempty"`
 	LastEventID          string `json:"last_event_id,omitempty"`
-}
-
-type FinalizedQuoteEvidence struct {
-	Commitment          string `json:"quote_commitment"`
-	EscrowAccount       string `json:"escrow_account"`
-	TransactionHash     string `json:"transaction_hash"`
-	ContractCodeHash    string `json:"contract_code_hash"`
-	FinalizedCheckpoint uint64 `json:"finalized_checkpoint"`
-	FinalizedAtUnix     uint64 `json:"finalized_at_unix"`
 }
 
 // WaitingAction is one decision the owner has not made yet.
@@ -771,16 +740,6 @@ func ValidateRequest(request Request) error {
 	}
 	if request.Op != OpCompose && request.RecipientAgentID != "" {
 		return errors.New("only message composition carries a recipient Agent assertion")
-	}
-	if request.Op != OpRecordEscrowLocation && request.Op != OpVerifyAcceptedQuote && request.QuoteCommitment != "" {
-		return errors.New("only escrow recording or Quote verification carries a Quote commitment")
-	}
-	if request.Op != OpRecordEscrowLocation && request.Op != OpVerifyAcceptedQuote &&
-		(request.EscrowAddress != "" || request.CapabilityClass != "") {
-		return errors.New("only escrow recording or Quote verification carries funded escrow locators")
-	}
-	if request.Op != OpVerifyAcceptedQuote && request.ExpectedQuoteTerms != nil {
-		return errors.New("only Quote verification carries expected Quote terms")
 	}
 	if request.Op != OpCompose && request.Op != OpSendDirect && request.Op != OpSendDirectApplication && request.Op != OpReplyDirect && request.Op != OpComposeProtocolResult && request.Op != OpBeginOutboundAttachment && request.Op != OpExportDeviceHistory && request.Op != OpListDeviceHistory &&
 		(request.ConversationID != "" || request.IdempotencyKey != "") {
@@ -1056,23 +1015,6 @@ func ValidateRequest(request Request) error {
 			return errors.New("an admission invite needs an expiry")
 		}
 		return requireEmpty(request, "admission invite creation", request.EventID, request.LeaseID, request.SessionID)
-	case OpRecordEscrowLocation:
-		if !quotePattern.MatchString(request.QuoteCommitment) ||
-			request.EscrowAddress == "" || len(request.EscrowAddress) > 80 || request.CapabilityClass == "" ||
-			len(request.CapabilityClass) > 64 {
-			return errors.New("recording an escrow location needs canonical funded escrow terms")
-		}
-		return requireEmpty(request, "escrow-location recording", request.EventID, request.LeaseID, request.SessionID)
-	case OpVerifyAcceptedQuote:
-		if !quotePattern.MatchString(request.QuoteCommitment) || request.EscrowAddress == "" ||
-			len(request.EscrowAddress) > 80 || request.CapabilityClass == "" ||
-			len(request.CapabilityClass) > 64 || request.ExpectedQuoteTerms == nil {
-			return errors.New("Quote verification needs an escrow locator, commitment, and complete expected terms")
-		}
-		if terms := toTerms(request.ExpectedQuoteTerms); terms == nil || terms.Validate() != nil {
-			return errors.New("Quote verification carries invalid expected terms")
-		}
-		return requireEmpty(request, "Quote verification", request.EventID, request.LeaseID, request.SessionID)
 	case OpExportDeviceHistory:
 		validCursor := (request.HistorySequence == 1 && request.PreviousSegmentDigest == "" &&
 			request.AfterCreatedAtUnix == 0 && request.AfterEventID == "") ||

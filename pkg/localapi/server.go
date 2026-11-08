@@ -27,7 +27,6 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
-	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	protocolcodec "github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
@@ -55,8 +54,6 @@ type Config struct {
 	ChallengeLifetime time.Duration
 	Now               func() time.Time
 	Timeout           time.Duration
-	QuoteResolver     AddressedQuoteResolver
-	Network           *nativev1.NetworkDomain
 	// DeviceIDs is the complete, sorted current Endpoint roster. An empty
 	// roster disables owner-authorized history export.
 	DeviceIDs []string
@@ -123,14 +120,6 @@ type AttachmentEmitter interface {
 	Commit(context.Context, string) (attachmentops.Progress, error)
 }
 
-// AddressedQuoteResolver treats a runtime-supplied escrow address only as a
-// candidate locator and returns a Quote only after reading that exact account
-// from finalized, code-authenticated chain state.
-type AddressedQuoteResolver interface {
-	ResolveAcceptedQuoteAt(ctx context.Context, commitment, escrowAddress,
-		capabilityClass string) (negotiation.VerifiedAcceptedQuote, bool, error)
-}
-
 // Server answers calls on the owner-private socket.
 type Server struct {
 	config     Config
@@ -162,13 +151,6 @@ func NewServer(config Config) (*Server, error) {
 	}
 	if config.Timeout < 0 {
 		return nil, errors.New("invalid local API timeout")
-	}
-	if config.QuoteResolver != nil {
-		if _, err := negotiation.NetworkFromDomain(config.Network); err != nil {
-			return nil, errors.New("a Quote resolver needs the daemon network binding")
-		}
-	} else if config.Network != nil {
-		return nil, errors.New("a local API network binding requires a Quote resolver")
 	}
 	if len(config.DeviceIDs) > 0 {
 		if !sort.StringsAreSorted(config.DeviceIDs) {
@@ -346,10 +328,6 @@ func (s *Server) handle(ctx context.Context, principal Principal, raw []byte) Re
 		return s.challenge(now)
 	case OpCreateAdmissionInvite:
 		return s.createAdmissionInvite(request, now)
-	case OpRecordEscrowLocation:
-		return s.recordEscrowLocation(request)
-	case OpVerifyAcceptedQuote:
-		return s.verifyAcceptedQuote(ctx, request)
 	case OpExportDeviceHistory:
 		return s.exportDeviceHistory(request)
 	case OpListDeviceHistory:
@@ -462,8 +440,6 @@ func economicKindMatchesEffect(actionKind, eventKind string) bool {
 		return eventKind == "agreement.propose"
 	case "agreement.authorize":
 		return eventKind == "agreement.accept" || eventKind == "agreement.evidence"
-	case "provider.offer":
-		return eventKind == "agreement.provider-offer"
 	case "agreement.withdraw":
 		return eventKind == "agreement.withdraw"
 	case "disclosure.release":
@@ -601,41 +577,6 @@ func (s *Server) commitOutboundAttachment(ctx context.Context, request Request) 
 	return Response{OK: true, Complete: progress.Complete, EventID: progress.EventID}
 }
 
-func (s *Server) verifyAcceptedQuote(ctx context.Context, request Request) Response {
-	if s.config.QuoteResolver == nil {
-		return refuse(fault.CodeClassNotDelegated, errors.New("finalized Quote verification is not configured"))
-	}
-	quote, found, err := s.config.QuoteResolver.ResolveAcceptedQuoteAt(
-		ctx, request.QuoteCommitment, request.EscrowAddress, request.CapabilityClass)
-	if err == nil && !found {
-		err = errors.New("the funded escrow is not finalized")
-	}
-	if err == nil {
-		quote, err = negotiation.MatchAcceptedQuote(
-			quote, request.QuoteCommitment, *toTerms(request.ExpectedQuoteTerms), s.config.Network)
-	}
-	if err == nil && quote.Reference.Account != request.EscrowAddress {
-		err = errors.New("the finalized Quote evidence names another escrow account")
-	}
-	if err != nil {
-		return refuse(fault.CodeNotAuthentic, err)
-	}
-	return Response{OK: true, FinalizedQuote: &FinalizedQuoteEvidence{
-		Commitment: quote.Commitment, EscrowAccount: quote.Reference.Account,
-		TransactionHash: quote.Reference.TransactionHash, ContractCodeHash: quote.Reference.ContractCodeHash,
-		FinalizedCheckpoint: quote.Reference.FinalizedCheckpoint, FinalizedAtUnix: quote.FinalizedAtUnix,
-	}}
-}
-
-func (s *Server) recordEscrowLocation(request Request) Response {
-	fresh, err := s.config.Journal.RecordEscrowLocation(
-		request.QuoteCommitment, request.EscrowAddress, request.CapabilityClass)
-	if err != nil {
-		return refuse(fault.CodeInternal, err)
-	}
-	return Response{OK: true, Fresh: fresh}
-}
-
 func (s *Server) createAdmissionInvite(request Request, now time.Time) Response {
 	var entropy [32]byte
 	if _, err := rand.Read(entropy[:]); err != nil {
@@ -690,7 +631,7 @@ func (s *Server) claim(request Request, now time.Time) Response {
 		[]string{"agent.packet", "device.history.segment", "artifact.encrypted", "a2a.message", "mcp.call", "mcp.result",
 			"agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer",
 			"intent.application", "agreement.propose", "agreement.accept", "agreement.evidence", "agreement.withdraw", "agreement.delivery",
-			"agreement.provider-offer", "commerce.profile-event", "operation.outcome",
+			"commerce.profile-event", "operation.outcome",
 			"private.handoff.challenge", "private.handoff.authorization", "private.handoff.acknowledgement", "private.handoff.status", "private.handoff.delete"})
 	if err != nil {
 		return refuse(claimCode(err), err)
@@ -773,7 +714,7 @@ func (s *Server) pendingAgreements(request Request, now time.Time) Response {
 func (s *Server) claimAgreement(request Request, now time.Time) Response {
 	record, err := s.config.Journal.ClaimForApplicationKinds(request.EventID, request.LeaseID, now,
 		time.Duration(request.LeaseSeconds)*time.Second,
-		[]string{"intent.application", "agreement.propose", "agreement.accept", "agreement.evidence", "agreement.withdraw", "agreement.delivery", "agreement.provider-offer"})
+		[]string{"intent.application", "agreement.propose", "agreement.accept", "agreement.evidence", "agreement.withdraw", "agreement.delivery"})
 	if err != nil {
 		return refuse(claimCode(err), err)
 	}
@@ -877,7 +818,7 @@ func agentGiftApplicationKind(kind string) bool {
 
 func agreementApplicationKind(kind string) bool {
 	return kind == "intent.application" || kind == "agreement.propose" || kind == "agreement.accept" || kind == "agreement.evidence" ||
-		kind == "agreement.withdraw" || kind == "agreement.delivery" || kind == "agreement.provider-offer"
+		kind == "agreement.withdraw" || kind == "agreement.delivery"
 }
 
 func privateHandoffApplicationKind(kind string) bool {

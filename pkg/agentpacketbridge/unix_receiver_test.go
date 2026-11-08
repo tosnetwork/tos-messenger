@@ -3,7 +3,6 @@ package agentpacketbridge
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"io"
 	"net"
 	"net/http"
@@ -16,7 +15,7 @@ import (
 )
 
 func TestUnixReceiverDeliversCanonicalPacketToPrivateSocket(t *testing.T) {
-	packet := bridgePacket(t, ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)),
+	packet := bridgePacket(t, "sender",
 		"agent_"+repeatHex("1", 64), "agent_"+repeatHex("2", 64), 3, 1_800_000_000, "typed work")
 	wire, err := agentpacket.EncodeJSON(packet)
 	if err != nil {
@@ -86,7 +85,7 @@ func TestUnixReceiverRejectsProviderFailureAndInvalidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	packet := bridgePacket(t, ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)),
+	packet := bridgePacket(t, "sender",
 		"agent_"+repeatHex("1", 64), "agent_"+repeatHex("2", 64), 4, 1_800_000_000, "rejected")
 	if err := receiver.Receive(context.Background(), packet); err == nil {
 		t.Fatal("provider rejection was hidden")

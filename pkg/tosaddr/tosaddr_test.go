@@ -54,27 +54,14 @@ func TestAddressMatchesTheProtocolSDK(t *testing.T) {
 	}
 }
 
-// The workchain is part of the address, so two registries that differ only in
-// workchain must not resolve to the same account.
-func TestWorkchainIsPartOfTheAddress(t *testing.T) {
-	base, err := New(testNetwork(), []Registry{{CodeHash: codeHash, CodeBOC: codeBOC, Workchain: 0}})
-	if err != nil {
+// The Native Registry lives in workchain 0 only, so a registry configured
+// for any other workchain is refused rather than located.
+func TestRegistryOutsideWorkchainZeroIsRefused(t *testing.T) {
+	if _, err := New(testNetwork(), []Registry{{CodeHash: codeHash, CodeBOC: codeBOC, Workchain: 0}}); err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	master, err := New(testNetwork(), []Registry{{CodeHash: codeHash, CodeBOC: codeBOC, Workchain: -1}})
-	if err != nil {
-		t.Fatalf("new: %v", err)
-	}
-	first, err := base.Locate(codeHash, testAgent())
-	if err != nil {
-		t.Fatalf("locate: %v", err)
-	}
-	second, err := master.Locate(codeHash, testAgent())
-	if err != nil {
-		t.Fatalf("locate: %v", err)
-	}
-	if first == second {
-		t.Fatal("two workchains produced one address")
+	if _, err := New(testNetwork(), []Registry{{CodeHash: codeHash, CodeBOC: codeBOC, Workchain: -1}}); err == nil {
+		t.Fatal("a masterchain Native Registry was accepted")
 	}
 }
 

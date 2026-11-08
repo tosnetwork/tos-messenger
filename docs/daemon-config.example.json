@@ -26,8 +26,6 @@
   "chain_quorum": 2,
   "native_registry_code_hash": "tvm-cell-sha256:c42a36d160f60ec70926f63cb06d7429306e332b2e3752b275971ad628c0c9f1",
   "chain_checkpoint_path": "/var/lib/tos-messengerd/chain.checkpoint",
-  "escrow_code_hash": "tvm-cell-sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-  "escrow_checkpoint_path": "/var/lib/tos-messengerd/escrow.checkpoint",
   "delegation_path": "/etc/tos-messengerd/delegation.json",
 
   "discovery": {
@@ -79,6 +77,10 @@
   "transport": "none",
 
   "agent_packet_receiver_socket": "/run/openfox/tos-service-provider.sock",
+  "mldsa44_verifier": {
+    "binary": "/usr/local/libexec/tos-service/tosctl",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
   "agent_packet_receiver_timeout_seconds": 30,
 
   "a2a_receiver_socket": "/run/openfox/a2a-events.sock",

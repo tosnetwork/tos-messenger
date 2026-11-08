@@ -20,7 +20,6 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/agentpacketbridge"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentadmission"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentops"
-	"github.com/tosnetwork/tos-messenger/pkg/chainquote"
 	"github.com/tosnetwork/tos-messenger/pkg/contact"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
@@ -30,7 +29,6 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
-	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
 	"github.com/tosnetwork/tos-messenger/pkg/protocolbridge"
@@ -61,23 +59,22 @@ type protocolEventReceiver interface {
 
 // Daemon is one running installation.
 type Daemon struct {
-	config        Config
-	journal       *eventlog.Journal
-	dispatch      *dispatch.Dispatcher
-	server        *localapi.Server
-	listener      net.Listener
-	owner         net.Listener
-	salt          []byte
-	observer      Observer
-	discovery     *discoveryRuntime
-	prekeys       *prekeyRuntime
-	admission     *admission.Gate
-	agentPackets  *agentpacketbridge.Bridge
-	a2aReceiver   protocolEventReceiver
-	mcpReceiver   protocolEventReceiver
-	quoteResolver negotiation.QuoteResolver
-	contactDNS    *nativeclient.Client
-	now           func() time.Time
+	config       Config
+	journal      *eventlog.Journal
+	dispatch     *dispatch.Dispatcher
+	server       *localapi.Server
+	listener     net.Listener
+	owner        net.Listener
+	salt         []byte
+	observer     Observer
+	discovery    *discoveryRuntime
+	prekeys      *prekeyRuntime
+	admission    *admission.Gate
+	agentPackets *agentpacketbridge.Bridge
+	a2aReceiver  protocolEventReceiver
+	mcpReceiver  protocolEventReceiver
+	contactDNS   *nativeclient.Client
+	now          func() time.Time
 
 	closeOnce sync.Once
 }
@@ -233,17 +230,6 @@ func (d *Daemon) SendDirectApplication(ctx context.Context, input, kind string, 
 		}
 		value = payload.AgreementEvidence{AgreementBodyDigest: evidence.AgreementBodyDigest,
 			EvidenceDigest: digest, CanonicalEvidence: canonical}
-	case "agreement.provider-offer":
-		var offer commerce.SignedProviderOffer
-		if err := protocolcodec.Unmarshal(canonical, &offer); err != nil || offer.Binding.ProviderAgentID != d.config.AgentID {
-			return localapi.DirectMessageResult{}, errors.New("Provider Offer does not match the sending Agent")
-		}
-		digest, err := commerce.ProviderOfferDigest(offer)
-		if err != nil {
-			return localapi.DirectMessageResult{}, err
-		}
-		value = payload.PaidDemandProviderOffer{AgreementBodyDigest: offer.Binding.AgreementBodyDigest,
-			ProviderOfferDigest: digest, CanonicalOffer: canonical}
 	case "commerce.profile-event":
 		var event commerce.CommerceProfileEventV1
 		if err := protocolcodec.Unmarshal(canonical, &event); err != nil || event.CreatedAtUnix == 0 ||
@@ -677,21 +663,6 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		_ = journal.Close()
 		return nil, err
 	}
-	var quoteResolver *chainquote.Resolver
-	if config.EscrowCodeHash != "" {
-		adapter, adapterErr := config.ChainAdapter()
-		if adapterErr != nil {
-			_ = journal.Close()
-			return nil, errors.New("build Quote chain adapter: " + adapterErr.Error())
-		}
-		resolved, resolverErr := chainquote.NewFromChain(adapter, config.Network(), config.EscrowCodeHash,
-			config.EscrowCheckpointPath, journal)
-		if resolverErr != nil {
-			_ = journal.Close()
-			return nil, errors.New("build finalized Quote resolver: " + resolverErr.Error())
-		}
-		quoteResolver = resolved
-	}
 	serverConfig := localapi.Config{
 		Policy: config.FirewallPolicy(), OwnerKey: ownerKey,
 		Journal: journal, Dispatcher: dispatcher, LocalEndpointID: config.EndpointID,
@@ -720,10 +691,6 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		}
 		serverConfig.AttachmentAdmitter = admitter
 	}
-	if quoteResolver != nil {
-		serverConfig.QuoteResolver = quoteResolver
-		serverConfig.Network = config.Network()
-	}
 	var contactDNS contact.DNSAliasClient
 	if config.ContactDNS != nil {
 		client, clientErr := config.ContactDNS.Client()
@@ -749,7 +716,12 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		return nil, err
 	}
 	if len(economicKeys) != 0 {
-		economicStore, storeErr := economicaction.Open(config.StateDir, economicKeys)
+		verifier, verifierErr := config.MLDSA44VerifierHelper()
+		if verifierErr != nil {
+			_ = journal.Close()
+			return nil, errors.New("build Action Authority verifier: " + verifierErr.Error())
+		}
+		economicStore, storeErr := economicaction.Open(config.StateDir, economicKeys, verifier)
 		if storeErr != nil {
 			_ = journal.Close()
 			return nil, errors.New("open economic action store: " + storeErr.Error())
@@ -762,7 +734,6 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		return nil, err
 	}
 	instance.server = server
-	instance.quoteResolver = quoteResolver
 	if config.AgentPacketReceiverSocket != "" {
 		resolver, resolverErr := newFinalizedPacketResolver(config)
 		if resolverErr != nil {
@@ -775,8 +746,13 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 			_ = journal.Close()
 			return nil, receiverErr
 		}
+		verifier, verifierErr := config.MLDSA44VerifierHelper()
+		if verifierErr != nil {
+			_ = journal.Close()
+			return nil, errors.New("build Agent Packet verifier: " + verifierErr.Error())
+		}
 		bridge, bridgeErr := agentpacketbridge.New(agentpacketbridge.Config{
-			Resolver: resolver, Journal: journal, Receiver: receiver, RecipientAgentID: config.AgentID,
+			Resolver: resolver, Verifier: verifier, Journal: journal, Receiver: receiver, RecipientAgentID: config.AgentID,
 		})
 		if bridgeErr != nil {
 			_ = journal.Close()

@@ -33,7 +33,6 @@ var codecs = map[string]codec{
 	"agreement.evidence":              {schema: AgreementEvidence{}.Schema(), decode: decodeAgreementEvidence},
 	"agreement.withdraw":              {schema: AgreementWithdraw{}.Schema(), decode: decodeAgreementWithdraw},
 	"agreement.delivery":              {schema: AgreementDelivery{}.Schema(), decode: decodeAgreementDelivery},
-	"agreement.provider-offer":        {schema: PaidDemandProviderOffer{}.Schema(), decode: decodePaidDemandProviderOffer},
 	"commerce.profile-event":          {schema: CommerceProfileEvent{}.Schema(), decode: decodeCommerceProfileEvent},
 	"operation.outcome":               {schema: OperationOutcome{}.Schema(), decode: decodeOperationOutcome},
 	"private.handoff.challenge":       {schema: PrivateHandoffChallenge{}.Schema(), decode: decodePrivateHandoffChallenge},

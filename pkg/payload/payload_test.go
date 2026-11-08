@@ -88,12 +88,6 @@ func sample(kind string) Payload {
 		canonical, _ := protocolcodec.Marshal(evidence)
 		evidenceDigest, _ := protocolcodec.Digest("tos.agreement-authorization-evidence.v1", evidence)
 		return AgreementEvidence{AgreementBodyDigest: digest, EvidenceDigest: evidenceDigest, CanonicalEvidence: canonical}
-	case "agreement.provider-offer":
-		offer := samplePaidDemandProviderOffer()
-		canonical, _ := protocolcodec.Marshal(offer)
-		digest, _ := commerce.ProviderOfferDigest(offer)
-		return PaidDemandProviderOffer{AgreementBodyDigest: offer.Binding.AgreementBodyDigest,
-			ProviderOfferDigest: digest, CanonicalOffer: canonical}
 	case "agreement.withdraw":
 		return AgreementWithdraw{AgreementBodyDigest: "sha256:" + strings.Repeat("a", 64), ProposalActionID: "sha256:" + strings.Repeat("b", 64), Reason: "terms changed"}
 	case "agreement.delivery":
@@ -265,28 +259,6 @@ func sample(kind string) Payload {
 			DecisionRevision: 1, Action: "hide", Reason: "off topic"}
 	}
 	return nil
-}
-
-func samplePaidDemandProviderOffer() commerce.SignedProviderOffer {
-	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x72}, ed25519.SeedSize))
-	digest := func(octet string) string { return "sha256:" + strings.Repeat(octet, 64) }
-	binding := commerce.PaidDemandQuoteBindingBody{SchemaVersion: 1, NetworkContext: "tos:test",
-		AgreementBodyDigest: digest("1"), AgreementObligationIDs: []string{"pay", "work"},
-		AgreementAuthorizationPredicateIDs:  []string{"buyer", "provider"},
-		AgreementAuthorizationTargetDigests: []string{digest("2"), digest("3")},
-		EvidenceProfileURI:                  commerce.EvidenceProfilePaidDemandQuote, EvidenceProfileVersion: 1,
-		EvidenceProfileDigest: commerce.PaidDemandQuoteProfileDigest(), DemandMutationDigest: digest("4"),
-		ProviderOfferID: "offer:test", ProviderAgentID: "agent:provider", BuyerAgentID: "agent:buyer",
-		BuyerWallet: "0:" + strings.Repeat("5", 64), ProviderWallet: "0:" + strings.Repeat("6", 64),
-		NativeQuoteTermsProjectionDigest: "tvm-cell-sha256:" + strings.Repeat("7", 64), AcceptByUnix: 1_800_000_000}
-	context := commerce.ProviderProofContext{SchemaVersion: 1, NetworkContext: binding.NetworkContext,
-		ProviderAgentID: binding.ProviderAgentID, Purpose: "provider-offer.sign",
-		PublicKey: "ed25519:" + hex.EncodeToString(key.Public().(ed25519.PublicKey)), AgentGeneration: 1,
-		ControllerPolicyDigest: digest("8"), DelegationDigest: digest("9"), ScopeBoundsDigest: digest("a"),
-		OwnerMandateDigest: digest("b"), IssuanceAuthorityReferenceDigest: digest("c"),
-		ValidFromUnix: 1_700_000_000, ExpiresAtUnix: binding.AcceptByUnix}
-	offer, _ := commerce.SignProviderOffer(binding, context, key)
-	return offer
 }
 
 func samplePrivateHandoff() (commerce.SignedPrivateHandoffChallenge, commerce.SignedPrivateHandoffAuthorization, ed25519.PrivateKey) {

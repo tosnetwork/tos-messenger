@@ -1,7 +1,7 @@
 // Package chainagent reads finalized Agent state from TOS chain state and
 // satisfies the Messenger's identity.AgentResolver.
 //
-// Like pkg/chainquote, it reimplements no chain logic: the quorum-finalized,
+// It reimplements no chain logic: the quorum-finalized,
 // rollback-protected typed read belongs to tos-service-protocol's toschain, and
 // this package only adapts that read to the single-argument shape the
 // Messenger's delegation verifier calls. The finalized chain state is the

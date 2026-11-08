@@ -2,6 +2,7 @@ package intentcarrier
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -15,8 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-messenger/internal/actionauthoritytest"
+	"github.com/tosnetwork/tos-messenger/pkg/economicaction"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 )
 
 func TestIndependentJournalPublishSearchResolveRestartAndHTTP(t *testing.T) {
@@ -24,9 +29,9 @@ func TestIndependentJournalPublishSearchResolveRestartAndHTTP(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, authorityKey, _ := ed25519.GenerateKey(rand.Reader)
+	authorityKey := fakeAuthority()
 	store, err := Open(root, "carrier:messenger-independent", 20, 5,
-		map[string]ed25519.PublicKey{"authority:test": authorityKey.Public().(ed25519.PublicKey)})
+		authorityKey.pins(t), authorityKey.verifier)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +72,7 @@ func TestIndependentJournalPublishSearchResolveRestartAndHTTP(t *testing.T) {
 		t.Fatalf("HTTP resolve status=%d body=%s", response.Code, response.Body.String())
 	}
 	if concurrent, openErr := Open(root, store.carrierID, 20, 5,
-		map[string]ed25519.PublicKey{"authority:test": authorityKey.Public().(ed25519.PublicKey)}); openErr == nil {
+		authorityKey.pins(t), authorityKey.verifier); openErr == nil {
 		_ = concurrent.Close()
 		t.Fatal("second process acquired the Messenger Carrier journal")
 	}
@@ -75,7 +80,7 @@ func TestIndependentJournalPublishSearchResolveRestartAndHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted, err := Open(root, "carrier:messenger-independent", 20, 5,
-		map[string]ed25519.PublicKey{"authority:test": authorityKey.Public().(ed25519.PublicKey)})
+		authorityKey.pins(t), authorityKey.verifier)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,9 +99,9 @@ func TestHTTPPublicationRequiresWriteToken(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, authorityKey, _ := ed25519.GenerateKey(rand.Reader)
+	authorityKey := fakeAuthority()
 	store, err := Open(root, "carrier:messenger-http", 20, 5,
-		map[string]ed25519.PublicKey{"authority:test": authorityKey.Public().(ed25519.PublicKey)})
+		authorityKey.pins(t), authorityKey.verifier)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,12 +152,12 @@ func testIntent(t *testing.T, now time.Time) commerce.SignedAgentIntent {
 }
 
 func testPublicationAction(t *testing.T, store *Store, intent commerce.SignedAgentIntent,
-	authorityKey ed25519.PrivateKey, now time.Time) (commerce.AuthorizedAction, commerce.WriterFence) {
+	authorityKey testAuthority, now time.Time) (commerce.AuthorizedAction, commerce.WriterFence) {
 	t.Helper()
-	fence, err := commerce.SignWriterFence(commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:test",
+	fence, err := commerce.SignWriterFence(context.Background(), commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:test",
 		AgentID: intent.Body.IssuerAgentID, InstanceID: "instance:test", LeaseID: "lease:test", WriterGeneration: 1,
 		IssuedAtUnix: uint64(now.Add(-time.Second).Unix()), ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()),
-		AuthorityID: "authority:test", Scope: []string{"publication.publish"}}, authorityKey)
+		AuthorityID: "authority:test", Scope: []string{"publication.publish"}}, authorityKey.signer, authorityKey.controller)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,12 +169,45 @@ func testPublicationAction(t *testing.T, store *Store, intent commerce.SignedAge
 	action, err := commerce.BuildAuthorizedAction("owner:test", intent.Body.IssuerAgentID, "publication.publish", fields, exact,
 		fence, 1, "sha256:"+strings.Repeat("1", 64), "", "not-published", uint64(now.Add(time.Hour).Unix()))
 	if err == nil {
-		action, err = commerce.SignAuthorizedAction(action, authorityKey)
+		action, err = commerce.SignAuthorizedAction(context.Background(), action, authorityKey.keyID, authorityKey.signer, authorityKey.controller)
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	return action, fence
+}
+
+// testAuthority names an Action Authority controller in custody and the
+// verifier that checks its signatures.
+type testAuthority struct {
+	signer     mldsa44.Signer
+	verifier   mldsa44.Verifier
+	controller string
+	keyID      string
+	publicKey  []byte
+}
+
+// fakeAuthority is the deterministic in-process stand-in used by pure-logic
+// tests.
+func fakeAuthority() testAuthority {
+	fake := &mldsa44test.Fake{}
+	return testAuthority{signer: fake, verifier: fake, controller: actionauthoritytest.Controller,
+		keyID: fake.KeyID(actionauthoritytest.Controller), publicKey: fake.PublicKey(actionauthoritytest.Controller)}
+}
+
+func (authority testAuthority) pin(t *testing.T) economicaction.PinnedAuthority {
+	t.Helper()
+	keyID, err := mldsa44.ParseKeyIDText(authority.keyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return economicaction.PinnedAuthority{KeyID: keyID, PublicKey: authority.publicKey}
+}
+
+// pins pins the authority's key for authority:test.
+func (authority testAuthority) pins(t *testing.T) map[string]economicaction.PinnedAuthority {
+	t.Helper()
+	return map[string]economicaction.PinnedAuthority{"authority:test": authority.pin(t)}
 }
 
 type testAuthorizer struct{}
