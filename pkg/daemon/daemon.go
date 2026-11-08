@@ -20,7 +20,6 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/agentpacketbridge"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentadmission"
 	"github.com/tosnetwork/tos-messenger/pkg/attachmentops"
-	"github.com/tosnetwork/tos-messenger/pkg/chainquote"
 	"github.com/tosnetwork/tos-messenger/pkg/contact"
 	"github.com/tosnetwork/tos-messenger/pkg/directory"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
@@ -30,10 +29,8 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/fault"
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
-	"github.com/tosnetwork/tos-messenger/pkg/negotiation"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
-	"github.com/tosnetwork/tos-messenger/pkg/protocolbridge"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	protocolcodec "github.com/tosnetwork/tos-service-protocol/pkg/codec"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativeclient"
@@ -55,29 +52,22 @@ type Observer interface {
 	Failed(stage string, err error)
 }
 
-type protocolEventReceiver interface {
-	Receive(context.Context, envelope.Event) error
-}
-
 // Daemon is one running installation.
 type Daemon struct {
-	config        Config
-	journal       *eventlog.Journal
-	dispatch      *dispatch.Dispatcher
-	server        *localapi.Server
-	listener      net.Listener
-	owner         net.Listener
-	salt          []byte
-	observer      Observer
-	discovery     *discoveryRuntime
-	prekeys       *prekeyRuntime
-	admission     *admission.Gate
-	agentPackets  *agentpacketbridge.Bridge
-	a2aReceiver   protocolEventReceiver
-	mcpReceiver   protocolEventReceiver
-	quoteResolver negotiation.QuoteResolver
-	contactDNS    *nativeclient.Client
-	now           func() time.Time
+	config       Config
+	journal      *eventlog.Journal
+	dispatch     *dispatch.Dispatcher
+	server       *localapi.Server
+	listener     net.Listener
+	owner        net.Listener
+	salt         []byte
+	observer     Observer
+	discovery    *discoveryRuntime
+	prekeys      *prekeyRuntime
+	admission    *admission.Gate
+	agentPackets *agentpacketbridge.Bridge
+	contactDNS   *nativeclient.Client
+	now          func() time.Time
 
 	closeOnce sync.Once
 }
@@ -233,17 +223,6 @@ func (d *Daemon) SendDirectApplication(ctx context.Context, input, kind string, 
 		}
 		value = payload.AgreementEvidence{AgreementBodyDigest: evidence.AgreementBodyDigest,
 			EvidenceDigest: digest, CanonicalEvidence: canonical}
-	case "agreement.provider-offer":
-		var offer commerce.SignedProviderOffer
-		if err := protocolcodec.Unmarshal(canonical, &offer); err != nil || offer.Binding.ProviderAgentID != d.config.AgentID {
-			return localapi.DirectMessageResult{}, errors.New("Provider Offer does not match the sending Agent")
-		}
-		digest, err := commerce.ProviderOfferDigest(offer)
-		if err != nil {
-			return localapi.DirectMessageResult{}, err
-		}
-		value = payload.PaidDemandProviderOffer{AgreementBodyDigest: offer.Binding.AgreementBodyDigest,
-			ProviderOfferDigest: digest, CanonicalOffer: canonical}
 	case "commerce.profile-event":
 		var event commerce.CommerceProfileEventV1
 		if err := protocolcodec.Unmarshal(canonical, &event); err != nil || event.CreatedAtUnix == 0 ||
@@ -677,21 +656,6 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		_ = journal.Close()
 		return nil, err
 	}
-	var quoteResolver *chainquote.Resolver
-	if config.EscrowCodeHash != "" {
-		adapter, adapterErr := config.ChainAdapter()
-		if adapterErr != nil {
-			_ = journal.Close()
-			return nil, errors.New("build Quote chain adapter: " + adapterErr.Error())
-		}
-		resolved, resolverErr := chainquote.NewFromChain(adapter, config.Network(), config.EscrowCodeHash,
-			config.EscrowCheckpointPath, journal)
-		if resolverErr != nil {
-			_ = journal.Close()
-			return nil, errors.New("build finalized Quote resolver: " + resolverErr.Error())
-		}
-		quoteResolver = resolved
-	}
 	serverConfig := localapi.Config{
 		Policy: config.FirewallPolicy(), OwnerKey: ownerKey,
 		Journal: journal, Dispatcher: dispatcher, LocalEndpointID: config.EndpointID,
@@ -720,10 +684,6 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		}
 		serverConfig.AttachmentAdmitter = admitter
 	}
-	if quoteResolver != nil {
-		serverConfig.QuoteResolver = quoteResolver
-		serverConfig.Network = config.Network()
-	}
 	var contactDNS contact.DNSAliasClient
 	if config.ContactDNS != nil {
 		client, clientErr := config.ContactDNS.Client()
@@ -749,7 +709,12 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		return nil, err
 	}
 	if len(economicKeys) != 0 {
-		economicStore, storeErr := economicaction.Open(config.StateDir, economicKeys)
+		verifier, verifierErr := config.MLDSA44VerifierHelper()
+		if verifierErr != nil {
+			_ = journal.Close()
+			return nil, errors.New("build Action Authority verifier: " + verifierErr.Error())
+		}
+		economicStore, storeErr := economicaction.Open(config.StateDir, economicKeys, verifier)
 		if storeErr != nil {
 			_ = journal.Close()
 			return nil, errors.New("open economic action store: " + storeErr.Error())
@@ -762,7 +727,6 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 		return nil, err
 	}
 	instance.server = server
-	instance.quoteResolver = quoteResolver
 	if config.AgentPacketReceiverSocket != "" {
 		resolver, resolverErr := newFinalizedPacketResolver(config)
 		if resolverErr != nil {
@@ -775,32 +739,19 @@ func openWithDiscoveryAndPublisher(config Config, observer Observer, verifier de
 			_ = journal.Close()
 			return nil, receiverErr
 		}
+		verifier, verifierErr := config.MLDSA44VerifierHelper()
+		if verifierErr != nil {
+			_ = journal.Close()
+			return nil, errors.New("build Agent Packet verifier: " + verifierErr.Error())
+		}
 		bridge, bridgeErr := agentpacketbridge.New(agentpacketbridge.Config{
-			Resolver: resolver, Journal: journal, Receiver: receiver, RecipientAgentID: config.AgentID,
+			Resolver: resolver, Verifier: verifier, Journal: journal, Receiver: receiver, RecipientAgentID: config.AgentID,
 		})
 		if bridgeErr != nil {
 			_ = journal.Close()
 			return nil, bridgeErr
 		}
 		instance.agentPackets = bridge
-	}
-	if config.A2AReceiverSocket != "" {
-		receiver, receiverErr := protocolbridge.NewUnixReceiver(
-			config.A2AReceiverSocket, protocolbridge.ProfileA2A, config.ProtocolReceiverTimeout())
-		if receiverErr != nil {
-			_ = journal.Close()
-			return nil, receiverErr
-		}
-		instance.a2aReceiver = receiver
-	}
-	if config.MCPReceiverSocket != "" {
-		receiver, receiverErr := protocolbridge.NewUnixReceiver(
-			config.MCPReceiverSocket, protocolbridge.ProfileMCP, config.ProtocolReceiverTimeout())
-		if receiverErr != nil {
-			_ = journal.Close()
-			return nil, receiverErr
-		}
-		instance.mcpReceiver = receiver
 	}
 	discovery, err := builder.Build(config, journal, observer)
 	if err != nil {
@@ -994,13 +945,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.runAgentPackets(ctx)
 		}()
 	}
-	if d.a2aReceiver != nil || d.mcpReceiver != nil {
-		group.Add(1)
-		go func() {
-			defer group.Done()
-			d.runProtocolEvents(ctx)
-		}()
-	}
 	group.Add(1)
 	go func() {
 		defer group.Done()
@@ -1179,91 +1123,6 @@ func (d *Daemon) sweepAgentPackets(ctx context.Context) {
 		if _, err := d.journal.CompleteApplication(record.EventID, leaseID, nowFn()); err != nil {
 			d.report("complete Agent Packet", err)
 		}
-	}
-}
-
-func (d *Daemon) runProtocolEvents(ctx context.Context) {
-	ticker := time.NewTicker(d.config.SweepInterval())
-	defer ticker.Stop()
-	for {
-		d.sweepProtocolEvents(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
-// sweepProtocolEvents owns A2A and MCP application leases. These events are
-// reserved even when no receiver is configured, so they can never silently
-// degrade into untrusted model text.
-func (d *Daemon) sweepProtocolEvents(ctx context.Context) {
-	nowFn := d.now
-	if nowFn == nil {
-		nowFn = time.Now
-	}
-	records, err := d.journal.ListPending(nowFn(), 0)
-	if err != nil {
-		d.report("list protocol events", err)
-		return
-	}
-	for _, record := range records {
-		if ctx.Err() != nil {
-			return
-		}
-		raw, err := record.Payload()
-		if err != nil {
-			continue
-		}
-		event, err := envelope.DecodeEventJSON(raw)
-		if err != nil {
-			continue
-		}
-		receiver := d.protocolReceiver(event.Kind)
-		if receiver == nil {
-			continue
-		}
-		if _, err := payload.Decode(event.Kind, event.Content); err != nil {
-			d.report("decode protocol event", err)
-			continue
-		}
-		var entropy [32]byte
-		if _, err := rand.Read(entropy[:]); err != nil {
-			d.report("claim protocol event", err)
-			return
-		}
-		leaseID, err := eventlog.NewLeaseID(entropy[:])
-		if err != nil {
-			d.report("claim protocol event", err)
-			return
-		}
-		now := nowFn()
-		lease := d.config.ProtocolReceiverTimeout() + 5*time.Second
-		if _, err := d.journal.ClaimForApplicationKind(record.EventID, leaseID, now, lease, event.Kind); err != nil {
-			if !errors.Is(err, eventlog.ErrLeaseMismatch) && !errors.Is(err, eventlog.ErrNotPending) {
-				d.report("claim protocol event", err)
-			}
-			continue
-		}
-		if err := receiver.Receive(ctx, event); err != nil {
-			d.report("deliver protocol event", err)
-			continue
-		}
-		if _, err := d.journal.CompleteApplication(record.EventID, leaseID, nowFn()); err != nil {
-			d.report("complete protocol event", err)
-		}
-	}
-}
-
-func (d *Daemon) protocolReceiver(kind string) protocolEventReceiver {
-	switch kind {
-	case "a2a.message":
-		return d.a2aReceiver
-	case "mcp.call", "mcp.result":
-		return d.mcpReceiver
-	default:
-		return nil
 	}
 }
 

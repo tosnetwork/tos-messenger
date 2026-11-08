@@ -98,38 +98,24 @@ it durably to that sender and Event ID; an exact retry is idempotent, while any
 other event falls back to owner hold. Relay deposit signatures commit the
 opaque token, so a Relay cannot substitute it.
 
-A wallet/funding process records the escrow it actually prepared through the
-same owner ceremony; configuration is deliberately not accepted as funding
-evidence:
+The escrow funding locator and runtime `quotes.verify` were removed with
+stablecoin escrow: software work settles on the Service Actor rail, and the
+daemon no longer resolves Accepted Quotes. The legacy negotiation Terms and
+escrow-shaped payload kinds remain non-authorizing conversation semantics;
+no production code supplies them a Quote resolver.
 
-```sh
-tos-messenger-owner -socket /run/tos-messengerd/owner.sock \
-  prepare-escrow-location \
-  -commitment tvm-cell-sha256:... -escrow 0:... \
-  -capability-class software.audit > prepared.json
-tos-messenger-owner sign -key owner.key -decision prepared.json > signed.json
-tos-messenger-owner -socket /run/tos-messengerd/owner.sock \
-  submit -decision signed.json
-```
-
-The decision signs the exact Quote commitment, escrow account and caller-
-attested Capability class. An exact funding retry is idempotent; redirecting
-one commitment to another account conflicts. This records what the wallet
-funded—it neither funds the escrow nor replaces the finalized chain read.
-
-Set both `escrow_code_hash` and the daemon-owned
-`escrow_checkpoint_path` to enable runtime `quotes.verify`. After funding has
-reached finality, OpenFox submits the commitment, deterministic escrow address,
-Capability class, and the complete terms it authorized. The daemon treats the
-address only as a candidate and resolves that exact account through the strict chain
-adapter and returns transaction/code/checkpoint evidence only when commitment,
-provider, capability, manifest, transport, asset, price, escrow/dispute terms,
-expiry, network ID, and both bare genesis hashes all match. The operation is
-read-only: it cannot create a locator, approve spending, sign, fund, or dispatch
-a task or persist a runtime-supplied locator. Thus the funded execution path
-does not require a prior owner locator write, while digest-only negotiation may
-still use the owner-attested mapping. Omitting both fields disables the
-operation; configuring only one is a startup error.
+`economic_authorities` pins the ML-DSA-44 Action Authority keys allowed to
+issue OpenFox writer fences, sorted by `authority_id`, each with its
+`key_id` (`mldsa44:<64 lowercase hex>`) and the 1,312-byte `public_key_hex`
+that must derive it; Ed25519 keys are refused. `mldsa44_verifier`
+(`binary`, `sha256`) names the pinned tosctl helper that verifies those
+signatures and Agent Packet signatures. It is configured without a vault, so
+it cannot sign, and it is required exactly when `economic_authorities` or
+`agent_packet_receiver_socket` is set. `tos-intent-carrierd` takes the same
+pins as repeated `--authority AUTHORITY_ID=mldsa44:<key ID>@<owner-only key
+file>` flags and the helper as `--tosctl` / `--tosctl-sha256`, defaulting to
+`TOS_SERVICE_TOSCTL` / `TOS_SERVICE_TOSCTL_SHA256`; it never computes the pin
+itself, so a runner must export both.
 
 When `publication.mode` is `prekeys`, the third socket exposes only the current
 fixed public generation and admission of one already Endpoint-signed public

@@ -29,7 +29,6 @@ import (
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	protocolcodec "github.com/tosnetwork/tos-service-protocol/pkg/codec"
-	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -82,12 +81,6 @@ type stubSender struct{ sent int }
 
 func (s *stubSender) Send(context.Context, dispatch.Message) error { s.sent++; return nil }
 
-type fixedQuoteResolver struct {
-	quote negotiation.VerifiedAcceptedQuote
-	found bool
-	err   error
-}
-
 type fixedContactResolver struct {
 	result contact.Result
 	err    error
@@ -110,19 +103,6 @@ func (e *fixedDirectConversationEnsurer) EnsureDirectConversation(
 func (r *fixedContactResolver) Resolve(_ context.Context, input string) (contact.Result, error) {
 	r.input = input
 	return r.result, r.err
-}
-
-func (r fixedQuoteResolver) ResolveAcceptedQuote(string) (negotiation.VerifiedAcceptedQuote, bool, error) {
-	return r.quote, r.found, r.err
-}
-
-func (r fixedQuoteResolver) ResolveAcceptedQuoteAt(
-	context.Context,
-	string,
-	string,
-	string,
-) (negotiation.VerifiedAcceptedQuote, bool, error) {
-	return r.quote, r.found, r.err
 }
 
 type stubBindings struct{}
@@ -1675,102 +1655,6 @@ func testPurchase(units uint64) *PurchaseTerms {
 func (h *harness) placeMandate(t *testing.T) string {
 	t.Helper()
 	return h.placeMandateWithTotal(t, "1000", "500")
-}
-
-func TestOwnerRecordsFundedEscrowLocationCrashSafely(t *testing.T) {
-	h := newHarness(t)
-	commitment := "tvm-cell-sha256:" + strings.Repeat("a", 64)
-	address := "0:" + strings.Repeat("b", 64)
-	request := Request{Op: OpRecordEscrowLocation, QuoteCommitment: commitment,
-		EscrowAddress: address, CapabilityClass: "software.audit"}
-	first := h.owner(t, request)
-	if !first.OK || !first.Fresh {
-		t.Fatalf("record escrow location: %+v", first)
-	}
-	storedAddress, class, found, err := h.journal.LocateEscrow(commitment)
-	if err != nil || !found || storedAddress != address || class != "software.audit" {
-		t.Fatalf("stored escrow location: address=%q class=%q found=%v err=%v", storedAddress, class, found, err)
-	}
-	if retry := h.owner(t, request); !retry.OK || retry.Fresh {
-		t.Fatalf("exact owner retry was not idempotent: %+v", retry)
-	}
-	redirect := request
-	redirect.EscrowAddress = "0:" + strings.Repeat("c", 64)
-	if response := h.owner(t, redirect); response.OK {
-		t.Fatal("owner retry redirected one Quote commitment to another escrow")
-	}
-	if response := h.runtimeAttempt(t, request); response.OK {
-		t.Fatal("runtime wrote the owner/wallet escrow locator")
-	}
-}
-
-func TestRuntimeVerifiesExactFinalizedQuoteWithoutReceivingAuthority(t *testing.T) {
-	h := newHarness(t)
-	commitment := "tvm-cell-sha256:" + strings.Repeat("a", 64)
-	expected := testPurchase(200)
-	expected.Asset.NetworkID = testNetwork().NetworkId
-	expected.Asset.GenesisRootHash = testNetwork().GenesisRootHash
-	expected.Asset.GenesisFileHash = testNetwork().GenesisFileHash
-	quote := negotiation.VerifiedAcceptedQuote{
-		Commitment: commitment, Terms: *toTerms(expected), Network: testNetwork(),
-		Reference: &nativev1.ChainReference{
-			Account: "0:" + strings.Repeat("b", 64), TransactionHash: "sha256:" + strings.Repeat("c", 64),
-			ContractCodeHash: "tvm-cell-sha256:" + strings.Repeat("d", 64), FinalizedCheckpoint: 99,
-		},
-		FinalizedAtUnix: baseUnix,
-	}
-	h.server.config.QuoteResolver = fixedQuoteResolver{quote: quote, found: true}
-	h.server.config.Network = testNetwork()
-	request := Request{Op: OpVerifyAcceptedQuote, QuoteCommitment: commitment,
-		EscrowAddress: quote.Reference.Account, CapabilityClass: expected.CapabilityClass,
-		ExpectedQuoteTerms: expected}
-	verified := h.call(t, request)
-	if !verified.OK || verified.Authorised || verified.FinalizedQuote == nil ||
-		verified.FinalizedQuote.Commitment != commitment || verified.FinalizedQuote.FinalizedCheckpoint != 99 ||
-		verified.FinalizedQuote.EscrowAccount != quote.Reference.Account {
-		t.Fatalf("finalized Quote verification: %+v", verified)
-	}
-	if _, _, found, err := h.journal.LocateEscrow(commitment); err != nil || found {
-		t.Fatalf("read-only verification created an escrow locator: found=%v err=%v", found, err)
-	}
-	wrongAccount := quote
-	wrongReference := proto.Clone(quote.Reference).(*nativev1.ChainReference)
-	wrongReference.Account = "0:" + strings.Repeat("f", 64)
-	wrongAccount.Reference = wrongReference
-	h.server.config.QuoteResolver = fixedQuoteResolver{quote: wrongAccount, found: true}
-	if response := h.call(t, request); response.OK {
-		t.Fatal("finalized evidence for another escrow account matched the candidate address")
-	}
-	h.server.config.QuoteResolver = fixedQuoteResolver{quote: quote, found: true}
-
-	substituted := *expected
-	substituted.ProviderAgentID = "agent_" + strings.Repeat("e", 64)
-	request.ExpectedQuoteTerms = &substituted
-	if response := h.call(t, request); response.OK {
-		t.Fatal("finalized Quote with another provider matched expected terms")
-	}
-
-	foreign := *expected
-	foreign.Asset.NetworkID = "tos-foreign"
-	foreignQuote := quote
-	foreignQuote.Terms = *toTerms(&foreign)
-	foreignQuote.Network = &nativev1.NetworkDomain{NetworkId: foreign.Asset.NetworkID,
-		GenesisRootHash: foreign.Asset.GenesisRootHash, GenesisFileHash: foreign.Asset.GenesisFileHash}
-	h.server.config.QuoteResolver = fixedQuoteResolver{quote: foreignQuote, found: true}
-	request.ExpectedQuoteTerms = &foreign
-	if response := h.call(t, request); response.OK {
-		t.Fatal("a self-consistent Quote from another network matched the daemon")
-	}
-
-	h.server.config.QuoteResolver = nil
-	h.server.config.Network = nil
-	request.ExpectedQuoteTerms = expected
-	if response := h.call(t, request); response.OK || response.Code != fault.CodeClassNotDelegated {
-		t.Fatalf("unconfigured Quote verification did not fail closed: %+v", response)
-	}
-	if response := h.callAs(t, PrincipalOwner, request); response.OK {
-		t.Fatal("owner interface performed runtime Quote verification")
-	}
 }
 
 // placeMandateWithTotal places a mandate with a chosen ceiling, so a test can

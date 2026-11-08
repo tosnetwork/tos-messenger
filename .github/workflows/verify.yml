@@ -8,11 +8,35 @@ on:
 permissions:
   contents: read
 
+env:
+  # The tosctl build that verifies ML-DSA-44 Action Authority and Agent Packet
+  # signatures and, for the context-separation tests, signs custody
+  # authorizations. Tests that check real ML-DSA-44 bytes fail, rather than
+  # skip, without it. Repin when the helper lands on the tos main branch.
+  TOS_HELPER_REPOSITORY: tosnetwork/tos
+  TOS_HELPER_COMMIT: c41331dd3103c0eac719d7e5f368079f0a40e64f
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The helper is built outside the workspace so the repository's own
+      # format and vet checks never walk its source tree.
+      - name: Fetch the pinned tosctl helper source
+        run: |
+          git init -q "$RUNNER_TEMP/tos"
+          git -C "$RUNNER_TEMP/tos" fetch -q --depth 1 "https://github.com/$TOS_HELPER_REPOSITORY" "$TOS_HELPER_COMMIT"
+          git -C "$RUNNER_TEMP/tos" checkout -q FETCH_HEAD
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and pin the tosctl helper
+        run: |
+          cd "$RUNNER_TEMP/tos/tosctl/src"
+          cargo build -p tosctl --bin tosctl --locked
+          helper="$RUNNER_TEMP/tos/tosctl/src/target/debug/tosctl"
+          chmod 0755 "$helper"
+          echo "TOS_SERVICE_TOSCTL=$helper" >> "$GITHUB_ENV"
+          echo "TOS_SERVICE_TOSCTL_SHA256=$(sha256sum "$helper" | cut -d' ' -f1)" >> "$GITHUB_ENV"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

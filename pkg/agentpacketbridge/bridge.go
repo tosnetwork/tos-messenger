@@ -14,6 +14,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentpacket"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 const (
@@ -22,7 +23,9 @@ const (
 )
 
 type Config struct {
-	Resolver         agentpacket.AgentResolver
+	Resolver agentpacket.AgentResolver
+	// Verifier checks the sender's ML-DSA-44 Agent Packet signature.
+	Verifier         mldsa44.Verifier
 	Journal          *eventlog.Journal
 	Receiver         agentpacket.Receiver
 	RecipientAgentID string
@@ -32,6 +35,7 @@ type Config struct {
 
 type Bridge struct {
 	resolver           agentpacket.AgentResolver
+	verifier           mldsa44.Verifier
 	journal            *eventlog.Journal
 	receiver           agentpacket.Receiver
 	recipient          string
@@ -40,7 +44,7 @@ type Bridge struct {
 }
 
 func New(c Config) (*Bridge, error) {
-	if c.Resolver == nil || c.Journal == nil || c.Receiver == nil || !ids.Agent.MatchString(c.RecipientAgentID) {
+	if c.Resolver == nil || c.Verifier == nil || c.Journal == nil || c.Receiver == nil || !ids.Agent.MatchString(c.RecipientAgentID) {
 		return nil, errors.New("invalid Agent Packet bridge configuration")
 	}
 	if c.MaxAge == 0 {
@@ -52,7 +56,7 @@ func New(c Config) (*Bridge, error) {
 	if c.MaxAge < time.Minute || c.MaxAge > 7*24*time.Hour || c.MaxFutureSkew < 0 || c.MaxFutureSkew > time.Hour {
 		return nil, errors.New("invalid Agent Packet time policy")
 	}
-	return &Bridge{resolver: c.Resolver, journal: c.Journal, receiver: c.Receiver, recipient: c.RecipientAgentID, maxAge: c.MaxAge, futureSkew: c.MaxFutureSkew}, nil
+	return &Bridge{resolver: c.Resolver, verifier: c.Verifier, journal: c.Journal, receiver: c.Receiver, recipient: c.RecipientAgentID, maxAge: c.MaxAge, futureSkew: c.MaxFutureSkew}, nil
 }
 
 // Handle consumes a decoded Messenger body. Verification is deliberately
@@ -92,7 +96,7 @@ func (b *Bridge) Handle(ctx context.Context, eventSenderAgentID string, body pay
 	}
 	// A fresh process-local guard makes the service protocol run all signature
 	// and finalized-state checks without making its in-memory claim authoritative.
-	if err := agentpacket.Verify(b.resolver, &agentpacket.ReplayGuard{}, packet, now); err != nil {
+	if err := agentpacket.Verify(ctx, b.verifier, b.resolver, &agentpacket.ReplayGuard{}, packet, now); err != nil {
 		return err
 	}
 	recipient, found, err := b.resolver.ResolveAgent(packet.RecipientAgentID)

@@ -2,7 +2,6 @@ package agentpacketbridge
 
 import (
 	"context"
-	"crypto/ed25519"
 	"errors"
 	"strings"
 	"testing"
@@ -12,6 +11,8 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentpacket"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 )
 
 type states map[string]*nativev1.AgentStateV1
@@ -34,13 +35,27 @@ func (r *receiver) Receive(context.Context, agentpacket.Packet) error {
 	return nil
 }
 
-func bridgePacket(t *testing.T, key ed25519.PrivateKey, sender, recipient string, nonce byte, created uint64, body string) agentpacket.Packet {
+// packetKeys stands in for the ML-DSA-44 helper in pure-logic tests; it is
+// not ML-DSA-44.
+var packetKeys = &mldsa44test.Fake{}
+
+func packetPolicy(controller string) *nativev1.ControllerPolicyV1 {
+	return &nativev1.ControllerPolicyV1{Threshold: 1, RecoveryThreshold: 1, Controllers: []*nativev1.ControllerV1{{
+		KeyId: packetKeys.KeyID(controller), Mldsa44PublicKey: packetKeys.PublicKey(controller), Weight: 1, PurposeMask: 15, Recovery: true}}}
+}
+
+func bridgePacket(t *testing.T, key string, sender, recipient string, nonce byte, created uint64, body string) agentpacket.Packet {
 	t.Helper()
 	var n [32]byte
 	for i := range n {
 		n[i] = nonce
 	}
-	p, err := agentpacket.Sign(agentpacket.Packet{SenderAgentID: sender, RecipientAgentID: recipient, CapabilityID: "cap_" + strings.Repeat("3", 64), Sequence: 1, Nonce: n, Payload: []byte(body), CreatedAtUnix: created}, key)
+	keyID, err := mldsa44.ParseKeyIDText(packetKeys.KeyID(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := agentpacket.Sign(context.Background(), packetKeys, key, agentpacket.Packet{SenderAgentID: sender, RecipientAgentID: recipient,
+		SenderKeyID: keyID, CapabilityID: "cap_" + strings.Repeat("3", 64), Sequence: 1, Nonce: n, Payload: []byte(body), CreatedAtUnix: created})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,15 +72,15 @@ func carried(t *testing.T, packet agentpacket.Packet) payload.AgentPacketMessage
 
 func TestBridgeDurablyDeduplicatesAndRecoversPending(t *testing.T) {
 	sender, recipient := "agent_"+strings.Repeat("1", 64), "agent_"+strings.Repeat("2", 64)
-	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	resolver := states{sender: {AgentId: sender, Policy: &nativev1.ControllerPolicyV1{Controllers: []*nativev1.ControllerV1{{Ed25519PublicKey: key.Public().(ed25519.PublicKey)}}}}, recipient: {AgentId: recipient}}
+	key := "sender"
+	resolver := states{sender: {AgentId: sender, Policy: packetPolicy(key)}, recipient: {AgentId: recipient}}
 	root := t.TempDir() + "/state"
 	journal, err := eventlog.Open(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	receive := &receiver{fail: true}
-	bridge, err := New(Config{Resolver: resolver, Journal: journal, Receiver: receive, RecipientAgentID: recipient})
+	bridge, err := New(Config{Resolver: resolver, Verifier: packetKeys, Journal: journal, Receiver: receive, RecipientAgentID: recipient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +107,7 @@ func TestBridgeDurablyDeduplicatesAndRecoversPending(t *testing.T) {
 	}
 	defer journal.Close()
 	afterRestart := &receiver{}
-	bridge, _ = New(Config{Resolver: resolver, Journal: journal, Receiver: afterRestart, RecipientAgentID: recipient})
+	bridge, _ = New(Config{Resolver: resolver, Verifier: packetKeys, Journal: journal, Receiver: afterRestart, RecipientAgentID: recipient})
 	if err := bridge.Handle(context.Background(), sender, carried(t, packet), time.Unix(1_800_000_004, 0)); err != nil {
 		t.Fatal(err)
 	}
@@ -103,12 +118,12 @@ func TestBridgeDurablyDeduplicatesAndRecoversPending(t *testing.T) {
 
 func TestBridgeRejectsConflictStaleAndRevokedRecipient(t *testing.T) {
 	sender, recipient := "agent_"+strings.Repeat("1", 64), "agent_"+strings.Repeat("2", 64)
-	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	resolver := states{sender: {AgentId: sender, Policy: &nativev1.ControllerPolicyV1{Controllers: []*nativev1.ControllerV1{{Ed25519PublicKey: key.Public().(ed25519.PublicKey)}}}}, recipient: {AgentId: recipient}}
+	key := "sender"
+	resolver := states{sender: {AgentId: sender, Policy: packetPolicy(key)}, recipient: {AgentId: recipient}}
 	journal, _ := eventlog.Open(t.TempDir() + "/state")
 	defer journal.Close()
 	receive := &receiver{}
-	bridge, _ := New(Config{Resolver: resolver, Journal: journal, Receiver: receive, RecipientAgentID: recipient})
+	bridge, _ := New(Config{Resolver: resolver, Verifier: packetKeys, Journal: journal, Receiver: receive, RecipientAgentID: recipient})
 	packet := bridgePacket(t, key, sender, recipient, 9, 1_800_000_000, "first")
 	now := time.Unix(1_800_000_001, 0)
 	if err := bridge.Handle(context.Background(), sender, carried(t, packet), now); err != nil {

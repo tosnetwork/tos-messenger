@@ -7,8 +7,7 @@ package economicaction
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,20 +18,60 @@ import (
 	"time"
 
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 const schema = "tos.messaging.economic-action-store.v1"
 
 var ErrStaleWriter = errors.New("economic action writer generation is stale")
 
-type authorityResolver struct{ keys map[string]ed25519.PublicKey }
+// PinnedAuthority is one operator-pinned Action Authority key: its ML-DSA-44
+// controller key ID and the 1,312-byte public key that derives it.
+type PinnedAuthority struct {
+	KeyID     [mldsa44.KeyIDSize]byte
+	PublicKey []byte
+}
 
-func (r authorityResolver) AuthorizeFenceKey(id string, key ed25519.PublicKey, _ time.Time) error {
-	want, ok := r.keys[id]
-	if !ok || !ed25519.PublicKey(key).Equal(want) {
-		return errors.New("writer fence authority is not operator-pinned")
+// authorityResolver authorizes a key only for the exact authority and key ID
+// it is pinned under and verifies through the configured ML-DSA-44 verifier.
+type authorityResolver struct {
+	pins     map[string]PinnedAuthority
+	verifier mldsa44.Verifier
+}
+
+var _ commerce.FenceAuthorityResolver = authorityResolver{}
+
+func (r authorityResolver) Verify(ctx context.Context, use mldsa44.Use, payload, publicKey, signature []byte) error {
+	if r.verifier == nil {
+		return mldsa44.ErrUnavailable
 	}
-	return nil
+	return r.verifier.Verify(ctx, use, payload, publicKey, signature)
+}
+
+func (r authorityResolver) ResolveActionAuthorityKey(authorityID string, keyID [mldsa44.KeyIDSize]byte,
+	_ time.Time) ([]byte, error) {
+	pin, found := r.pins[authorityID]
+	if !found || pin.KeyID != keyID {
+		return nil, errors.New("writer fence authority is not operator-pinned")
+	}
+	return append([]byte(nil), pin.PublicKey...), nil
+}
+
+// newAuthorityResolver refuses an empty trust set, a missing verifier, and a
+// pin whose key does not derive its pinned key ID.
+func newAuthorityResolver(authorities map[string]PinnedAuthority, verifier mldsa44.Verifier) (authorityResolver, error) {
+	if len(authorities) == 0 || verifier == nil {
+		return authorityResolver{}, errors.New("economic action store needs pinned authorities and an ML-DSA-44 verifier")
+	}
+	pins := make(map[string]PinnedAuthority, len(authorities))
+	for id, pin := range authorities {
+		derived, err := mldsa44.KeyID(pin.PublicKey)
+		if id == "" || len(id) > 256 || err != nil || derived != pin.KeyID {
+			return authorityResolver{}, errors.New("economic action authority is invalid")
+		}
+		pins[id] = PinnedAuthority{KeyID: pin.KeyID, PublicKey: append([]byte(nil), pin.PublicKey...)}
+	}
+	return authorityResolver{pins: pins, verifier: verifier}, nil
 }
 
 type document struct {
@@ -50,19 +89,17 @@ type Store struct {
 }
 
 // Open creates or validates a store under the already single-writer daemon
-// state directory. authorities are operator configuration, never request data.
-func Open(stateDir string, authorities map[string]ed25519.PublicKey) (*Store, error) {
-	if !filepath.IsAbs(stateDir) || len(authorities) == 0 {
+// state directory. authorities and verifier are operator configuration, never
+// request data.
+func Open(stateDir string, authorities map[string]PinnedAuthority, verifier mldsa44.Verifier) (*Store, error) {
+	if !filepath.IsAbs(stateDir) {
 		return nil, errors.New("economic action store configuration is invalid")
 	}
-	keys := make(map[string]ed25519.PublicKey, len(authorities))
-	for id, key := range authorities {
-		if id == "" || len(key) != ed25519.PublicKeySize {
-			return nil, errors.New("economic action authority is invalid")
-		}
-		keys[id] = append(ed25519.PublicKey(nil), key...)
+	resolver, err := newAuthorityResolver(authorities, verifier)
+	if err != nil {
+		return nil, err
 	}
-	store := &Store{path: filepath.Join(stateDir, "economic-actions-v1.json"), resolver: authorityResolver{keys: keys},
+	store := &Store{path: filepath.Join(stateDir, "economic-actions-v1.json"), resolver: resolver,
 		doc: document{Schema: schema, HighWater: map[string]uint64{}, FenceHighWater: map[string]string{}, Actions: map[string]commerce.ActionResolution{}}}
 	if info, statErr := os.Lstat(store.path); statErr == nil && (!info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || info.Size() <= 0 || info.Size() > 64<<20) {
 		return nil, errors.New("economic action store is not an owner-only bounded regular file")
@@ -252,13 +289,4 @@ func (s *Store) persistLocked() error {
 	_ = directory.Close()
 	ok = err == nil
 	return err
-}
-
-// ParseAuthorityKey decodes the strict operator configuration form.
-func ParseAuthorityKey(encoded string) (ed25519.PublicKey, error) {
-	raw, err := hex.DecodeString(encoded)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return nil, errors.New("economic authority public key is invalid")
-	}
-	return ed25519.PublicKey(raw), nil
 }

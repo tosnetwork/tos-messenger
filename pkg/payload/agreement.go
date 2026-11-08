@@ -122,47 +122,6 @@ func decodeAgreementEvidence(reader *canon.Reader) Payload {
 		CanonicalEvidence: reader.Bytes(MaxAgreementPromotionBytes)}
 }
 
-// PaidDemandProviderOffer transports the exact signed offer needed to build
-// the deterministic pending escrow. Messenger validates structure and digest;
-// delegated Provider authority is verified by the receiving Agent.
-type PaidDemandProviderOffer struct {
-	AgreementBodyDigest string
-	ProviderOfferDigest string
-	CanonicalOffer      []byte
-}
-
-func (PaidDemandProviderOffer) Schema() string {
-	return "tos.messaging.payload.paid-demand-provider-offer.v1"
-}
-
-func (offer PaidDemandProviderOffer) Validate() error {
-	if !canon.ValidDigest(offer.AgreementBodyDigest) || !canon.ValidDigest(offer.ProviderOfferDigest) ||
-		len(offer.CanonicalOffer) == 0 || len(offer.CanonicalOffer) > MaxAgreementPromotionBytes {
-		return errors.New("Paid Demand Provider Offer is invalid or oversized")
-	}
-	var decoded commerce.SignedProviderOffer
-	if err := protocolcodec.Unmarshal(offer.CanonicalOffer, &decoded); err != nil ||
-		decoded.Binding.AgreementBodyDigest != offer.AgreementBodyDigest {
-		return errors.New("Paid Demand Provider Offer Agreement mismatch")
-	}
-	digest, err := commerce.ProviderOfferDigest(decoded)
-	if err != nil || digest != offer.ProviderOfferDigest {
-		return errors.New("Paid Demand Provider Offer digest mismatch")
-	}
-	return nil
-}
-
-func (offer PaidDemandProviderOffer) encode(buffer *bytes.Buffer) {
-	canon.Text(buffer, offer.AgreementBodyDigest)
-	canon.Text(buffer, offer.ProviderOfferDigest)
-	canon.Bytes(buffer, offer.CanonicalOffer)
-}
-
-func decodePaidDemandProviderOffer(reader *canon.Reader) Payload {
-	return PaidDemandProviderOffer{AgreementBodyDigest: reader.Text(MaxDigestBytes), ProviderOfferDigest: reader.Text(MaxDigestBytes),
-		CanonicalOffer: reader.Bytes(MaxAgreementPromotionBytes)}
-}
-
 type AgreementWithdraw struct {
 	AgreementBodyDigest string
 	ProposalActionID    string

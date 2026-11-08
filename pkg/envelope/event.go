@@ -85,13 +85,12 @@ var eventKinds = map[string]kindSpec{
 
 	// Agreement promotion is explicit and typed. Ordinary negotiation or text
 	// events never inherit this class and cannot create authorization evidence.
-	"agreement.propose":        {class: "agreement"},
-	"intent.application":       {class: "negotiation"},
-	"agreement.accept":         {class: "agreement"},
-	"agreement.evidence":       {class: "agreement"},
-	"agreement.withdraw":       {class: "agreement"},
-	"agreement.delivery":       {class: "agreement.delivery"},
-	"agreement.provider-offer": {class: "agreement"},
+	"agreement.propose":  {class: "agreement"},
+	"intent.application": {class: "negotiation"},
+	"agreement.accept":   {class: "agreement"},
+	"agreement.evidence": {class: "agreement"},
+	"agreement.withdraw": {class: "agreement"},
+	"agreement.delivery": {class: "agreement.delivery"},
 
 	// Profile-qualified economic objects are data, not model text or authority.
 	"commerce.profile-event": {class: "commerce.profile"},
@@ -235,7 +234,6 @@ func RequiresEstablishedDirect(kind string) bool {
 	switch kind {
 	case "agent.gift.address-request", "agent.gift.address-response", "agent.gift.signed-boc-offer",
 		"agreement.propose", "agreement.accept", "agreement.evidence", "agreement.withdraw", "agreement.delivery",
-		"agreement.provider-offer",
 		"private.handoff.challenge", "private.handoff.authorization", "private.handoff.acknowledgement",
 		"private.handoff.status", "private.handoff.delete":
 		return true

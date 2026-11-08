@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -27,12 +28,14 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/attachments"
 	"github.com/tosnetwork/tos-messenger/pkg/dispatch"
 	"github.com/tosnetwork/tos-messenger/pkg/e2ee"
+	"github.com/tosnetwork/tos-messenger/pkg/economicaction"
 	"github.com/tosnetwork/tos-messenger/pkg/envelope"
 	"github.com/tosnetwork/tos-messenger/pkg/eventlog"
 	"github.com/tosnetwork/tos-messenger/pkg/firewall"
 	"github.com/tosnetwork/tos-messenger/pkg/identity"
 	"github.com/tosnetwork/tos-messenger/pkg/tosaddr"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativeclient"
 	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
 )
@@ -131,13 +134,7 @@ type Config struct {
 	ChainReadinessMaxAgeSeconds uint64   `json:"chain_readiness_max_age_seconds,omitempty"`
 	NativeRegistryCodeHash      string   `json:"native_registry_code_hash"`
 	ChainCheckpointPath         string   `json:"chain_checkpoint_path"`
-	// EscrowCodeHash and EscrowCheckpointPath explicitly enable finalized
-	// Accepted Quote verification for the runtime API. They are separate from
-	// Registry state because the two contract types and rollback high-waters
-	// are independent authority domains.
-	EscrowCodeHash       string `json:"escrow_code_hash,omitempty"`
-	EscrowCheckpointPath string `json:"escrow_checkpoint_path,omitempty"`
-	DelegationPath       string `json:"delegation_path"`
+	DelegationPath              string   `json:"delegation_path"`
 
 	// Discovery is stated separately from Transport: refreshing verified
 	// identity and prekeys is route-neutral and does not authorize carrying a
@@ -172,10 +169,15 @@ type Config struct {
 	// separate user's keyring, another machine -- or this check is theatre.
 	OwnerPublicKeyHex string `json:"owner_public_key"`
 
-	// EconomicAuthorities pins the independent keys allowed to issue OpenFox
-	// writer fences. Empty disables autonomous economic messaging; the ordinary
-	// human messaging API remains available.
+	// EconomicAuthorities pins the independent ML-DSA-44 Action Authority
+	// keys allowed to issue OpenFox writer fences. Empty disables autonomous
+	// economic messaging; the ordinary human messaging API remains available.
 	EconomicAuthorities []EconomicAuthorityConfig `json:"economic_authorities,omitempty"`
+	// MLDSA44Verifier pins the verify-only tosctl helper that checks ML-DSA-44
+	// signatures: Action Authority writer fences and actions, and Agent Packet
+	// sender signatures. It is required exactly when EconomicAuthorities or
+	// AgentPacketReceiverSocket is set.
+	MLDSA44Verifier *MLDSA44VerifierConfig `json:"mldsa44_verifier,omitempty"`
 
 	// Admission is the recipient's explicit first-contact policy. Its public
 	// document must hash to the digest in the finalized local delegation; the
@@ -199,13 +201,6 @@ type Config struct {
 	AgentPacketReceiverSocket         string `json:"agent_packet_receiver_socket,omitempty"`
 	AgentPacketReceiverTimeoutSeconds uint64 `json:"agent_packet_receiver_timeout_seconds,omitempty"`
 
-	// A2AReceiverSocket and MCPReceiverSocket are separate fail-closed local
-	// consumption boundaries. Foreign protocol events never fall through to
-	// the general model inbox, including when these receivers are absent.
-	A2AReceiverSocket              string `json:"a2a_receiver_socket,omitempty"`
-	MCPReceiverSocket              string `json:"mcp_receiver_socket,omitempty"`
-	ProtocolReceiverTimeoutSeconds uint64 `json:"protocol_receiver_timeout_seconds,omitempty"`
-
 	// AttachmentAdmission enables daemon-owned fetch, AEAD opening and pinned
 	// scanning. When absent, artifact.encrypted stays reserved and no secret
 	// Reference or capability key is released through the runtime socket.
@@ -217,23 +212,45 @@ type Config struct {
 }
 
 type EconomicAuthorityConfig struct {
-	AuthorityID  string `json:"authority_id"`
+	AuthorityID string `json:"authority_id"`
+	// KeyID is mldsa44:<64 lowercase hex> of the controller key ID.
+	KeyID string `json:"key_id"`
+	// PublicKeyHex is the 1,312-byte ML-DSA-44 public key in lowercase hex.
 	PublicKeyHex string `json:"public_key_hex"`
 }
 
-func (c Config) EconomicAuthorityKeys() (map[string]ed25519.PublicKey, error) {
-	keys := make(map[string]ed25519.PublicKey, len(c.EconomicAuthorities))
+// MLDSA44VerifierConfig names the pinned tosctl helper binary and its
+// lowercase hex SHA-256. It carries no vault, so the helper cannot sign.
+type MLDSA44VerifierConfig struct {
+	Binary string `json:"binary"`
+	SHA256 string `json:"sha256"`
+}
+
+// EconomicAuthorityKeys returns the pinned Action Authority keys. Each key
+// must derive its key ID; an Ed25519 key or key ID is refused.
+func (c Config) EconomicAuthorityKeys() (map[string]economicaction.PinnedAuthority, error) {
+	keys := make(map[string]economicaction.PinnedAuthority, len(c.EconomicAuthorities))
 	last := ""
 	for _, authority := range c.EconomicAuthorities {
-		raw, err := hex.DecodeString(authority.PublicKeyHex)
-		if authority.AuthorityID == "" || len(authority.AuthorityID) > 256 || authority.AuthorityID <= last ||
-			err != nil || len(raw) != ed25519.PublicKeySize || canon.IsZero(raw) {
-			return nil, errors.New("economic_authorities must be strictly sorted and contain valid ed25519 keys")
+		if authority.AuthorityID == "" || len(authority.AuthorityID) > 256 || authority.AuthorityID <= last {
+			return nil, errors.New("economic_authorities must be strictly sorted by a bounded authority_id")
 		}
-		keys[authority.AuthorityID] = ed25519.PublicKey(raw)
+		pin, err := economicaction.ParseConfiguredAuthority(authority.KeyID, authority.PublicKeyHex)
+		if err != nil {
+			return nil, fmt.Errorf("economic_authorities %s: %w", authority.AuthorityID, err)
+		}
+		keys[authority.AuthorityID] = pin
 		last = authority.AuthorityID
 	}
 	return keys, nil
+}
+
+// MLDSA44VerifierHelper builds the verify-only ML-DSA-44 helper.
+func (c Config) MLDSA44VerifierHelper() (*mldsa44.Tosctl, error) {
+	if c.MLDSA44Verifier == nil {
+		return nil, errors.New("mldsa44_verifier is required to verify ML-DSA-44 signatures")
+	}
+	return mldsa44.NewTosctl(mldsa44.TosctlConfig{Binary: c.MLDSA44Verifier.Binary, SHA256: c.MLDSA44Verifier.SHA256})
 }
 
 // ContactDNSConfig authenticates the daemon to a TOS Native DNS gateway.
@@ -773,13 +790,6 @@ func (c Config) AgentPacketReceiverTimeout() time.Duration {
 	return time.Duration(c.AgentPacketReceiverTimeoutSeconds) * time.Second
 }
 
-func (c Config) ProtocolReceiverTimeout() time.Duration {
-	if c.ProtocolReceiverTimeoutSeconds == 0 {
-		return 30 * time.Second
-	}
-	return time.Duration(c.ProtocolReceiverTimeoutSeconds) * time.Second
-}
-
 // Validate enforces what must be true before anything starts.
 func (c Config) Validate() error {
 	if c.Schema != ConfigSchema {
@@ -826,21 +836,6 @@ func (c Config) Validate() error {
 	if c.ChainCheckpointPath != filepath.Join(c.StateDir, "chain.checkpoint") {
 		return errors.New("chain_checkpoint_path must be the daemon-owned state checkpoint")
 	}
-	if c.EscrowCodeHash == "" || c.EscrowCheckpointPath == "" {
-		if c.EscrowCodeHash != "" || c.EscrowCheckpointPath != "" {
-			return errors.New("escrow code hash and checkpoint must be configured together")
-		}
-	} else {
-		const prefix = "tvm-cell-sha256:"
-		raw, err := hex.DecodeString(strings.TrimPrefix(c.EscrowCodeHash, prefix))
-		if !strings.HasPrefix(c.EscrowCodeHash, prefix) || len(raw) != 32 || err != nil || canon.IsZero(raw) {
-			return errors.New("escrow_code_hash must be a non-zero TVM cell digest")
-		}
-		if !filepath.IsAbs(c.EscrowCheckpointPath) || filepath.Clean(c.EscrowCheckpointPath) != c.EscrowCheckpointPath ||
-			c.EscrowCheckpointPath != filepath.Join(c.StateDir, "escrow.checkpoint") {
-			return errors.New("escrow_checkpoint_path must be the daemon-owned escrow checkpoint")
-		}
-	}
 	if !filepath.IsAbs(c.DelegationPath) || filepath.Clean(c.DelegationPath) != c.DelegationPath {
 		return errors.New("delegation_path must be an absolute, clean path")
 	}
@@ -870,8 +865,18 @@ func (c Config) Validate() error {
 	if _, err := c.OwnerKey(); err != nil {
 		return err
 	}
-	if _, err := c.EconomicAuthorityKeys(); err != nil {
+	economicKeys, err := c.EconomicAuthorityKeys()
+	if err != nil {
 		return err
+	}
+	needsVerifier := len(economicKeys) != 0 || c.AgentPacketReceiverSocket != ""
+	if needsVerifier != (c.MLDSA44Verifier != nil) {
+		return errors.New("mldsa44_verifier is required exactly when economic_authorities or agent_packet_receiver_socket is set")
+	}
+	if c.MLDSA44Verifier != nil && (!filepath.IsAbs(c.MLDSA44Verifier.Binary) ||
+		filepath.Clean(c.MLDSA44Verifier.Binary) != c.MLDSA44Verifier.Binary ||
+		!lowercaseSHA256(c.MLDSA44Verifier.SHA256)) {
+		return errors.New("mldsa44_verifier needs an absolute clean binary path and its lowercase hex SHA-256")
 	}
 	if _, known := transports[c.Transport]; !known {
 		return errors.New("transport must be stated explicitly")
@@ -901,34 +906,6 @@ func (c Config) Validate() error {
 		}
 		if timeout := c.AgentPacketReceiverTimeout(); timeout < time.Second || timeout > 5*time.Minute {
 			return errors.New("Agent Packet receiver timeout is outside 1s..5m")
-		}
-	}
-	protocolSockets := []string{c.A2AReceiverSocket, c.MCPReceiverSocket}
-	if c.A2AReceiverSocket == "" && c.MCPReceiverSocket == "" {
-		if c.ProtocolReceiverTimeoutSeconds != 0 {
-			return errors.New("protocol receiver timeout requires a receiver socket")
-		}
-	} else {
-		for _, socket := range protocolSockets {
-			if socket == "" {
-				continue
-			}
-			if !filepath.IsAbs(socket) || filepath.Clean(socket) != socket {
-				return errors.New("protocol receiver socket must be an absolute, clean path")
-			}
-			if socket == c.SocketPath || socket == c.OwnerSocketPath || socket == c.AgentPacketReceiverSocket ||
-				(c.Publication.DeviceSocketPath != "" && socket == c.Publication.DeviceSocketPath) {
-				return errors.New("protocol receiver socket must be independent")
-			}
-			if pathWithin(socket, c.StateDir) {
-				return errors.New("protocol receiver socket must not live inside state_dir")
-			}
-		}
-		if c.A2AReceiverSocket != "" && c.A2AReceiverSocket == c.MCPReceiverSocket {
-			return errors.New("A2A and MCP receiver sockets must be different")
-		}
-		if timeout := c.ProtocolReceiverTimeout(); timeout < time.Second || timeout > 5*time.Minute {
-			return errors.New("protocol receiver timeout is outside 1s..5m")
 		}
 	}
 	if c.AttachmentAdmission != nil {
@@ -975,4 +952,16 @@ func DecodeConfig(raw []byte) (Config, error) {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+func lowercaseSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }

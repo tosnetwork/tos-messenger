@@ -24,6 +24,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/economicaction"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 const (
@@ -90,7 +91,8 @@ type Store struct {
 	doc             journal
 }
 
-func Open(root, carrierID string, maxEntries, maxActorEntries uint32, authorities map[string]ed25519.PublicKey) (*Store, error) {
+func Open(root, carrierID string, maxEntries, maxActorEntries uint32, authorities map[string]economicaction.PinnedAuthority,
+	verifier mldsa44.Verifier) (*Store, error) {
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root || carrierID == "" || maxEntries == 0 || maxEntries > 1_000_000 ||
 		maxActorEntries == 0 || maxActorEntries > maxEntries || len(authorities) == 0 {
 		return nil, errors.New("Messenger Intent Carrier configuration is invalid")
@@ -112,7 +114,7 @@ func Open(root, carrierID string, maxEntries, maxActorEntries uint32, authoritie
 		_ = lock.Close()
 		return nil, err
 	}
-	if store.actions, err = economicaction.Open(root, authorities); err != nil {
+	if store.actions, err = economicaction.Open(root, authorities, verifier); err != nil {
 		_ = lock.Close()
 		return nil, err
 	}

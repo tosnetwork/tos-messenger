@@ -1,33 +1,35 @@
 package economicaction
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
+	"context"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 )
 
 func TestStoreFencesTakeoverAndRecoversExactAction(t *testing.T) {
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	keys := &mldsa44test.Fake{}
+	controller := "authority"
+	keyID, err := mldsa44.ParseKeyIDText(keys.KeyID(controller))
 	if err != nil {
 		t.Fatal(err)
 	}
-	publicKey := privateKey.Public().(ed25519.PublicKey)
 	root := t.TempDir()
-	store, err := Open(root, map[string]ed25519.PublicKey{"authority-1": publicKey})
+	store, err := Open(root, map[string]PinnedAuthority{"authority-1": {KeyID: keyID, PublicKey: keys.PublicKey(controller)}}, keys)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Unix(1_800_000_000, 0).UTC()
 	fence := func(generation uint64) commerce.WriterFence {
-		result, signErr := commerce.SignWriterFence(commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner-1",
+		result, signErr := commerce.SignWriterFence(context.Background(), commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner-1",
 			AgentID: "agent-1", InstanceID: "instance-1", LeaseID: "lease-1", WriterGeneration: generation,
 			IssuedAtUnix: uint64(now.Add(-time.Minute).Unix()), ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()),
-			AuthorityID: "authority-1", Scope: []string{"messenger.contact"}}, privateKey)
+			AuthorityID: "authority-1", Scope: []string{"messenger.contact"}}, keys, controller)
 		if signErr != nil {
 			t.Fatal(signErr)
 		}
@@ -47,7 +49,7 @@ func TestStoreFencesTakeoverAndRecoversExactAction(t *testing.T) {
 		if actionErr != nil {
 			t.Fatal(actionErr)
 		}
-		action, actionErr = commerce.SignAuthorizedAction(action, privateKey)
+		action, actionErr = commerce.SignAuthorizedAction(context.Background(), action, keys.KeyID(controller), keys, controller)
 		if actionErr != nil {
 			t.Fatal(actionErr)
 		}
@@ -72,10 +74,10 @@ func TestStoreFencesTakeoverAndRecoversExactAction(t *testing.T) {
 	if _, err := store.Admit(action2, fence2, fields2, request2, now); err != nil {
 		t.Fatal(err)
 	}
-	equivocatedFence, err := commerce.SignWriterFence(commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner-1",
+	equivocatedFence, err := commerce.SignWriterFence(context.Background(), commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner-1",
 		AgentID: "agent-1", InstanceID: "instance-2", LeaseID: "lease-2", WriterGeneration: 2,
 		IssuedAtUnix: uint64(now.Add(-time.Minute).Unix()), ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()),
-		AuthorityID: "authority-1", Scope: []string{"messenger.contact"}}, privateKey)
+		AuthorityID: "authority-1", Scope: []string{"messenger.contact"}}, keys, controller)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +89,7 @@ func TestStoreFencesTakeoverAndRecoversExactAction(t *testing.T) {
 	if _, err := store.Admit(stale, fence1, staleFields, staleRequest, now); !errors.Is(err, ErrStaleWriter) {
 		t.Fatalf("stale writer was not fenced: %v", err)
 	}
-	reopened, err := Open(root, map[string]ed25519.PublicKey{"authority-1": publicKey})
+	reopened, err := Open(root, map[string]PinnedAuthority{"authority-1": {KeyID: keyID, PublicKey: keys.PublicKey(controller)}}, keys)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +104,7 @@ func TestStoreFencesTakeoverAndRecoversExactAction(t *testing.T) {
 	if submitted, err = reopened.Submit(action2.StableActionID, action2.ExactRequestDigest); err != nil || submitted.State != commerce.ActionSubmitted {
 		t.Fatalf("submission was not durable: %+v %v", submitted, err)
 	}
-	reopened, err = Open(root, map[string]ed25519.PublicKey{"authority-1": publicKey})
+	reopened, err = Open(root, map[string]PinnedAuthority{"authority-1": {KeyID: keyID, PublicKey: keys.PublicKey(controller)}}, keys)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -25,7 +25,10 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/localapi"
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentpacket"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 )
 
 // A real, if trivial, contract code cell. The account binding is recomputed
@@ -111,19 +114,6 @@ func (s packetStates) ResolveAgent(id string) (*nativev1.AgentStateV1, bool, err
 type packetReceiver struct {
 	calls int
 	fail  bool
-}
-
-type testProtocolReceiver struct {
-	events []envelope.Event
-	fail   bool
-}
-
-func (r *testProtocolReceiver) Receive(_ context.Context, event envelope.Event) error {
-	r.events = append(r.events, event)
-	if r.fail {
-		return errors.New("protocol consumer unavailable")
-	}
-	return nil
 }
 
 func (r *packetReceiver) Receive(context.Context, agentpacket.Packet) error {
@@ -505,7 +495,30 @@ func TestConfigurationMustBeStated(t *testing.T) {
 			GenerationLifetimeSeconds: 120, ReplenishBeforeSeconds: 30, CheckIntervalSeconds: 10,
 		}
 	}
+	economicKeys := &mldsa44test.Fake{}
+	economicKey := hex.EncodeToString(economicKeys.PublicKey("economic"))
+	verifier := &MLDSA44VerifierConfig{Binary: "/usr/local/libexec/tos-service/tosctl", SHA256: strings.Repeat("a", 64)}
+	economic := func(keyID, key string) func(*Config) {
+		return func(c *Config) {
+			c.EconomicAuthorities = []EconomicAuthorityConfig{{AuthorityID: "authority-1", KeyID: keyID, PublicKeyHex: key}}
+			c.MLDSA44Verifier = verifier
+		}
+	}
 	cases := map[string]func(*Config){
+		"ed25519 economic key ID":          economic("ed25519:"+strings.Repeat("ab", 32), economicKey),
+		"ed25519-length economic key":      economic(economicKeys.KeyID("economic"), strings.Repeat("ab", 32)),
+		"economic key of another key ID":   economic(economicKeys.KeyID("other"), economicKey),
+		"upper-case economic key ID":       economic(strings.ToUpper(economicKeys.KeyID("economic")), economicKey),
+		"economic authorities, no helper":  func(c *Config) { economic(economicKeys.KeyID("economic"), economicKey)(c); c.MLDSA44Verifier = nil },
+		"helper without any ML-DSA-44 use": func(c *Config) { c.MLDSA44Verifier = verifier },
+		"helper with an upper-case pin": func(c *Config) {
+			economic(economicKeys.KeyID("economic"), economicKey)(c)
+			c.MLDSA44Verifier = &MLDSA44VerifierConfig{Binary: verifier.Binary, SHA256: strings.Repeat("A", 64)}
+		},
+		"helper with a relative path": func(c *Config) {
+			economic(economicKeys.KeyID("economic"), economicKey)(c)
+			c.MLDSA44Verifier = &MLDSA44VerifierConfig{Binary: "tosctl", SHA256: verifier.SHA256}
+		},
 		"no schema":                      func(c *Config) { c.Schema = "" },
 		"relative state":                 func(c *Config) { c.StateDir = "state" },
 		"relative socket":                func(c *Config) { c.SocketPath = "run/messenger.sock" },
@@ -519,19 +532,9 @@ func TestConfigurationMustBeStated(t *testing.T) {
 		"insecure remote chain endpoint": func(c *Config) { c.ChainEndpoints[0] = "http://rpc.example.net" },
 		"unselected native registry":     func(c *Config) { c.NativeRegistryCodeHash = "tvm-cell-sha256:" + strings.Repeat("a", 64) },
 		"checkpoint outside state":       func(c *Config) { c.ChainCheckpointPath = filepath.Join(filepath.Dir(c.StateDir), "other.checkpoint") },
-		"escrow hash without checkpoint": func(c *Config) { c.EscrowCodeHash = "tvm-cell-sha256:" + strings.Repeat("c", 64) },
-		"escrow checkpoint without hash": func(c *Config) { c.EscrowCheckpointPath = filepath.Join(c.StateDir, "escrow.checkpoint") },
-		"bad escrow hash": func(c *Config) {
-			c.EscrowCodeHash = "sha256:" + strings.Repeat("c", 64)
-			c.EscrowCheckpointPath = filepath.Join(c.StateDir, "escrow.checkpoint")
-		},
-		"escrow checkpoint outside state": func(c *Config) {
-			c.EscrowCodeHash = "tvm-cell-sha256:" + strings.Repeat("c", 64)
-			c.EscrowCheckpointPath = filepath.Join(filepath.Dir(c.StateDir), "escrow.checkpoint")
-		},
-		"relative delegation":       func(c *Config) { c.DelegationPath = "delegation.json" },
-		"no discovery mode":         func(c *Config) { c.Discovery.Mode = "" },
-		"unused disabled discovery": func(c *Config) { c.Discovery.DHTGlobalConfigPath = "/tmp/global.json" },
+		"relative delegation":            func(c *Config) { c.DelegationPath = "delegation.json" },
+		"no discovery mode":              func(c *Config) { c.Discovery.Mode = "" },
+		"unused disabled discovery":      func(c *Config) { c.Discovery.DHTGlobalConfigPath = "/tmp/global.json" },
 		"relative dht config": func(c *Config) {
 			enableDiscovery(c)
 			c.Discovery.DHTGlobalConfigPath = "global.json"
@@ -625,24 +628,6 @@ func TestConfigurationMustBeStated(t *testing.T) {
 		"packet receiver timeout too long": func(c *Config) {
 			c.AgentPacketReceiverSocket = filepath.Join(filepath.Dir(c.SocketPath), "provider.sock")
 			c.AgentPacketReceiverTimeoutSeconds = 301
-		},
-		"protocol timeout without socket": func(c *Config) { c.ProtocolReceiverTimeoutSeconds = 30 },
-		"relative A2A receiver":           func(c *Config) { c.A2AReceiverSocket = "run/a2a.sock" },
-		"protocol receiver in state": func(c *Config) {
-			c.MCPReceiverSocket = filepath.Join(c.StateDir, "mcp.sock")
-		},
-		"protocol receiver shares runtime": func(c *Config) { c.A2AReceiverSocket = c.SocketPath },
-		"protocol receivers share socket": func(c *Config) {
-			c.A2AReceiverSocket = filepath.Join(filepath.Dir(c.SocketPath), "protocol.sock")
-			c.MCPReceiverSocket = c.A2AReceiverSocket
-		},
-		"protocol receiver shares packet socket": func(c *Config) {
-			c.AgentPacketReceiverSocket = filepath.Join(filepath.Dir(c.SocketPath), "protocol.sock")
-			c.A2AReceiverSocket = c.AgentPacketReceiverSocket
-		},
-		"protocol receiver timeout too long": func(c *Config) {
-			c.MCPReceiverSocket = filepath.Join(filepath.Dir(c.SocketPath), "mcp.sock")
-			c.ProtocolReceiverTimeoutSeconds = 301
 		},
 		"fast sweep":      func(c *Config) { c.SweepIntervalSeconds = 0; c.SweepIntervalSeconds = 0 },
 		"short retention": func(c *Config) { c.RetentionSeconds = 60 },
@@ -816,20 +801,6 @@ func TestExampleConfigurationIsValid(t *testing.T) {
 	}
 }
 
-func TestDaemonAssemblesOptionalFinalizedQuoteVerifier(t *testing.T) {
-	config := testConfig(t)
-	config.EscrowCodeHash = "tvm-cell-sha256:" + strings.Repeat("c", 64)
-	config.EscrowCheckpointPath = filepath.Join(config.StateDir, "escrow.checkpoint")
-	instance, err := openTest(config, nil)
-	if err != nil {
-		t.Fatalf("open with Quote verifier: %v", err)
-	}
-	defer instance.Close()
-	if instance.quoteResolver == nil {
-		t.Fatal("configured finalized Quote verifier did not reach the runtime API")
-	}
-}
-
 // The two sockets carry different capabilities, and the runtime socket has no
 // approval operations on it at all.
 func TestRuntimeAndOwnerSocketsAreSeparate(t *testing.T) {
@@ -868,9 +839,16 @@ func TestAgentPacketWorkerRetriesProviderAndCompletesDurably(t *testing.T) {
 	config := testConfig(t)
 	clock := time.Unix(1_900_000_000, 0)
 	sender := "agent_" + strings.Repeat("1", 64)
-	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x51}, ed25519.SeedSize))
+	keys := &mldsa44test.Fake{}
+	key := "sender"
+	keyID, err := mldsa44.ParseKeyIDText(keys.KeyID(key))
+	if err != nil {
+		t.Fatal(err)
+	}
 	states := packetStates{
-		sender:         {AgentId: sender, Policy: &nativev1.ControllerPolicyV1{Controllers: []*nativev1.ControllerV1{{Ed25519PublicKey: key.Public().(ed25519.PublicKey)}}}},
+		sender: {AgentId: sender, Policy: &nativev1.ControllerPolicyV1{Threshold: 1, RecoveryThreshold: 1,
+			Controllers: []*nativev1.ControllerV1{{KeyId: keys.KeyID(key), Mldsa44PublicKey: keys.PublicKey(key),
+				Weight: 1, PurposeMask: 15, Recovery: true}}}},
 		config.AgentID: {AgentId: config.AgentID},
 	}
 	journal, err := eventlog.Open(config.StateDir)
@@ -879,18 +857,18 @@ func TestAgentPacketWorkerRetriesProviderAndCompletesDurably(t *testing.T) {
 	}
 	receiver := &packetReceiver{fail: true}
 	bridge, err := agentpacketbridge.New(agentpacketbridge.Config{
-		Resolver: states, Journal: journal, Receiver: receiver, RecipientAgentID: config.AgentID,
+		Resolver: states, Verifier: keys, Journal: journal, Receiver: receiver, RecipientAgentID: config.AgentID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var nonce [32]byte
 	copy(nonce[:], bytes.Repeat([]byte{0x27}, len(nonce)))
-	packet, err := agentpacket.Sign(agentpacket.Packet{
-		SenderAgentID: sender, RecipientAgentID: config.AgentID,
+	packet, err := agentpacket.Sign(context.Background(), keys, key, agentpacket.Packet{
+		SenderAgentID: sender, RecipientAgentID: config.AgentID, SenderKeyID: keyID,
 		CapabilityID: "cap_" + strings.Repeat("3", 64), Sequence: 1, Nonce: nonce,
 		Payload: []byte("execute once"), CreatedAtUnix: uint64(clock.Unix()),
-	}, key)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -948,90 +926,12 @@ func TestAgentPacketWorkerRetriesProviderAndCompletesDurably(t *testing.T) {
 	defer reopened.Close()
 	afterRestart := &packetReceiver{}
 	restartedBridge, _ := agentpacketbridge.New(agentpacketbridge.Config{
-		Resolver: states, Journal: reopened, Receiver: afterRestart, RecipientAgentID: config.AgentID,
+		Resolver: states, Verifier: keys, Journal: reopened, Receiver: afterRestart, RecipientAgentID: config.AgentID,
 	})
 	restarted := &Daemon{config: config, journal: reopened, agentPackets: restartedBridge, now: func() time.Time { return clock }}
 	restarted.sweepAgentPackets(context.Background())
 	if afterRestart.calls != 0 {
 		t.Fatal("completed Agent Packet reached the provider again after restart")
-	}
-}
-
-func TestProtocolWorkerSeparatesProfilesRetriesAndCompletesDurably(t *testing.T) {
-	config := testConfig(t)
-	clock := time.Unix(1_900_000_000, 0)
-	journal, err := eventlog.Open(config.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a2a := &testProtocolReceiver{fail: true}
-	mcp := &testProtocolReceiver{}
-	accept := func(kind string, body payload.Payload, created uint64) envelope.Event {
-		t.Helper()
-		content, encodeErr := payload.Encode(body)
-		if encodeErr != nil {
-			t.Fatal(encodeErr)
-		}
-		event, eventErr := envelope.NewEvent(envelope.Event{
-			Network: config.Network(), ConversationID: "conv_" + strings.Repeat("8", 64),
-			SenderAgentID: "agent_" + strings.Repeat("1", 64), SenderEndpointID: "mep_" + strings.Repeat("6", 64),
-			SenderDeviceID: "dev_" + strings.Repeat("7", 64), CreatedAtUnix: created, Kind: kind, Content: content,
-		})
-		if eventErr != nil {
-			t.Fatal(eventErr)
-		}
-		wire, wireErr := envelope.EncodeEventJSON(event)
-		if wireErr != nil {
-			t.Fatal(wireErr)
-		}
-		if _, _, acceptErr := journal.Accept(eventlog.Entry{
-			EventID: event.EventID, SenderEndpointID: event.SenderEndpointID, ConversationID: event.ConversationID,
-			Payload: wire, Admission: eventlog.AdmissionAdmitted, ReceivedAtUnix: uint64(clock.Unix()),
-		}); acceptErr != nil {
-			t.Fatal(acceptErr)
-		}
-		return event
-	}
-	a2aEvent := accept("a2a.message", payload.A2AMessage{Foreign: payload.Foreign{
-		Protocol: "a2a", Version: "1", Body: []byte(`{"message":"work"}`),
-	}}, uint64(clock.Unix()))
-	mcpEvent := accept("mcp.call", payload.MCPCall{Foreign: payload.Foreign{
-		Protocol: "mcp", Version: "1", Body: []byte(`{"method":"read"}`),
-	}}, uint64(clock.Unix()+1))
-	reported := &recorder{}
-	daemon := &Daemon{config: config, journal: journal, a2aReceiver: a2a, mcpReceiver: mcp,
-		observer: reported, now: func() time.Time { return clock }}
-	daemon.sweepProtocolEvents(context.Background())
-	if len(a2a.events) != 1 || a2a.events[0].EventID != a2aEvent.EventID || len(mcp.events) != 1 || mcp.events[0].EventID != mcpEvent.EventID {
-		t.Fatalf("protocol receivers crossed or missed events: a2a=%v mcp=%v", a2a.events, mcp.events)
-	}
-	if len(reported.failures) != 1 {
-		t.Fatalf("A2A receiver failure was not reported: %v", reported.failures)
-	}
-	a2a.fail = false
-	clock = clock.Add(config.ProtocolReceiverTimeout() + 6*time.Second)
-	daemon.sweepProtocolEvents(context.Background())
-	if len(a2a.events) != 2 || len(mcp.events) != 1 {
-		t.Fatalf("retry or at-most-once completion failed: a2a=%d mcp=%d", len(a2a.events), len(mcp.events))
-	}
-	if pending, listErr := journal.ListPending(clock, 0); listErr != nil || len(pending) != 0 {
-		t.Fatalf("completed protocol events remained pending: %+v err=%v", pending, listErr)
-	}
-	if err := journal.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := eventlog.Open(config.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	restartedA2A := &testProtocolReceiver{}
-	restartedMCP := &testProtocolReceiver{}
-	restarted := &Daemon{config: config, journal: reopened, a2aReceiver: restartedA2A,
-		mcpReceiver: restartedMCP, now: func() time.Time { return clock }}
-	restarted.sweepProtocolEvents(context.Background())
-	if len(restartedA2A.events) != 0 || len(restartedMCP.events) != 0 {
-		t.Fatal("completed protocol event reached a consumer after restart")
 	}
 }
 
@@ -1104,5 +1004,24 @@ func TestHistoryWorkerAppliesOnlyToDisplayHistoryAndCompletesDurably(t *testing.
 	history, err = reopened.History(conversation, 0)
 	if err != nil || len(history) != 1 {
 		t.Fatalf("restart duplicated or lost history: %+v err=%v", history, err)
+	}
+}
+
+func TestEconomicAuthoritiesPinMLDSA44KeysWithTheVerifyOnlyHelper(t *testing.T) {
+	keys := &mldsa44test.Fake{}
+	config := testConfig(t)
+	config.EconomicAuthorities = []EconomicAuthorityConfig{{AuthorityID: "authority-1", KeyID: keys.KeyID("economic"),
+		PublicKeyHex: hex.EncodeToString(keys.PublicKey("economic"))}}
+	config.MLDSA44Verifier = &MLDSA44VerifierConfig{Binary: "/usr/local/libexec/tos-service/tosctl", SHA256: strings.Repeat("a", 64)}
+	if err := config.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	pins, err := config.EconomicAuthorityKeys()
+	if err != nil || len(pins) != 1 || mldsa44.KeyIDText(pins["authority-1"].KeyID) != keys.KeyID("economic") {
+		t.Fatalf("pins=%v err=%v", pins, err)
+	}
+	config.EconomicAuthorities[0].KeyID = "ed25519:" + strings.Repeat("ab", 32)
+	if _, err := config.EconomicAuthorityKeys(); !errors.Is(err, commerce.ErrEd25519ActionAuthority) {
+		t.Fatalf("an Ed25519 key ID was not refused with the Ed25519 diagnostic: %v", err)
 	}
 }

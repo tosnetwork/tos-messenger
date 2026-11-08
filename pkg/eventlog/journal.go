@@ -316,7 +316,7 @@ func openJournalAt(root string, quota Quota) (*Journal, error) {
 	if err := ensureCanonicalStateMarker(root); err != nil {
 		return nil, err
 	}
-	for _, name := range []string{inboundDir, outboundDir, compositionDir, moderationDir, historySyncDir, directConversationDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, devicePrekeyDir, prekeyContributionDir, prekeyPublicationDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, escrowLocatorDir, agentPacketDir, admissionInviteDir} {
+	for _, name := range []string{inboundDir, outboundDir, compositionDir, moderationDir, historySyncDir, directConversationDir, sessionDir, approvalDir, mandateDir, budgetDir, mandateBudgetDir, negotiationDir, devicePrekeyDir, prekeyContributionDir, prekeyPublicationDir, deviceDir, roomDir, mlsDir, executionDir, toolExecutionDir, agentPacketDir, admissionInviteDir} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
 			return nil, errors.New("create event journal directory")
 		}
