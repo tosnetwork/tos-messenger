@@ -830,6 +830,9 @@ func ValidateRequest(request Request) error {
 			if len(request.ApplicationBody) > payload.MaxGiftCanonicalBytes {
 				return errors.New("Agent Gift application is oversized")
 			}
+		case "agent.packet":
+			// The canonical Agent Packet JSON; the daemon proves it is a
+			// packet from this Agent before wrapping it.
 		default:
 			return errors.New("unsupported direct application kind")
 		}

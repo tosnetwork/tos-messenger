@@ -201,7 +201,12 @@ nobody made:
   admitted `agent.packet` Events are re-verified against finalized Agent state,
   durably nonce-claimed, and sent to the independently verifying OpenFox
   provider. They are excluded from the general runtime inbox, so packet bytes
-  cannot become model instructions by taking the ordinary message path; and
+  cannot become model instructions by taking the ordinary message path. The
+  runtime sends its own Agent Packets with `messages.send-direct-application`
+  and kind `agent.packet`; the daemon admits only a canonical packet naming
+  this Agent as sender, and only when the delegation's
+  `allowed_outbound_event_classes` includes `agent.packet`, which paid work on
+  the Service Actor rail therefore requires; and
 - optional, independent owner-private **A2A and MCP receiver sockets**. Their
   protocol Events are always excluded from general runtime listing and claim,
   even when no receiver exists. Configured receivers get the complete
