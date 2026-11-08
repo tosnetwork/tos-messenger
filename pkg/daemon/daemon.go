@@ -32,6 +32,7 @@ import (
 	"github.com/tosnetwork/tos-messenger/pkg/payload"
 	"github.com/tosnetwork/tos-messenger/pkg/prekeyapi"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
+	"github.com/tosnetwork/tos-service-protocol/pkg/agentpacket"
 	protocolcodec "github.com/tosnetwork/tos-service-protocol/pkg/codec"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativeclient"
 )
@@ -190,6 +191,19 @@ func (d *Daemon) SendDirectApplication(ctx context.Context, input, kind string, 
 		value = payload.GiftAddressResponse{CanonicalResponse: canonical}
 	case "agent.gift.signed-boc-offer":
 		value = payload.GiftSignedBOCOffer{CanonicalOffer: canonical}
+	case "agent.packet":
+		packet, err := agentpacket.DecodeJSON(canonical)
+		if err != nil {
+			return localapi.DirectMessageResult{}, errors.New("Agent Packet does not decode")
+		}
+		if packet.SenderAgentID != d.config.AgentID {
+			return localapi.DirectMessageResult{}, errors.New("Agent Packet does not name the sending Agent")
+		}
+		reencoded, err := agentpacket.EncodeJSON(packet)
+		if err != nil || !bytes.Equal(reencoded, canonical) {
+			return localapi.DirectMessageResult{}, errors.New("Agent Packet is not canonical JSON")
+		}
+		value = payload.AgentPacketMessage{Foreign: payload.Foreign{Protocol: "agentpacket", Version: "1", Body: canonical}}
 	case "intent.application":
 		application, err := commerce.DecodeIntentApplication(canonical)
 		if err != nil || application.ApplicantAgentID != d.config.AgentID {

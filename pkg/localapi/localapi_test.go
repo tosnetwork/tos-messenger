@@ -330,6 +330,35 @@ func TestRuntimeSendsOnlyBoundedGiftApplicationWithoutRouteAuthority(t *testing.
 	}
 }
 
+func TestRuntimeSendsBoundedAgentPacketApplication(t *testing.T) {
+	h := newHarness(t)
+	eventID := "evt_" + strings.Repeat("d", 64)
+	sender := &fixedDirectMessageSender{result: DirectMessageResult{AgentID: senderID,
+		ConversationID: convoID, EventID: eventID, Readiness: "queued"}}
+	h.server.config.DirectMessageSender = sender
+	body := bytes.Repeat([]byte{'p'}, payload.MaxAgreementPromotionBytes)
+	request := Request{Op: OpSendDirectApplication, Recipient: senderID, ApplicationKind: "agent.packet",
+		ApplicationBody: body, IdempotencyKey: "idem_" + strings.Repeat("e", 64), ExpiresAtUnix: baseUnix + 600}
+	response := h.call(t, request)
+	if !response.OK || response.EventID != eventID || sender.mediaType != "agent.packet" || sender.body != string(body) {
+		t.Fatalf("send direct Agent Packet: response=%+v", response)
+	}
+	for name, mutate := range map[string]func(*Request){
+		"oversized": func(r *Request) { r.ApplicationBody = append(append([]byte(nil), body...), 'p') },
+		"empty":     func(r *Request) { r.ApplicationBody = nil },
+		"room":      func(r *Request) { r.RoomID = "room_" + strings.Repeat("1", 64) },
+		"text":      func(r *Request) { r.Body = "packet from model" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := request
+			mutate(&candidate)
+			if _, err := EncodeRequest(candidate); err == nil {
+				t.Fatal("invalid Agent Packet application was accepted")
+			}
+		})
+	}
+}
+
 func TestRuntimeRepliesFromAuthenticatedEventWithoutLowLevelAuthority(t *testing.T) {
 	h := newHarness(t)
 	sourceEvent := "evt_" + strings.Repeat("a", 64)
